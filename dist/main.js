@@ -252,6 +252,111 @@ function findBasepairs(min_length = 0) {
     });
 }
 ;
+function findBasepairsOptimized(min_length = 0) {
+    const CUTOFF_DIST = 0.6; // From your code
+    const CELL_SIZE = 0.7; // Slightly larger than cutoff
+    systems.forEach(system => {
+        if (system.checkedForBasepairs)
+            return;
+        // 1. Flatten all valid nucleotides into a single list
+        // This avoids nested looping through strands later
+        let allNucs = [];
+        system.strands.forEach(strand => {
+            if (strand.getLength() >= min_length && strand.isNucleicAcid()) {
+                strand.forEach(e => {
+                    if (e instanceof Nucleotide)
+                        allNucs.push(e);
+                });
+            }
+        });
+        // 2. Build the Spatial Grid
+        // Map Key: "x,y,z" coordinate of the cell
+        // Map Value: Array of nucleotides in that cell
+        const grid = new Map();
+        // Helper to get grid key from position
+        const getGridKey = (pos) => {
+            const x = Math.floor(pos.x / CELL_SIZE);
+            const y = Math.floor(pos.y / CELL_SIZE);
+            const z = Math.floor(pos.z / CELL_SIZE);
+            return `${x},${y},${z}`;
+        };
+        allNucs.forEach(n => {
+            const pos = n.getInstanceParameter3("nsOffsets");
+            n._cachedPos = pos; // Cache position to avoid re-fetching
+            n._cachedKey = getGridKey(pos);
+            if (!grid.has(n._cachedKey)) {
+                grid.set(n._cachedKey, []);
+            }
+            grid.get(n._cachedKey).push(n);
+        });
+        // 3. Find Pairs using the Grid
+        allNucs.forEach(curr => {
+            if (curr.pair)
+                return; // Already paired? Skip.
+            let bestCandidate = null;
+            let bestDist = CUTOFF_DIST;
+            const currPos = curr._cachedPos;
+            // Calculate current cell coordinates
+            const cx = Math.floor(currPos.x / CELL_SIZE);
+            const cy = Math.floor(currPos.y / CELL_SIZE);
+            const cz = Math.floor(currPos.z / CELL_SIZE);
+            // 4. Iterate ONLY through neighbor cells (3x3x3 area)
+            // This reduces checks from ~10,000 to ~20-50 per nucleotide
+            for (let x = -1; x <= 1; x++) {
+                for (let y = -1; y <= 1; y++) {
+                    for (let z = -1; z <= 1; z++) {
+                        const neighborKey = `${cx + x},${cy + y},${cz + z}`;
+                        const cellNucs = grid.get(neighborKey);
+                        if (!cellNucs)
+                            continue;
+                        // Check candidates in this cell
+                        for (let other of cellNucs) {
+                            if (curr === other)
+                                continue; // Don't pair with self
+                            // --- Original Logic from findPair() starts here ---
+                            // 1. Topology Check (No neighbors)
+                            if (curr.n3 === other || curr.n5 === other)
+                                continue;
+                            // 2. Complementary Rule Check
+                            // (Combined your boolean logic for readability)
+                            const typeSum = curr.getTypeNumber() + other.getTypeNumber();
+                            const isWatsonCrick = (typeSum % 3 == 0) && (curr.getTypeNumber() !== other.getTypeNumber());
+                            let isWobble = false;
+                            if (curr.isRNA || other.isRNA) { // Assuming isRNA is on the nuc
+                                const t1 = curr.type;
+                                const t2 = other.type;
+                                isWobble = (t1 == 'G' && t2 == 'U') || (t1 == 'U' && t2 == 'G');
+                            }
+                            if (isWatsonCrick || isWobble) {
+                                // 3. Distance Check
+                                const dist = other._cachedPos.distanceTo(currPos);
+                                if (dist < bestDist) {
+                                    // 4. Orientation Check
+                                    const orient = other.getA1().dot(curr.getA1());
+                                    if (orient < -0.85) {
+                                        bestCandidate = other;
+                                        bestDist = dist;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Apply the pair if found
+            if (bestCandidate) {
+                curr.pair = bestCandidate;
+                bestCandidate.pair = curr;
+            }
+        });
+        // Cleanup temporary cache props if you want strictly clean objects
+        allNucs.forEach(n => {
+            delete n._cachedPos;
+            delete n._cachedKey;
+        });
+        system.checkedForBasepairs = true;
+    });
+}
 // Utility function to pick a random element from list
 function randomChoice(l) {
     return l[Math.floor(Math.random() * l.length)];
