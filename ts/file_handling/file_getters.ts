@@ -103,6 +103,9 @@ function handleMessage(data) {
         return
     }
 
+    // else if (data.message === 'scadnano_drop') {
+    //     _handleScadnanoDrop(data);
+    // }
     else {
         console.log(data.message, "is not a recognized message")
         return

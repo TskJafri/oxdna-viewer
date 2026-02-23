@@ -1,17 +1,34 @@
 /// <reference path="../typescript_definitions/index.d.ts" />
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
+/*
 // for ease of use, and to prevent dumb mistakes as I code and test things out, here is exactly the commands to use this in console:
-// findBasepairs3(); // use 3 because there are 2 versions of findBasepairs, and 3 is the fastest. Dont ask why i named it that.
-// honda.dropIntraStrandPairs();
-// let {partials, fishies} = honda.findHelixPartials(elements, 2);
-// let {ssdna, deadfishies, longssScaffold} = honda.ssdnaPartials(fishies);
-// let ssScaffold = honda.longssScaffoldfunc(longssScaffold, deadfishies);
-// let {helices, murdered, binders, binder2, disconnected, unhandled} = honda.generateHelix(partials, ssdna, ssScaffold, deadfishies);
+findBasepairs3(); // use 3 because there are 2 versions of findBasepairs, and 3 is the fastest. Dont ask why i named it that.
+honda.dropIntraStrandPairs();
+let {partials, fishies} = honda.findHelixPartials(elements, 2);
+let {ssdna, deadfishies, longssScaffold} = honda.ssdnaPartials(fishies);
+let ssScaffold = honda.longssScaffoldfunc(longssScaffold, deadfishies);
+let {helices, murdered, binders, binder2, disconnected, unhandled} = honda.generateHelix(partials, ssdna, ssScaffold, deadfishies);
 // and helices are what you want!
 // This code has been completed (polishing required but sure).
 // After running this, check for helix.flat().length == elements.size
 // If false, then something went wrong! RIP.
+*/
+/*
+// Check for double-pairing or cross-pairing.
+let pairTally = new Map();
+let overloadedNucleotides = [];
+elements.forEach(nt=>{
+    let targetPairId = nt.pair;
+    if (targetPairId !== undefined && targetPairId !== null) {
+        let currentCount = pairTally.get(targetPairId) || 0;
+        pairTally.set(targetPairId, currentCount + 1);
+        if (currentCount + 1 === 2) {
+            overloadedNucleotides.push(targetPairId);
+        }
+    }
+})
+*/
 // For even easier use, just run:
 // let helices = await honda.findHelices(elements, 2);
 var honda;
@@ -1030,8 +1047,7 @@ var honda;
     // 	let ssScaffold = longssScaffoldfunc(longssScaffold);
     // }
     async function findHelices(inputMap, tolerance = 2) {
-        // await view.longCalculation(async() => {return await findBasepairsOptimized()}, 'Finding basepairs...');
-        findBasepairsOptimized();
+        findBasepairsOptim2();
         dropIntraStrandPairs();
         // ok now we can do the rest of the stuff.
         let { partials, fishies } = findHelixPartials(inputMap, tolerance);

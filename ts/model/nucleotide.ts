@@ -211,7 +211,7 @@ abstract class Nucleotide extends BasicElement {
 
     findPair(): Nucleotide {
         let bestCandidate = null;
-        let bestDist = 0.6;
+        let bestDist = 0.65;
         let thisPos = this.getInstanceParameter3("nsOffsets");
         let sys = this.getSystem();
         

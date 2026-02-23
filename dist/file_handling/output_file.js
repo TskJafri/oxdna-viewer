@@ -337,6 +337,26 @@ function makeSequenceFile() {
     }
     makeTextFile("sequences.csv", seqTxts.join("\n"));
 }
+async function makeScadnanoJsonFile(name) {
+    try {
+        const nucleotideElements = new Map();
+        elements.forEach((element, id) => {
+            if (element instanceof Nucleotide) {
+                nucleotideElements.set(id, element);
+            }
+        });
+        const helices = await honda.findHelices(nucleotideElements, 3);
+        const { grid, binderHelices } = toscad.setGrid(helices);
+        toscad.directionAlign2(grid);
+        toscad.alignGridPrim(grid, binderHelices);
+        const scadnano = toscad.buildScadnano2(grid, helices);
+        const fileName = name ? `${name}.sc` : "output.sc";
+        makeTextFile(fileName, JSON.stringify(scadnano, null, 2));
+    }
+    catch (err) {
+        notify(`Scadnano export failed: ${err}`, "alert");
+    }
+}
 function makeOxViewJsonFile(name, space) {
     let file_name = name ? name + ".oxview" : "output.oxview";
     makeTextFile(file_name, JSON.stringify({

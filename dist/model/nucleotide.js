@@ -176,7 +176,7 @@ class Nucleotide extends BasicElement {
     }
     findPair() {
         let bestCandidate = null;
-        let bestDist = 0.6;
+        let bestDist = 0.65;
         let thisPos = this.getInstanceParameter3("nsOffsets");
         let sys = this.getSystem();
         let strandCount = sys.strands.length;

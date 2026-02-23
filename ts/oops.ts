@@ -283,9 +283,8 @@ function findBasepairs(min_length=0) {
     });
 };
 
-// This one includes the A2 angle check. More complicated, but if there's cross-pairing or multi-pairing, then the code also checks A2 vectors, whose dot must be >0.85.
 function findBasepairsOptimized(min_length = 0) {
-    const CUTOFF_DIST = 0.65; // From your code
+    const CUTOFF_DIST = 0.62; // From your code
     const CELL_SIZE = 0.7;   // Slightly larger than cutoff
     const CUTOFF_A1 = -0.85;
     const CUTOFF_A2 = 0.85;
@@ -338,6 +337,7 @@ function findBasepairsOptimized(min_length = 0) {
             if (curr.pair) return; // Already paired? Skip.
 
             let bestCandidate = null;
+            let bestA2 = -Infinity;
             let bestDist = CUTOFF_DIST;
             let bestOrient = 1;
             const EPS = 1e-9;
@@ -361,6 +361,7 @@ function findBasepairsOptimized(min_length = 0) {
                         // Check candidates in this cell
                         for (let other of cellNucs) {
                             if (curr === other) continue; // Don't pair with self
+                            if (other.pair && other.pair !== curr) continue; // Don't steal an already claimed partner
                             
                             // --- Original Logic from findPair() starts here ---
                             
@@ -387,12 +388,21 @@ function findBasepairsOptimized(min_length = 0) {
                                 // 4. A1 Orientation gate
                                 const orient = other.getA1().dot(curr.getA1());
                                 if (orient < CUTOFF_A1) {
-                                    // Base selection (no A2 competition unless this target is contested)
-                                    const isBetterDist = dist < bestDist - EPS;
-                                    const isSameDist = Math.abs(dist - bestDist) <= EPS;
-                                    const isBetterOrientTieBreak = isSameDist && orient < bestOrient;
-                                    if (isBetterDist || isBetterOrientTieBreak) {
+                                    // 5. A2 Orientation gate
+                                    const a2dot = other.getA2().dot(curr.getA2());
+                                    if (a2dot <= CUTOFF_A2) continue;
+
+                                    // Competition rule:
+                                    // among candidates passing distance + A1 + A2, choose highest A2 dot.
+                                    const hasBetterA2 = a2dot > bestA2 + EPS;
+                                    const sameA2 = Math.abs(a2dot - bestA2) <= EPS;
+                                    const betterDistTieBreak = sameA2 && dist < bestDist - EPS;
+                                    const sameDist = Math.abs(dist - bestDist) <= EPS;
+                                    const betterOrientFinalTieBreak = sameA2 && sameDist && orient < bestOrient;
+
+                                    if (hasBetterA2 || betterDistTieBreak || betterOrientFinalTieBreak) {
                                         bestCandidate = other;
+                                        bestA2 = a2dot;
                                         bestDist = dist;
                                         bestOrient = orient;
                                     }
@@ -404,35 +414,9 @@ function findBasepairsOptimized(min_length = 0) {
             }
 
             // Apply the pair if found
-            if (bestCandidate) {
-                const incumbent = bestCandidate.pair;
-
-                // No competition on target: pair directly.
-                if (!incumbent || incumbent === curr) {
-                    curr.pair = bestCandidate;
-                    bestCandidate.pair = curr;
-                } else {
-                    // Competition case only:
-                    // if multiple nucleotides target the same partner, require A2 cutoff
-                    // and select the nucleotide with higher A2 dot product.
-                    const currA2 = bestCandidate.getA2().dot(curr.getA2());
-                    const incumbentA2 = bestCandidate.getA2().dot(incumbent.getA2());
-                    const currPassA2 = currA2 > CUTOFF_A2;
-                    const incumbentPassA2 = incumbentA2 > CUTOFF_A2;
-
-                    let currWins = false;
-                    if (currPassA2 && !incumbentPassA2) {
-                        currWins = true;
-                    } else if (currPassA2 && incumbentPassA2) {
-                        currWins = currA2 > incumbentA2 + EPS;
-                    }
-
-                    if (currWins) {
-                        incumbent.pair = null;
-                        curr.pair = bestCandidate;
-                        bestCandidate.pair = curr;
-                    }
-                }
+            if (bestCandidate && (!bestCandidate.pair || bestCandidate.pair === curr)) {
+                curr.pair = bestCandidate;
+                bestCandidate.pair = curr;
             }
         });
 
@@ -445,159 +429,6 @@ function findBasepairsOptimized(min_length = 0) {
         system.checkedForBasepairs = true;
     });
 }
-
-// Variant of findBasepairsOptimized:
-// in conflict cases (multiple nucleotides competing for the same target),
-// choose the challenger with the LOWEST RMSD score.
-function findBasepairsOptim2(min_length = 0) {
-    const CUTOFF_DIST = 0.65;
-    const CELL_SIZE = 0.7;
-    const CUTOFF_A1 = -0.85;
-
-    // Set to false (or comment out) to exclude A2 term from RMSD scoring.
-    // const USE_A2_IN_RMSD = false;
-
-    systems.forEach(system => {
-        if (system.checkedForBasepairs) return;
-
-        let allNucs = [];
-        system.strands.forEach(strand => {
-            if (strand.getLength() >= min_length && strand.isNucleicAcid()) {
-                strand.forEach(e => {
-                    if (e instanceof Nucleotide) allNucs.push(e);
-                });
-            }
-        });
-
-        allNucs.forEach(n => {
-            n.pair = null;
-        });
-
-        const grid = new Map();
-
-        const getGridKey = (pos) => {
-            const x = Math.floor(pos.x / CELL_SIZE);
-            const y = Math.floor(pos.y / CELL_SIZE);
-            const z = Math.floor(pos.z / CELL_SIZE);
-            return `${x},${y},${z}`;
-        };
-
-        allNucs.forEach(n => {
-            const pos = n.getInstanceParameter3("nsOffsets");
-            n._cachedPos = pos;
-            n._cachedKey = getGridKey(pos);
-
-            if (!grid.has(n._cachedKey)) {
-                grid.set(n._cachedKey, []);
-            }
-            grid.get(n._cachedKey).push(n);
-        });
-
-        const computeCompetitionRmsd = (target: Nucleotide, candidate: Nucleotide) => {
-            const dist = target.getInstanceParameter3("nsOffsets").distanceTo(candidate.getInstanceParameter3("nsOffsets"));
-            const a1Dot = target.getA1().dot(candidate.getA1());
-            // const a2Dot = target.getA2().dot(candidate.getA2());
-
-            // Convert each metric into an error-like term where lower is better.
-            const distTerm = dist / CUTOFF_DIST;
-            const a1Term = 1 + a1Dot; // ideal antiparallel a1Dot ~ -1 => 0
-            const terms = [distTerm, a1Term];
-
-            // if (USE_A2_IN_RMSD) {
-            //     const a2Term = 1 - a2Dot; // ideal parallel a2Dot ~ 1 => 0
-            //     terms.push(a2Term);
-            // }
-
-            const sumSq = terms.reduce((acc, t) => acc + t * t, 0);
-            return Math.sqrt(sumSq / terms.length);
-        };
-
-        allNucs.forEach(curr => {
-            if (curr.pair) return;
-
-            let bestCandidate = null;
-            let bestDist = CUTOFF_DIST;
-            let bestOrient = 1;
-            const EPS = 1e-9;
-            const currPos = curr._cachedPos;
-
-            const cx = Math.floor(currPos.x / CELL_SIZE);
-            const cy = Math.floor(currPos.y / CELL_SIZE);
-            const cz = Math.floor(currPos.z / CELL_SIZE);
-
-            for (let x = -1; x <= 1; x++) {
-                for (let y = -1; y <= 1; y++) {
-                    for (let z = -1; z <= 1; z++) {
-                        const neighborKey = `${cx + x},${cy + y},${cz + z}`;
-                        const cellNucs = grid.get(neighborKey);
-
-                        if (!cellNucs) continue;
-
-                        for (let other of cellNucs) {
-                            if (curr === other) continue;
-                            if (curr.n3 === other || curr.n5 === other) continue;
-
-                            const typeSum = curr.getTypeNumber() + other.getTypeNumber();
-                            const isWatsonCrick = (typeSum % 3 == 0) && (curr.getTypeNumber() !== other.getTypeNumber());
-
-                            let isWobble = false;
-                            if (curr.isRNA || other.isRNA) {
-                                const t1 = curr.type;
-                                const t2 = other.type;
-                                isWobble = (t1 == 'G' && t2 == 'U') || (t1 == 'U' && t2 == 'G');
-                            }
-
-                            if (isWatsonCrick || isWobble) {
-                                const dist = other._cachedPos.distanceTo(currPos);
-                                if (!(dist < CUTOFF_DIST)) continue;
-
-                                const orient = other.getA1().dot(curr.getA1());
-                                if (orient < CUTOFF_A1) {
-                                    const isBetterDist = dist < bestDist - EPS;
-                                    const isSameDist = Math.abs(dist - bestDist) <= EPS;
-                                    const isBetterOrientTieBreak = isSameDist && orient < bestOrient;
-                                    if (isBetterDist || isBetterOrientTieBreak) {
-                                        bestCandidate = other;
-                                        bestDist = dist;
-                                        bestOrient = orient;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (bestCandidate) {
-                const incumbent = bestCandidate.pair;
-
-                if (!incumbent || incumbent === curr) {
-                    curr.pair = bestCandidate;
-                    bestCandidate.pair = curr;
-                } else {
-                    // Competition case: lower RMSD wins.
-                    const currRmsd = computeCompetitionRmsd(bestCandidate, curr);
-                    const incumbentRmsd = computeCompetitionRmsd(bestCandidate, incumbent);
-
-                    if (currRmsd + EPS < incumbentRmsd) {
-                        incumbent.pair = null;
-                        curr.pair = bestCandidate;
-                        bestCandidate.pair = curr;
-                    }
-                }
-            }
-        });
-
-        allNucs.forEach(n => {
-            delete n._cachedPos;
-            delete n._cachedKey;
-        });
-
-        system.checkedForBasepairs = true;
-    });
-}
-
-
 
 
 // Utility function to pick a random element from list
@@ -634,3 +465,4 @@ function inIframe () {
         return true;
     }
 }
+

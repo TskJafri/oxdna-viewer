@@ -34,6 +34,7 @@
       "./ts/file_handling/stl_exporter.ts",
       "./ts/file_handling/GLTFExporter.ts",
       "./ts/file_handling/xyz_reader.ts",
+      "./ts/file_handling/scadnano_reader.ts",
       "./ts/helix/findhelix2.ts",
       "./ts/helix/conversion2.ts",
       "./ts/model/aminoAcid.ts",

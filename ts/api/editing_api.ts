@@ -712,6 +712,74 @@ module edit{
         return addedElems;
     }
 
+    // export function extendStrandButBetter(end: BasicElement, sequence: string): BasicElement[] {
+    //     let direction: string;
+    //     let inverse: string;
+
+    //     if (end.n3 == null) {
+    //         direction = "n3";
+    //         inverse = "n5";
+    //     }
+    //     else if (end.n5 == null) {
+    //         direction = "n5";
+    //         inverse = "n3";
+    //     }
+    //     else {
+    //         notify("Please select a monomer that has an open neighbor");
+    //         return;
+    //     }
+
+    //     const tmpSys = new System(tmpSystems.length, 0);
+    //     tmpSys.initInstances(sequence.length);
+    //     tmpSystems.push(tmpSys);
+
+    //     const addedElems = addElementsBySeq(end, sequence, tmpSys, direction, inverse, 0);
+
+    //     if (addedElems.length > 0 && end instanceof Nucleotide) {
+    //         const endPair = end.pair;
+    //         const anchorStep = direction === "n3" ? "n5" : "n3";
+    //         let anchor = endPair ? endPair[anchorStep] : null;
+    //         let usedCustomPlacement = false;
+
+    //         for (let i = 0; i < addedElems.length; i++) {
+    //             const added = addedElems[i];
+    //             if (!(added instanceof Nucleotide)) {
+    //                 continue;
+    //             }
+    //             if (!anchor || !(anchor instanceof Nucleotide)) {
+    //                 break;
+    //             }
+
+    //             const anchorA1 = anchor.getA1().clone().normalize();
+    //             const anchorA3 = anchor.getA3().clone().normalize();
+    //             const a1prime = anchorA1.clone().multiplyScalar(-1);
+    //             const a3prime = anchorA3.clone().multiplyScalar(-1);
+    //             const translatedPos = anchor.getPos().clone().add(anchorA1.clone().multiplyScalar(1.2));
+
+    //             added.calcPositions(translatedPos, a1prime, a3prime);
+    //             usedCustomPlacement = true;
+    //             anchor = anchor[anchorStep] as Nucleotide | null;
+    //         }
+
+    //         if (usedCustomPlacement) {
+    //             let e: BasicElement = end;
+    //             while (e && e[direction]) {
+    //                 if (direction == "n5") {
+    //                     calcsp(e.n5);
+    //                 } else {
+    //                     calcsp(e);
+    //                 }
+    //                 e = e[direction];
+    //             }
+
+    //             tmpSys.callAllUpdates();
+    //         }
+    //     }
+
+    //     render();
+    //     return addedElems;
+    // }
+
     /**
      * Create double helix of monomers extending from provided helix
      * @param end Nucleotide to extend
