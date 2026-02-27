@@ -36,7 +36,7 @@ namespace toscad {
 
             for (let i = 0; i < q.length; i++) {
                 const cur = q[i];
-                const d = dist.get(cur.id); 
+                const d = dist.get(cur.id);
                 if (d === undefined) continue;
 
                 const farthestDist = dist.get(far.id);
@@ -49,11 +49,11 @@ namespace toscad {
                     }
                 }
             }
-            return {far, dist};
+            return { far, dist };
         };
 
         const visited = new Set<number>();
-        let best = {end1: nodes[0], end2: nodes[0], diameter: 0};
+        let best = { end1: nodes[0], end2: nodes[0], diameter: 0 };
 
         for (const n of nodes) {
             if (visited.has(n.id)) continue;
@@ -64,13 +64,13 @@ namespace toscad {
             let farId = first.far.id;
             let diameter = 0;
             second.dist.forEach((d, id) => {
-                if (d > diameter) {diameter = d; farId = id;}
+                if (d > diameter) { diameter = d; farId = id; }
             });
 
             if (diameter > best.diameter) {
                 const farNode = nodeById.get(farId);
                 if (farNode) {
-                    best = {end1: first.far, end2: farNode, diameter};
+                    best = { end1: first.far, end2: farNode, diameter };
                 }
             }
         }
@@ -79,7 +79,7 @@ namespace toscad {
 
     export function showHelixEndpoints(helices: Nucleotide[][]) {
         // const helices = await honda.findHelices(elements, 2);
-        const endpoints = helices.map((helix, i)=> {
+        const endpoints = helices.map((helix, i) => {
             const res = helixEndpoints(helix);
             return {
                 helixIndex: i,
@@ -113,7 +113,7 @@ namespace toscad {
         };
 
         const isInHelix = (set: Set<number>, nt: Nucleotide | null): nt is Nucleotide => !!nt && set.has(nt.id);
-        
+
         const getPair = (set: Set<number>, nt: Nucleotide | null): Nucleotide | null =>
             (nt && nt.pair && set.has(nt.pair.id)) ? (nt.pair as Nucleotide) : null;
 
@@ -213,8 +213,8 @@ namespace toscad {
             );
             if (!hasPairInHelix) {
                 binderHelices.push(helixId);
-            } 
-            
+            }
+
             let offset = 0; // Local offset for the main backbone
 
             // --- A-D. MAIN BACKBONE LOGIC ---
@@ -222,7 +222,7 @@ namespace toscad {
                 // start "forward" from any endpoint. They will be oriented later. Our main priority is to generate a grid without overlap and sufficient details.
                 const helixFwd = endpoints.end1;
                 const helixFwdDir = (isInHelix(helixSet, helixFwd.n3 as Nucleotide) ? 'n3' : 'n5');
-                const helixBwdDir = (helixFwdDir === 'n3' ? 'n5' : 'n3'); 
+                const helixBwdDir = (helixFwdDir === 'n3' ? 'n5' : 'n3');
                 const revFwdDir = helixFwdDir === 'n3' ? 'n5' : 'n3';
                 const revBwdDir = helixBwdDir === 'n3' ? 'n5' : 'n3';
 
@@ -234,16 +234,16 @@ namespace toscad {
                 if (getPair(helixSet, helixFwd)) {
                     firstAnchor = helixFwd;
                 } else {
-                    const result = findNextPaired({fwd: helixFwd, bwd: null}, {fwd: helixFwdDir, bwd: helixBwdDir}, helixSet);
+                    const result = findNextPaired({ fwd: helixFwd, bwd: null }, { fwd: helixFwdDir, bwd: helixBwdDir }, helixSet);
                     if (result) firstAnchor = result.anchor;
                 }
 
                 if (firstAnchor) {
                     // by definition anchor's pair exists.
                     firstAnchorPair = getPair(helixSet, firstAnchor);
-                    const headFwd = tracePath(firstAnchor, revFwdDir, helixSet); 
-                    const headBwd = tracePath(firstAnchorPair!, revBwdDir, helixSet); 
-                    const fwdHeadLen = headFwd.length - 1; 
+                    const headFwd = tracePath(firstAnchor, revFwdDir, helixSet);
+                    const headBwd = tracePath(firstAnchorPair!, revBwdDir, helixSet);
+                    const fwdHeadLen = headFwd.length - 1;
                     const bwdHeadLen = headBwd.length - 1;
                     const startOffset = Math.max(fwdHeadLen, bwdHeadLen);
 
@@ -256,7 +256,7 @@ namespace toscad {
                     });
                     offset = startOffset;
                 } else {
-                    firstAnchor = helixFwd; 
+                    firstAnchor = helixFwd;
                 }
                 // By here we have the correct offset for the first anchorpoint.
 
@@ -267,8 +267,8 @@ namespace toscad {
                 if (currBwd) mark(currBwd, helixId, offset, 'backward');
 
                 while (currFwd) {
-                    const nextStep = findNextPaired({fwd: currFwd, bwd: currBwd}, {fwd: helixFwdDir, bwd: helixBwdDir}, helixSet);
-                    if (!nextStep) break; 
+                    const nextStep = findNextPaired({ fwd: currFwd, bwd: currBwd }, { fwd: helixFwdDir, bwd: helixBwdDir }, helixSet);
+                    if (!nextStep) break;
                     const nextAnchor = nextStep.anchor;
                     const nextPair = getPair(helixSet, nextAnchor);
                     // probably doesn't need this check but can happen due to cross/double pairing?
@@ -282,7 +282,7 @@ namespace toscad {
                     let fwdHead: Nucleotide[] = [];
                     if (!fwdTrace.reachedStop || fwdTail.length === 0) {
                         const potentialHead = traceBack(nextAnchor, revFwdDir, helixSet, currFwd.id, 10);
-                        if (potentialHead.length > fwdTail.length) {fwdHead = potentialHead; fwdTail = [];}
+                        if (potentialHead.length > fwdTail.length) { fwdHead = potentialHead; fwdTail = []; }
                     }
 
                     // this backward trace is actually very significant. 
@@ -308,7 +308,7 @@ namespace toscad {
                     const bwdHeadStart = offset + 1 + (gapLength - bwdHead.length);
                     bwdHead.forEach((n, i) => mark(n, helixId, bwdHeadStart + i, 'backward'));
 
-                    offset += gapLength + 1; 
+                    offset += gapLength + 1;
                     mark(nextAnchor, helixId, offset, 'forward');
                     if (nextPair) mark(nextPair, helixId, offset, 'backward');
 
@@ -325,7 +325,7 @@ namespace toscad {
                     const bwdTail = tracePath(currBwd, helixBwdDir, helixSet).slice(1);
                     bwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, 'backward'));
                 }
-            } 
+            }
 
             // --- E. THE BINDER SWEEPER (Cleanest Version) ---
             // 1. Identify what is missing from the Grid
@@ -333,7 +333,7 @@ namespace toscad {
 
             if (unvisited.length > 0) {
                 console.log(`[setGrid] For binders, processing ${unvisited.length} disconnected items on Helix ${helixId}`);
-                
+
                 // 2. Determine "True" Start Offset from Grid State
                 let currentBinderOffset = 0;
                 let maxFoundOffset = -1;
@@ -352,7 +352,7 @@ namespace toscad {
                 // 3. Group and Grid
                 const unvisitedSet = new Set(unvisited.map(n => n.id));
                 const processedExtras = new Set<number>();
-                
+
                 for (const node of unvisited) {
                     if (processedExtras.has(node.id)) continue;
 
@@ -367,24 +367,24 @@ namespace toscad {
 
                     // Trace Forward (3') to grab the full segment
                     let currSeg: Nucleotide | null = startOfSegment;
-                    
+
                     while (currSeg && unvisitedSet.has(currSeg.id)) {
                         if (processedExtras.has(currSeg.id)) break;
-                        
+
                         processedExtras.add(currSeg.id);
                         mark(currSeg, helixId, currentBinderOffset++, 'forward');
-                        
+
                         currSeg = currSeg.n3 as Nucleotide | null;
                     }
-                    
+
                     // Add small gap between distinct binder segments
-                    currentBinderOffset += 4; 
+                    currentBinderOffset += 4;
                 }
             }
         });
 
         return { grid, binderHelices };
-    }; 
+    };
 
     // grid flipper. Great helper function for the final output.
     export function gridFlip(grid: GridMap, helixId: number) {
@@ -424,6 +424,128 @@ namespace toscad {
         return scaffold;
     }
 
+
+    export function collectCrossovers(grid: GridMap) {
+        const allNtIds = new Set<number>();
+        for (const [ntId] of grid.entries()) allNtIds.add(ntId);
+
+        const visited = new Set<number>();
+
+        // crossovers[fromHelix][toHelix] = { sameWalk: n, diffWalk: n }
+        //   sameWalk  = both runs have same offset trend → need flip
+        //   diffWalk  = runs have opposite offset trend → already correct
+        const crossovers = new Map<number, Map<number, { sameWalk: number; diffWalk: number }>>();
+        const helixIds = new Set<number>();
+
+        const ensureEntry = (from: number, to: number) => {
+            if (!crossovers.has(from)) crossovers.set(from, new Map());
+            const inner = crossovers.get(from)!;
+            if (!inner.has(to)) inner.set(to, { sameWalk: 0, diffWalk: 0 });
+            return inner.get(to)!;
+        };
+
+        for (const [ntId] of grid.entries()) {
+            if (visited.has(ntId)) continue;
+
+            const startNt = elements.get(ntId) as Nucleotide | undefined;
+            if (!startNt || !(startNt instanceof Nucleotide)) continue;
+
+            // Find 5' end
+            let fivePrime: Nucleotide = startNt;
+            const walkBack = new Set<number>();
+            walkBack.add(fivePrime.id);
+            while (true) {
+                const prev = fivePrime.n5;
+                if (!prev || !(prev instanceof Nucleotide)) break;
+                if (!allNtIds.has(prev.id)) break;
+                if (walkBack.has(prev.id)) break;
+                walkBack.add(prev.id);
+                fivePrime = prev;
+            }
+
+            // Walk 5'→3' and split into runs by helixId
+            type Run = { helixId: number; offsets: number[] };
+            const runs: Run[] = [];
+            let currentRun: Run | null = null;
+
+            let curr: Nucleotide | null = fivePrime;
+            const walkForward = new Set<number>();
+
+            while (curr && curr instanceof Nucleotide && allNtIds.has(curr.id)) {
+                if (walkForward.has(curr.id)) break;
+                walkForward.add(curr.id);
+                visited.add(curr.id);
+
+                const mark = grid.get(curr.id);
+                if (mark) {
+                    helixIds.add(mark.helixId);
+
+                    if (currentRun && currentRun.helixId === mark.helixId) {
+                        currentRun.offsets.push(mark.offset);
+                    } else {
+                        currentRun = { helixId: mark.helixId, offsets: [mark.offset] };
+                        runs.push(currentRun);
+                    }
+                } else {
+                    currentRun = null;
+                }
+
+                const n3ref: any = curr.n3;
+                curr = (n3ref && n3ref instanceof Nucleotide) ? (n3ref as Nucleotide) : null;
+            }
+
+            // Now examine consecutive runs for crossovers
+            for (let i = 0; i < runs.length - 1; i++) {
+                const runA = runs[i];
+                const runB = runs[i + 1];
+                if (runA.helixId === runB.helixId) continue;
+
+                // Determine offset trend for each run.
+                // For runs with ≥2 nts, compare first and last offset.
+                // For single-nt runs, skip (can't determine trend).
+                if (runA.offsets.length < 2 && runB.offsets.length < 2) continue;
+
+                // Use the trend near the crossover point:
+                // runA trend: compare second-to-last offset to last offset
+                // runB trend: compare first offset to second offset
+                let trendA: 'inc' | 'dec' | null = null;
+                let trendB: 'inc' | 'dec' | null = null;
+
+                if (runA.offsets.length >= 2) {
+                    const last = runA.offsets[runA.offsets.length - 1];
+                    const prev = runA.offsets[runA.offsets.length - 2];
+                    trendA = last > prev ? 'inc' : 'dec';
+                }
+
+                if (runB.offsets.length >= 2) {
+                    const first = runB.offsets[0];
+                    const second = runB.offsets[1];
+                    trendB = second > first ? 'inc' : 'dec';
+                }
+
+                // If we can't determine one side, skip this crossover
+                if (!trendA && !trendB) continue;
+
+                // If only one side is known, we still can't compare — skip
+                if (!trendA || !trendB) continue;
+
+                const entry = ensureEntry(runA.helixId, runB.helixId);
+                const entryRev = ensureEntry(runB.helixId, runA.helixId);
+
+                if (trendA === trendB) {
+                    // Same walk direction on both helices → need to flip one
+                    entry.sameWalk++;
+                    entryRev.sameWalk++;
+                } else {
+                    // Opposite walk direction → already correct
+                    entry.diffWalk++;
+                    entryRev.diffWalk++;
+                }
+            }
+        }
+
+        return { crossovers, helixIds };
+    };
     /**
      * directionAlign2 — propagating BFS helix orientation alignment.
      *
@@ -1236,7 +1358,7 @@ namespace toscad {
     export function validateGrid(grid: Map<number, GridMark>) {
         // Structure: Map<HelixID, { forward: Map<Offset, NtID>, backward: Map<Offset, NtID> }>
         const checkMap = new Map<number, {
-            forward: Map<number, number>; 
+            forward: Map<number, number>;
             backward: Map<number, number>;
         }>();
 
@@ -1280,5 +1402,148 @@ namespace toscad {
         if (grid.size !== elements.size) {
             console.log("⚠️ INVALID. Grid does not include all nucleotides from the original element set.");
         }
+    }
+
+    // ── Relative Position Calculation Methods ─────────────────────────
+
+    /**
+     * Finds all crossovers from helix1 to helix2, computes the COM of the 4 nucleotides
+     * involved in each crossover, and averages them to return a single 3D vector
+     * representing the relative connection from helix1 to helix2.
+     */
+    export function getCrossoverVector(helix1: number, helix2: number, helices: Nucleotide[][]): THREE.Vector3 | null {
+        // Collect all nucleotides in helix1 into a Set for fast lookup
+        // const h1Set = new Set(helices[helix1].map(n => n.id));
+        const h2Set = new Set(helices[helix2].map(n => n.id));
+
+        const crossoverVectors: THREE.Vector3[] = [];
+
+        // Scan all nucleotides in helix 1 to find connections to helix 2
+        for (const n1 of helices[helix1]) {
+            // Check 5' backbone connection
+            if (n1.n5 && n1.n5 instanceof Nucleotide && h2Set.has(n1.n5.id)) {
+                // We found a backbone step from helix1 to helix2!
+                const n2 = n1.n5 as Nucleotide;
+                const n1pair = n1.pair;
+                const n2pair = n2.pair;
+
+                // Ensure it's a true 4-way Holliday Junction crossover (both have pairs)
+                if (n1pair && n2pair && n1pair instanceof Nucleotide && n2pair instanceof Nucleotide) {
+                    // Center of Helix 1 at this slice
+                    const c1 = new THREE.Vector3();
+                    c1.addVectors(n1.getPos(), n1pair.getPos()).divideScalar(2);
+
+                    // Center of Helix 2 at this slice
+                    const c2 = new THREE.Vector3();
+                    c2.addVectors(n2.getPos(), n2pair.getPos()).divideScalar(2);
+
+                    // True vector pointing from Helix 1 core to Helix 2 core
+                    const v = new THREE.Vector3().subVectors(c2, c1);
+                    crossoverVectors.push(v);
+                }
+            }
+
+            // Check 3' backbone connection
+            if (n1.n3 && n1.n3 instanceof Nucleotide && h2Set.has(n1.n3.id)) {
+                const n2 = n1.n3 as Nucleotide;
+                const n1pair = n1.pair;
+                const n2pair = n2.pair;
+
+                if (n1pair && n2pair && n1pair instanceof Nucleotide && n2pair instanceof Nucleotide) {
+                    // Center of Helix 1 at this slice
+                    const c1 = new THREE.Vector3();
+                    c1.addVectors(n1.getPos(), n1pair.getPos()).divideScalar(2);
+
+                    // Center of Helix 2 at this slice
+                    const c2 = new THREE.Vector3();
+                    c2.addVectors(n2.getPos(), n2pair.getPos()).divideScalar(2);
+
+                    // True vector pointing from Helix 1 core to Helix 2 core
+                    const v = new THREE.Vector3().subVectors(c2, c1);
+                    crossoverVectors.push(v);
+                }
+            }
+            // same as running an average over all 4 nucleotides and then running an average over THOSE vectors
+        }
+
+        if (crossoverVectors.length === 0) return null;
+
+        // Average all crossover displacement vectors into a final definitive step vector
+        const avgVector = new THREE.Vector3(0, 0, 0);
+        for (const v of crossoverVectors) {
+            avgVector.add(v);
+        }
+        avgVector.divideScalar(crossoverVectors.length);
+
+        return avgVector;
+    }
+
+    /**
+     * Traverses the connections starting from Helix 0, and plots every connected helix
+     * onto a 2D coordinate plane locally aligned relative to Helix 0's axis.
+     * Returns a Map of HelixId -> { x, y }
+     */
+    export function getRelativePositions(helices: Nucleotide[][]): Map<number, { x: number, y: number }> {
+        const positions = new Map<number, { x: number, y: number }>();
+        const visited = new Set<number>();
+        const queue: number[] = [];
+
+        // Find anchor (Helix 0)
+        positions.set(0, { x: 0, y: 0 });
+        visited.add(0);
+        queue.push(0);
+
+        // 1. Z-axis (Normal): The physical direction of Helix 0 itself.
+        const endPts = helixEndpoints(helices[0]);
+        let longAxis = new THREE.Vector3(0, 0, 1);
+        if (endPts && endPts.end1 && endPts.end2) {
+            longAxis.subVectors(endPts.end1.getPos(), endPts.end2.getPos()).normalize();
+        }
+
+        // We need to find the first valid neighbor connection to establish the X-axis (u0)
+        let u0: THREE.Vector3 | null = null;
+        let u1: THREE.Vector3 | null = null;
+
+        // BFS
+        while (queue.length > 0) {
+            const curr = queue.shift()!;
+            const currPos = positions.get(curr)!;
+
+            for (let i = 0; i < helices.length; i++) {
+                if (i === curr) continue;
+
+                // getCrossoverVector gives us the true 3D spatial step between core axes
+                const vec = getCrossoverVector(curr, i, helices);
+
+                if (vec) { // connection exists
+
+                    // If we haven't established our flat 2D plane yet, do it on the very first connection!
+                    if (!u0 || !u1) {
+                        // Project the crossover vector so it's perfectly orthogonal to Helix 0's Z-axis
+                        const proj = vec.clone().projectOnPlane(longAxis);
+                        u0 = proj.clone().normalize();
+                        u1 = new THREE.Vector3().crossVectors(longAxis, u0).normalize();
+                    }
+
+                    // Assign position if we haven't placed this helix yet
+                    if (!visited.has(i)) {
+                        visited.add(i);
+                        queue.push(i);
+
+                        // Flatten the 3D step onto our nice new 2D paper (coordinate basis u0, u1)
+                        const dx = vec.dot(u0);
+                        const dy = vec.dot(u1);
+
+                        // The new position is simply the parent's position + the flat 2D step!
+                        positions.set(i, {
+                            x: currPos.x + dx,
+                            y: currPos.y + dy
+                        });
+                    }
+                }
+            }
+        }
+
+        return positions;
     }
 }

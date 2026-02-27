@@ -423,6 +423,121 @@ var toscad;
         return scaffold;
     }
     toscad.getScaffoldStrand = getScaffoldStrand;
+    function collectCrossovers(grid) {
+        const allNtIds = new Set();
+        for (const [ntId] of grid.entries())
+            allNtIds.add(ntId);
+        const visited = new Set();
+        // crossovers[fromHelix][toHelix] = { sameWalk: n, diffWalk: n }
+        //   sameWalk  = both runs have same offset trend → need flip
+        //   diffWalk  = runs have opposite offset trend → already correct
+        const crossovers = new Map();
+        const helixIds = new Set();
+        const ensureEntry = (from, to) => {
+            if (!crossovers.has(from))
+                crossovers.set(from, new Map());
+            const inner = crossovers.get(from);
+            if (!inner.has(to))
+                inner.set(to, { sameWalk: 0, diffWalk: 0 });
+            return inner.get(to);
+        };
+        for (const [ntId] of grid.entries()) {
+            if (visited.has(ntId))
+                continue;
+            const startNt = elements.get(ntId);
+            if (!startNt || !(startNt instanceof Nucleotide))
+                continue;
+            // Find 5' end
+            let fivePrime = startNt;
+            const walkBack = new Set();
+            walkBack.add(fivePrime.id);
+            while (true) {
+                const prev = fivePrime.n5;
+                if (!prev || !(prev instanceof Nucleotide))
+                    break;
+                if (!allNtIds.has(prev.id))
+                    break;
+                if (walkBack.has(prev.id))
+                    break;
+                walkBack.add(prev.id);
+                fivePrime = prev;
+            }
+            const runs = [];
+            let currentRun = null;
+            let curr = fivePrime;
+            const walkForward = new Set();
+            while (curr && curr instanceof Nucleotide && allNtIds.has(curr.id)) {
+                if (walkForward.has(curr.id))
+                    break;
+                walkForward.add(curr.id);
+                visited.add(curr.id);
+                const mark = grid.get(curr.id);
+                if (mark) {
+                    helixIds.add(mark.helixId);
+                    if (currentRun && currentRun.helixId === mark.helixId) {
+                        currentRun.offsets.push(mark.offset);
+                    }
+                    else {
+                        currentRun = { helixId: mark.helixId, offsets: [mark.offset] };
+                        runs.push(currentRun);
+                    }
+                }
+                else {
+                    currentRun = null;
+                }
+                const n3ref = curr.n3;
+                curr = (n3ref && n3ref instanceof Nucleotide) ? n3ref : null;
+            }
+            // Now examine consecutive runs for crossovers
+            for (let i = 0; i < runs.length - 1; i++) {
+                const runA = runs[i];
+                const runB = runs[i + 1];
+                if (runA.helixId === runB.helixId)
+                    continue;
+                // Determine offset trend for each run.
+                // For runs with ≥2 nts, compare first and last offset.
+                // For single-nt runs, skip (can't determine trend).
+                if (runA.offsets.length < 2 && runB.offsets.length < 2)
+                    continue;
+                // Use the trend near the crossover point:
+                // runA trend: compare second-to-last offset to last offset
+                // runB trend: compare first offset to second offset
+                let trendA = null;
+                let trendB = null;
+                if (runA.offsets.length >= 2) {
+                    const last = runA.offsets[runA.offsets.length - 1];
+                    const prev = runA.offsets[runA.offsets.length - 2];
+                    trendA = last > prev ? 'inc' : 'dec';
+                }
+                if (runB.offsets.length >= 2) {
+                    const first = runB.offsets[0];
+                    const second = runB.offsets[1];
+                    trendB = second > first ? 'inc' : 'dec';
+                }
+                // If we can't determine one side, skip this crossover
+                if (!trendA && !trendB)
+                    continue;
+                // If only one side is known, we still can't compare — skip
+                if (!trendA || !trendB)
+                    continue;
+                const entry = ensureEntry(runA.helixId, runB.helixId);
+                const entryRev = ensureEntry(runB.helixId, runA.helixId);
+                if (trendA === trendB) {
+                    // Same walk direction on both helices → need to flip one
+                    entry.sameWalk++;
+                    entryRev.sameWalk++;
+                }
+                else {
+                    // Opposite walk direction → already correct
+                    entry.diffWalk++;
+                    entryRev.diffWalk++;
+                }
+            }
+        }
+        return { crossovers, helixIds };
+    }
+    toscad.collectCrossovers = collectCrossovers;
+    ;
     /**
      * directionAlign2 — propagating BFS helix orientation alignment.
      *
@@ -1187,4 +1302,124 @@ var toscad;
         }
     }
     toscad.validateGrid = validateGrid;
+    // ── Relative Position Calculation Methods ─────────────────────────
+    /**
+     * Finds all crossovers from helix1 to helix2, computes the COM of the 4 nucleotides
+     * involved in each crossover, and averages them to return a single 3D vector
+     * representing the relative connection from helix1 to helix2.
+     */
+    function getCrossoverVector(helix1, helix2, helices) {
+        // Collect all nucleotides in helix1 into a Set for fast lookup
+        // const h1Set = new Set(helices[helix1].map(n => n.id));
+        const h2Set = new Set(helices[helix2].map(n => n.id));
+        const crossoverVectors = [];
+        // Scan all nucleotides in helix 1 to find connections to helix 2
+        for (const n1 of helices[helix1]) {
+            // Check 5' backbone connection
+            if (n1.n5 && n1.n5 instanceof Nucleotide && h2Set.has(n1.n5.id)) {
+                // We found a backbone step from helix1 to helix2!
+                const n2 = n1.n5;
+                const n1pair = n1.pair;
+                const n2pair = n2.pair;
+                // Ensure it's a true 4-way Holliday Junction crossover (both have pairs)
+                if (n1pair && n2pair && n1pair instanceof Nucleotide && n2pair instanceof Nucleotide) {
+                    // Center of Helix 1 at this slice
+                    const c1 = new THREE.Vector3();
+                    c1.addVectors(n1.getPos(), n1pair.getPos()).divideScalar(2);
+                    // Center of Helix 2 at this slice
+                    const c2 = new THREE.Vector3();
+                    c2.addVectors(n2.getPos(), n2pair.getPos()).divideScalar(2);
+                    // True vector pointing from Helix 1 core to Helix 2 core
+                    const v = new THREE.Vector3().subVectors(c2, c1);
+                    crossoverVectors.push(v);
+                }
+            }
+            // Check 3' backbone connection
+            if (n1.n3 && n1.n3 instanceof Nucleotide && h2Set.has(n1.n3.id)) {
+                const n2 = n1.n3;
+                const n1pair = n1.pair;
+                const n2pair = n2.pair;
+                if (n1pair && n2pair && n1pair instanceof Nucleotide && n2pair instanceof Nucleotide) {
+                    // Center of Helix 1 at this slice
+                    const c1 = new THREE.Vector3();
+                    c1.addVectors(n1.getPos(), n1pair.getPos()).divideScalar(2);
+                    // Center of Helix 2 at this slice
+                    const c2 = new THREE.Vector3();
+                    c2.addVectors(n2.getPos(), n2pair.getPos()).divideScalar(2);
+                    // True vector pointing from Helix 1 core to Helix 2 core
+                    const v = new THREE.Vector3().subVectors(c2, c1);
+                    crossoverVectors.push(v);
+                }
+            }
+            // same as running an average over all 4 nucleotides and then running an average over THOSE vectors
+        }
+        if (crossoverVectors.length === 0)
+            return null;
+        // Average all crossover displacement vectors into a final definitive step vector
+        const avgVector = new THREE.Vector3(0, 0, 0);
+        for (const v of crossoverVectors) {
+            avgVector.add(v);
+        }
+        avgVector.divideScalar(crossoverVectors.length);
+        return avgVector;
+    }
+    toscad.getCrossoverVector = getCrossoverVector;
+    /**
+     * Traverses the connections starting from Helix 0, and plots every connected helix
+     * onto a 2D coordinate plane locally aligned relative to Helix 0's axis.
+     * Returns a Map of HelixId -> { x, y }
+     */
+    function getRelativePositions(helices) {
+        const positions = new Map();
+        const visited = new Set();
+        const queue = [];
+        // Find anchor (Helix 0)
+        positions.set(0, { x: 0, y: 0 });
+        visited.add(0);
+        queue.push(0);
+        // 1. Z-axis (Normal): The physical direction of Helix 0 itself.
+        const endPts = helixEndpoints(helices[0]);
+        let longAxis = new THREE.Vector3(0, 0, 1);
+        if (endPts && endPts.end1 && endPts.end2) {
+            longAxis.subVectors(endPts.end1.getPos(), endPts.end2.getPos()).normalize();
+        }
+        // We need to find the first valid neighbor connection to establish the X-axis (u0)
+        let u0 = null;
+        let u1 = null;
+        // BFS
+        while (queue.length > 0) {
+            const curr = queue.shift();
+            const currPos = positions.get(curr);
+            for (let i = 0; i < helices.length; i++) {
+                if (i === curr)
+                    continue;
+                // getCrossoverVector gives us the true 3D spatial step between core axes
+                const vec = getCrossoverVector(curr, i, helices);
+                if (vec) { // connection exists
+                    // If we haven't established our flat 2D plane yet, do it on the very first connection!
+                    if (!u0 || !u1) {
+                        // Project the crossover vector so it's perfectly orthogonal to Helix 0's Z-axis
+                        const proj = vec.clone().projectOnPlane(longAxis);
+                        u0 = proj.clone().normalize();
+                        u1 = new THREE.Vector3().crossVectors(longAxis, u0).normalize();
+                    }
+                    // Assign position if we haven't placed this helix yet
+                    if (!visited.has(i)) {
+                        visited.add(i);
+                        queue.push(i);
+                        // Flatten the 3D step onto our nice new 2D paper (coordinate basis u0, u1)
+                        const dx = vec.dot(u0);
+                        const dy = vec.dot(u1);
+                        // The new position is simply the parent's position + the flat 2D step!
+                        positions.set(i, {
+                            x: currPos.x + dx,
+                            y: currPos.y + dy
+                        });
+                    }
+                }
+            }
+        }
+        return positions;
+    }
+    toscad.getRelativePositions = getRelativePositions;
 })(toscad || (toscad = {}));

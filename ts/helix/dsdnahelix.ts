@@ -21,19 +21,16 @@ let {helices, murdered, binders, binder2, disconnected, unhandled} = honda.gener
 let pairTally = new Map();
 let overloadedNucleotides = [];
 elements.forEach(nt=>{
-    let targetPairId = nt.pair;
-    if (targetPairId !== undefined && targetPairId !== null) {
-        let currentCount = pairTally.get(targetPairId) || 0;
-        pairTally.set(targetPairId, currentCount + 1);
-        if (currentCount + 1 === 2) {
-            overloadedNucleotides.push(targetPairId);
-        }
-    }
+	let targetPairId = nt.pair;
+	if (targetPairId !== undefined && targetPairId !== null) {
+		let currentCount = pairTally.get(targetPairId) || 0;
+		pairTally.set(targetPairId, currentCount + 1);
+		if (currentCount + 1 === 2) {
+			overloadedNucleotides.push(targetPairId);
+		}
+	}
 })
 */
-
-
-
 
 // For even easier use, just run:
 // let helices = await honda.findHelices(elements, 2);
@@ -137,7 +134,7 @@ namespace honda {
 					}
 				}
 				if (!onwards) return null;
-				return {nextCurr, nextAlly};
+				return { nextCurr, nextAlly };
 			};
 
 			// actual traversal loop.
@@ -218,7 +215,7 @@ namespace honda {
 			});
 
 			// Remove duplicates, their pairs, and any nucleotide whose pair is a duplicate
-			partials.forEach((helix,i) => {
+			partials.forEach((helix, i) => {
 				partials[i] = helix.filter(nt => {
 					if (duplicates.has(nt.id) || pairIds.has(nt.id)) {
 						fishies.set(nt.id, nt);
@@ -267,7 +264,7 @@ namespace honda {
 		// 	partials = partials.filter(helix => helix.length > 0);
 		// }
 
-		return {partials, fishies: Array.from(fishies.values())};
+		return { partials, fishies: Array.from(fishies.values()) };
 	}
 
 	// Groups unpaired/binder nucleotides (fishies) into ssDNA partials by strand.
@@ -291,7 +288,7 @@ namespace honda {
 			const visited = new Set<number>();
 			const isScaffoldStrand = scaffold && strand === scaffold;
 
-			list.sort((a,b)=> a.id - b.id); 
+			list.sort((a, b) => a.id - b.id);
 
 			for (const nt of list) {
 				if (visited.has(nt.id)) continue;
@@ -344,31 +341,31 @@ namespace honda {
 			}
 		});
 
-		return {ssdna, deadfishies, longssScaffold};
+		return { ssdna, deadfishies, longssScaffold };
 	}
 
 	export function averageA3a(list: Nucleotide[]) {
-				if (!list.length) return new THREE.Vector3(0, 0, 0);
+		if (!list.length) return new THREE.Vector3(0, 0, 0);
 
-				// Align all A3 vectors so they point in a consistent direction before averaging.
-				const ref = list[0].getA3().clone().normalize();
-				const acc = ref.clone();
-				for (let i = 1; i < list.length; i++) {
-					const v = list[i].getA3().clone().normalize();
-					acc.add(v.dot(ref) < 0 ? v.multiplyScalar(-1) : v);
-				}
-				acc.divideScalar(list.length);
-				const avg = acc.normalize();
+		// Align all A3 vectors so they point in a consistent direction before averaging.
+		const ref = list[0].getA3().clone().normalize();
+		const acc = ref.clone();
+		for (let i = 1; i < list.length; i++) {
+			const v = list[i].getA3().clone().normalize();
+			acc.add(v.dot(ref) < 0 ? v.multiplyScalar(-1) : v);
+		}
+		acc.divideScalar(list.length);
+		const avg = acc.normalize();
 
-				// Visualize the averaged orientation from the first nucleotide origin when possible.
-				const origin = list[0]?.getPos();
-				if (origin && typeof THREE !== 'undefined' && typeof scene !== 'undefined' && (scene as any)?.add) {
-					const helper = new THREE.ArrowHelper(avg.clone(), origin, 5);
-					(scene as any).add(helper);
-				}
+		// Visualize the averaged orientation from the first nucleotide origin when possible.
+		const origin = list[0]?.getPos();
+		if (origin && typeof THREE !== 'undefined' && typeof scene !== 'undefined' && (scene as any)?.add) {
+			const helper = new THREE.ArrowHelper(avg.clone(), origin, 5);
+			(scene as any).add(helper);
+		}
 
-				return avg;
-			};
+		return avg;
+	};
 
 	export function longssScaffoldfunc(longssScaffold: Nucleotide[], deadfishies: Nucleotide[] = []) {
 		const ssScaffold: Nucleotide[][] = [];
@@ -500,7 +497,7 @@ namespace honda {
 		// is this O(logN) or O(N)??
 
 		const totalNodes = partials.length + deadfishies.length;
-		const parent = Array.from({length: totalNodes}, (_,i) => i);
+		const parent = Array.from({ length: totalNodes }, (_, i) => i);
 		const find = (x: number): number => (parent[x] === x ? x : parent[x] = find(parent[x]));
 		const unite = (a: number, b: number) => {
 			const pa = find(a);
@@ -1098,9 +1095,9 @@ namespace honda {
 			murdered.length = 0;
 			murdered.push(...remaining);
 		}
-	
+
 		// const finalHelices = helices.filter(h => h.length > 0);
-		return {helices, murdered, binders, binder2, disconnected, unhandled};
+		return { helices, murdered, binders, binder2, disconnected, unhandled };
 	}
 	// export function generateTotal(inputMap: Map<number, Nucleotide>, tolerance = 2) {
 	// 	let {partials, fishies} = findHelixPartials(inputMap, tolerance);
@@ -1112,10 +1109,10 @@ namespace honda {
 		findBasepairsOptim2();
 		dropIntraStrandPairs();
 		// ok now we can do the rest of the stuff.
-		let {partials, fishies} = findHelixPartials(inputMap, tolerance);
-		let {ssdna, deadfishies, longssScaffold} = ssdnaPartials(fishies);
+		let { partials, fishies } = findHelixPartials(inputMap, tolerance);
+		let { ssdna, deadfishies, longssScaffold } = ssdnaPartials(fishies);
 		let ssScaffold = longssScaffoldfunc(longssScaffold, deadfishies);
-		let {helices, murdered, binders, binder2, disconnected, unhandled} = generateHelix(partials, ssdna, ssScaffold, deadfishies);
+		let { helices, murdered, binders, binder2, disconnected, unhandled } = generateHelix(partials, ssdna, ssScaffold, deadfishies);
 		console.log("Helices size:", helices.flat().length);
 		console.log("Total elements:", inputMap.size);
 		if (helices.flat().length !== inputMap.size) {
