@@ -349,6 +349,7 @@ async function makeScadnanoJsonFile(name) {
         const { grid, binderHelices } = toscad.setGrid(helices);
         toscad.directionAlign2(grid);
         toscad.alignGridPrim(grid, binderHelices);
+        // toscad.combinedHelices(grid, helices, binderHelices);
         const scadnano = toscad.buildScadnano2(grid, helices);
         const fileName = name ? `${name}.sc` : "output.sc";
         makeTextFile(fileName, JSON.stringify(scadnano, null, 2));

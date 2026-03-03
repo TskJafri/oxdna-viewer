@@ -554,124 +554,8 @@ var toscad;
      */
     // TODO: needs more testing.
     function directionAlign2(grid) {
-        // ── Helper: walk all strands, split into runs, detect crossovers ─
-        // Returns crossover votes based on actual offset trends, not grid
-        // direction labels.
-        const collectCrossovers = () => {
-            const allNtIds = new Set();
-            for (const [ntId] of grid.entries())
-                allNtIds.add(ntId);
-            const visited = new Set();
-            // crossovers[fromHelix][toHelix] = { sameWalk: n, diffWalk: n }
-            //   sameWalk  = both runs have same offset trend → need flip
-            //   diffWalk  = runs have opposite offset trend → already correct
-            const crossovers = new Map();
-            const helixIds = new Set();
-            const ensureEntry = (from, to) => {
-                if (!crossovers.has(from))
-                    crossovers.set(from, new Map());
-                const inner = crossovers.get(from);
-                if (!inner.has(to))
-                    inner.set(to, { sameWalk: 0, diffWalk: 0 });
-                return inner.get(to);
-            };
-            for (const [ntId] of grid.entries()) {
-                if (visited.has(ntId))
-                    continue;
-                const startNt = elements.get(ntId);
-                if (!startNt || !(startNt instanceof Nucleotide))
-                    continue;
-                // Find 5' end
-                let fivePrime = startNt;
-                const walkBack = new Set();
-                walkBack.add(fivePrime.id);
-                while (true) {
-                    const prev = fivePrime.n5;
-                    if (!prev || !(prev instanceof Nucleotide))
-                        break;
-                    if (!allNtIds.has(prev.id))
-                        break;
-                    if (walkBack.has(prev.id))
-                        break;
-                    walkBack.add(prev.id);
-                    fivePrime = prev;
-                }
-                const runs = [];
-                let currentRun = null;
-                let curr = fivePrime;
-                const walkForward = new Set();
-                while (curr && curr instanceof Nucleotide && allNtIds.has(curr.id)) {
-                    if (walkForward.has(curr.id))
-                        break;
-                    walkForward.add(curr.id);
-                    visited.add(curr.id);
-                    const mark = grid.get(curr.id);
-                    if (mark) {
-                        helixIds.add(mark.helixId);
-                        if (currentRun && currentRun.helixId === mark.helixId) {
-                            currentRun.offsets.push(mark.offset);
-                        }
-                        else {
-                            currentRun = { helixId: mark.helixId, offsets: [mark.offset] };
-                            runs.push(currentRun);
-                        }
-                    }
-                    else {
-                        currentRun = null;
-                    }
-                    const n3ref = curr.n3;
-                    curr = (n3ref && n3ref instanceof Nucleotide) ? n3ref : null;
-                }
-                // Now examine consecutive runs for crossovers
-                for (let i = 0; i < runs.length - 1; i++) {
-                    const runA = runs[i];
-                    const runB = runs[i + 1];
-                    if (runA.helixId === runB.helixId)
-                        continue;
-                    // Determine offset trend for each run.
-                    // For runs with ≥2 nts, compare first and last offset.
-                    // For single-nt runs, skip (can't determine trend).
-                    if (runA.offsets.length < 2 && runB.offsets.length < 2)
-                        continue;
-                    // Use the trend near the crossover point:
-                    // runA trend: compare second-to-last offset to last offset
-                    // runB trend: compare first offset to second offset
-                    let trendA = null;
-                    let trendB = null;
-                    if (runA.offsets.length >= 2) {
-                        const last = runA.offsets[runA.offsets.length - 1];
-                        const prev = runA.offsets[runA.offsets.length - 2];
-                        trendA = last > prev ? 'inc' : 'dec';
-                    }
-                    if (runB.offsets.length >= 2) {
-                        const first = runB.offsets[0];
-                        const second = runB.offsets[1];
-                        trendB = second > first ? 'inc' : 'dec';
-                    }
-                    // If we can't determine one side, skip this crossover
-                    if (!trendA && !trendB)
-                        continue;
-                    // If only one side is known, we still can't compare — skip
-                    if (!trendA || !trendB)
-                        continue;
-                    const entry = ensureEntry(runA.helixId, runB.helixId);
-                    const entryRev = ensureEntry(runB.helixId, runA.helixId);
-                    if (trendA === trendB) {
-                        // Same walk direction on both helices → need to flip one
-                        entry.sameWalk++;
-                        entryRev.sameWalk++;
-                    }
-                    else {
-                        // Opposite walk direction → already correct
-                        entry.diffWalk++;
-                        entryRev.diffWalk++;
-                    }
-                }
-            }
-            return { crossovers, helixIds };
-        };
         // ── Initial scan to discover all helices ────────────────────────
-        const { helixIds } = collectCrossovers();
+        const { helixIds } = collectCrossovers(grid);
         const anchored = new Set();
         const flippedHelices = [];
         // Anchor helix 0
@@ -684,7 +568,7 @@ var toscad;
         while (qIdx < queue.length) {
             const currHelix = queue[qIdx++];
             // Re-scan crossovers from the CURRENT grid state (post-flips)
-            const { crossovers } = collectCrossovers();
+            const { crossovers } = collectCrossovers(grid);
             const neighbors = crossovers.get(currHelix);
             if (!neighbors)
                 continue;
@@ -724,7 +608,7 @@ var toscad;
             let subIdx = 0;
             while (subIdx < subQueue.length) {
                 const currHelix = subQueue[subIdx++];
-                const { crossovers } = collectCrossovers();
+                const { crossovers } = collectCrossovers(grid);
                 const neighbors = crossovers.get(currHelix);
                 if (!neighbors)
                     continue;
@@ -1074,6 +958,806 @@ var toscad;
         return { shifts: cumulativeShift };
     }
     toscad.alignGridPrim = alignGridPrim;
+    function computeHelixPcaAxis(helix) {
+        if (!helix || helix.length < 2)
+            return null;
+        const points = [];
+        for (const nt of helix) {
+            if (!nt)
+                continue;
+            const pos = nt.getPos();
+            if (!pos)
+                continue;
+            points.push(pos.clone());
+        }
+        if (points.length < 2)
+            return null;
+        const centroid = new THREE.Vector3();
+        for (const p of points)
+            centroid.add(p);
+        centroid.multiplyScalar(1 / points.length);
+        const centered = [];
+        for (const p of points) {
+            const rel = p.clone().sub(centroid);
+            if (rel.lengthSq() > 1e-12)
+                centered.push(rel);
+        }
+        if (centered.length < 2)
+            return null;
+        const cov = {
+            xx: 0, xy: 0, xz: 0,
+            yy: 0, yz: 0,
+            zz: 0,
+        };
+        for (const r of centered) {
+            cov.xx += r.x * r.x;
+            cov.xy += r.x * r.y;
+            cov.xz += r.x * r.z;
+            cov.yy += r.y * r.y;
+            cov.yz += r.y * r.z;
+            cov.zz += r.z * r.z;
+        }
+        let axis = centered[0].clone().normalize();
+        if (axis.lengthSq() <= 1e-12)
+            return null;
+        for (let i = 0; i < 16; i++) {
+            const next = new THREE.Vector3(cov.xx * axis.x + cov.xy * axis.y + cov.xz * axis.z, cov.xy * axis.x + cov.yy * axis.y + cov.yz * axis.z, cov.xz * axis.x + cov.yz * axis.y + cov.zz * axis.z);
+            if (next.lengthSq() <= 1e-12)
+                break;
+            next.normalize();
+            if (next.dot(axis) < 0)
+                next.multiplyScalar(-1);
+            axis = next;
+        }
+        return axis.lengthSq() > 1e-12 ? axis.normalize() : null;
+    }
+    function areHelixPcaAxesCompatible(helixAId, helixBId, helices, pcaAxisCache, maxAngleDeg = 45) {
+        if (!helices)
+            return true;
+        const getAxis = (helixId) => {
+            if (!pcaAxisCache.has(helixId)) {
+                pcaAxisCache.set(helixId, computeHelixPcaAxis(helices[helixId]));
+            }
+            return pcaAxisCache.get(helixId) ?? null;
+        };
+        const axisA = getAxis(helixAId);
+        const axisB = getAxis(helixBId);
+        if (!axisA || !axisB)
+            return false;
+        const cosThreshold = Math.cos(maxAngleDeg * Math.PI / 180);
+        const cosine = Math.min(1, Math.max(-1, Math.abs(axisA.dot(axisB))));
+        return cosine >= cosThreshold;
+    }
+    // combine helices based on >3 connections, using collectCrossovers() to find candidates.
+    function combinedHelices(grid, helices, binderHelices) {
+        const retiredHelices = new Set();
+        const touchedHelices = new Set();
+        const combinedPairs = [];
+        const binderSet = new Set(binderHelices ?? []);
+        const pcaAxisCache = new Map();
+        const buildAdjacency = (crossovers) => {
+            const adjacency = new Map();
+            const ensure = (hId) => {
+                if (!adjacency.has(hId))
+                    adjacency.set(hId, new Set());
+                return adjacency.get(hId);
+            };
+            for (const [from, toMap] of crossovers.entries()) {
+                const fromSet = ensure(from);
+                for (const [to, stats] of toMap.entries()) {
+                    const totalConnections = stats.sameWalk + stats.diffWalk;
+                    if (totalConnections <= 0)
+                        continue;
+                    fromSet.add(to);
+                    ensure(to).add(from);
+                }
+            }
+            return adjacency;
+        };
+        const buildOffsetSets = () => {
+            const offsetSets = new Map();
+            for (const [, mark] of grid.entries()) {
+                if (!offsetSets.has(mark.helixId))
+                    offsetSets.set(mark.helixId, new Set());
+                offsetSets.get(mark.helixId).add(mark.offset);
+            }
+            return offsetSets;
+        };
+        const offsetsDisjoint = (a, b) => {
+            if (!a || !b || a.size === 0 || b.size === 0)
+                return false;
+            const smaller = a.size <= b.size ? a : b;
+            const larger = a.size <= b.size ? b : a;
+            for (const off of smaller) {
+                if (larger.has(off))
+                    return false;
+            }
+            return true;
+        };
+        const distanceSquared = (a, b, positions) => {
+            const pa = positions.get(a);
+            const pb = positions.get(b);
+            if (!pa || !pb)
+                return Number.POSITIVE_INFINITY;
+            const dx = pb.x - pa.x;
+            const dy = pb.y - pa.y;
+            return dx * dx + dy * dy;
+        };
+        const mergeHelixInto = (keep, merged) => {
+            for (const [, mark] of grid.entries()) {
+                if (mark.helixId === merged) {
+                    mark.helixId = keep;
+                }
+            }
+            if (helices && helices[merged] && helices[merged].length > 0) {
+                if (!helices[keep])
+                    helices[keep] = [];
+                helices[keep].push(...helices[merged]);
+                helices[merged] = [];
+            }
+            retiredHelices.add(merged);
+            touchedHelices.add(keep);
+            touchedHelices.add(merged);
+            pcaAxisCache.delete(keep);
+            pcaAxisCache.delete(merged);
+            combinedPairs.push({ keep, merged });
+        };
+        const positions = helices ? getRelativePositions(helices) : new Map();
+        let iteration = 0;
+        while (iteration++ < 100) {
+            const { crossovers, helixIds } = collectCrossovers(grid);
+            const adjacency = buildAdjacency(crossovers);
+            const offsetSets = buildOffsetSets();
+            for (const hId of helixIds) {
+                if (!adjacency.has(hId))
+                    adjacency.set(hId, new Set());
+            }
+            const hubs = Array.from(adjacency.entries())
+                .filter(([helixId, neighbors]) => neighbors.size > 3 && !retiredHelices.has(helixId) && !binderSet.has(helixId))
+                .map(([helixId]) => helixId)
+                .sort((a, b) => a - b);
+            if (hubs.length === 0)
+                break;
+            let mergedInThisIteration = false;
+            for (const hub of hubs) {
+                if (retiredHelices.has(hub))
+                    continue;
+                if (binderSet.has(hub))
+                    continue;
+                const neighbors = Array.from(adjacency.get(hub) ?? [])
+                    .filter(n => !retiredHelices.has(n) && n !== hub && !binderSet.has(n));
+                if (neighbors.length === 0)
+                    continue;
+                const compatibleWithHub = neighbors.filter(n => offsetsDisjoint(offsetSets.get(hub), offsetSets.get(n))
+                    && areHelixPcaAxesCompatible(hub, n, helices, pcaAxisCache, 45));
+                if (compatibleWithHub.length > 0) {
+                    let bestNeighbor = compatibleWithHub[0];
+                    let bestDist = distanceSquared(hub, bestNeighbor, positions);
+                    for (const candidate of compatibleWithHub) {
+                        const distSq = distanceSquared(hub, candidate, positions);
+                        if (distSq < bestDist) {
+                            bestDist = distSq;
+                            bestNeighbor = candidate;
+                        }
+                    }
+                    mergeHelixInto(hub, bestNeighbor);
+                    mergedInThisIteration = true;
+                }
+                const remainingNeighbors = neighbors
+                    .filter(n => !retiredHelices.has(n));
+                while (remainingNeighbors.length >= 2) {
+                    let bestPair = null;
+                    let bestPairDist = Number.POSITIVE_INFINITY;
+                    for (let i = 0; i < remainingNeighbors.length; i++) {
+                        for (let j = i + 1; j < remainingNeighbors.length; j++) {
+                            const a = remainingNeighbors[i];
+                            const b = remainingNeighbors[j];
+                            if (!offsetsDisjoint(offsetSets.get(a), offsetSets.get(b)))
+                                continue;
+                            if (!areHelixPcaAxesCompatible(a, b, helices, pcaAxisCache, 45))
+                                continue;
+                            const distSq = distanceSquared(a, b, positions);
+                            if (distSq < bestPairDist) {
+                                bestPairDist = distSq;
+                                bestPair = [a, b];
+                            }
+                        }
+                    }
+                    if (!bestPair)
+                        break;
+                    const keep = Math.min(bestPair[0], bestPair[1]);
+                    const merged = Math.max(bestPair[0], bestPair[1]);
+                    mergeHelixInto(keep, merged);
+                    mergedInThisIteration = true;
+                    const mergedIdx = remainingNeighbors.indexOf(merged);
+                    if (mergedIdx >= 0)
+                        remainingNeighbors.splice(mergedIdx, 1);
+                }
+            }
+            if (!mergedInThisIteration)
+                break;
+        }
+        const activeAfterMerge = new Set();
+        for (const [, mark] of grid.entries()) {
+            activeAfterMerge.add(mark.helixId);
+        }
+        const maxHelixIdAfterMerge = activeAfterMerge.size > 0
+            ? Math.max(...Array.from(activeAfterMerge))
+            : -1;
+        const removedHelices = [];
+        for (let hId = 0; hId <= maxHelixIdAfterMerge; hId++) {
+            if (!activeAfterMerge.has(hId))
+                removedHelices.push(hId);
+        }
+        const sortedActive = Array.from(activeAfterMerge).sort((a, b) => a - b);
+        const helixIdRemap = new Map();
+        sortedActive.forEach((oldId, newId) => helixIdRemap.set(oldId, newId));
+        for (const [, mark] of grid.entries()) {
+            const remapped = helixIdRemap.get(mark.helixId);
+            if (remapped !== undefined) {
+                mark.helixId = remapped;
+            }
+        }
+        if (helices) {
+            const remappedHelices = sortedActive.map((oldId) => helices[oldId] ?? []);
+            helices.length = 0;
+            helices.push(...remappedHelices);
+        }
+        if (combinedPairs.length > 0) {
+            console.log(`[combinedHelices] Combined ${combinedPairs.length} helix pairs: ` +
+                combinedPairs.map(p => `${p.merged}->${p.keep}`).join(', '));
+            if (removedHelices.length > 0) {
+                console.log(`[combinedHelices] Removed empty helices: [${removedHelices.join(', ')}]`);
+            }
+        }
+        else {
+            console.log('[combinedHelices] No helix combinations applied.');
+        }
+        return {
+            combinedPairs,
+            combinedHelices: Array.from(touchedHelices).sort((a, b) => a - b),
+            removedHelices,
+            helixIdRemap: Object.fromEntries(helixIdRemap.entries())
+        };
+    }
+    toscad.combinedHelices = combinedHelices;
+    // a much more hand-wavy function, combines helices if they don't overlap and they have the same connections.
+    function trialComb(grid, helices, binderHelices) {
+        const combinedPairs = [];
+        const retiredHelices = new Set();
+        const touchedHelices = new Set();
+        const binderSet = new Set(binderHelices ?? []);
+        const pcaAxisCache = new Map();
+        const buildAdjacency = (crossovers) => {
+            const adjacency = new Map();
+            const ensure = (hId) => {
+                if (!adjacency.has(hId))
+                    adjacency.set(hId, new Set());
+                return adjacency.get(hId);
+            };
+            for (const [from, toMap] of crossovers.entries()) {
+                const fromSet = ensure(from);
+                for (const [to, stats] of toMap.entries()) {
+                    const totalConnections = stats.sameWalk + stats.diffWalk;
+                    if (totalConnections <= 0)
+                        continue;
+                    fromSet.add(to);
+                    ensure(to).add(from);
+                }
+            }
+            return adjacency;
+        };
+        const buildOffsetSets = () => {
+            const offsetSets = new Map();
+            for (const [, mark] of grid.entries()) {
+                if (!offsetSets.has(mark.helixId))
+                    offsetSets.set(mark.helixId, new Set());
+                offsetSets.get(mark.helixId).add(mark.offset);
+            }
+            return offsetSets;
+        };
+        const setEqual = (a, b) => {
+            if (a.size !== b.size)
+                return false;
+            for (const v of a) {
+                if (!b.has(v))
+                    return false;
+            }
+            return true;
+        };
+        const offsetsDisjoint = (a, b) => {
+            if (!a || !b || a.size === 0 || b.size === 0)
+                return false;
+            const smaller = a.size <= b.size ? a : b;
+            const larger = a.size <= b.size ? b : a;
+            for (const off of smaller) {
+                if (larger.has(off))
+                    return false;
+            }
+            return true;
+        };
+        let iteration = 0;
+        while (iteration++ < 100) {
+            const { crossovers, helixIds } = collectCrossovers(grid);
+            const adjacency = buildAdjacency(crossovers);
+            const offsetSets = buildOffsetSets();
+            for (const hId of helixIds) {
+                if (!adjacency.has(hId))
+                    adjacency.set(hId, new Set());
+            }
+            const candidates = Array.from(adjacency.keys()).sort((a, b) => a - b);
+            let mergedInIteration = false;
+            for (let i = 0; i < candidates.length; i++) {
+                const a = candidates[i];
+                if (retiredHelices.has(a))
+                    continue;
+                if (binderSet.has(a))
+                    continue;
+                for (let j = i + 1; j < candidates.length; j++) {
+                    const b = candidates[j];
+                    if (retiredHelices.has(b))
+                        continue;
+                    if (binderSet.has(b))
+                        continue;
+                    const aNeighbors = adjacency.get(a) ?? new Set();
+                    const bNeighbors = adjacency.get(b) ?? new Set();
+                    if (!setEqual(aNeighbors, bNeighbors))
+                        continue;
+                    if (!offsetsDisjoint(offsetSets.get(a), offsetSets.get(b)))
+                        continue;
+                    if (!areHelixPcaAxesCompatible(a, b, helices, pcaAxisCache, 45))
+                        continue;
+                    const keep = Math.min(a, b);
+                    const merged = Math.max(a, b);
+                    for (const [, mark] of grid.entries()) {
+                        if (mark.helixId === merged) {
+                            mark.helixId = keep;
+                        }
+                    }
+                    if (helices && helices[merged] && helices[merged].length > 0) {
+                        if (!helices[keep])
+                            helices[keep] = [];
+                        helices[keep].push(...helices[merged]);
+                        helices[merged] = [];
+                    }
+                    retiredHelices.add(merged);
+                    touchedHelices.add(keep);
+                    touchedHelices.add(merged);
+                    pcaAxisCache.delete(keep);
+                    pcaAxisCache.delete(merged);
+                    combinedPairs.push({ keep, merged });
+                    mergedInIteration = true;
+                    break;
+                }
+            }
+            if (!mergedInIteration)
+                break;
+        }
+        const activeAfterMerge = new Set();
+        for (const [, mark] of grid.entries()) {
+            activeAfterMerge.add(mark.helixId);
+        }
+        const maxHelixIdAfterMerge = activeAfterMerge.size > 0
+            ? Math.max(...Array.from(activeAfterMerge))
+            : -1;
+        const removedHelices = [];
+        for (let hId = 0; hId <= maxHelixIdAfterMerge; hId++) {
+            if (!activeAfterMerge.has(hId))
+                removedHelices.push(hId);
+        }
+        const sortedActive = Array.from(activeAfterMerge).sort((a, b) => a - b);
+        const helixIdRemap = new Map();
+        sortedActive.forEach((oldId, newId) => helixIdRemap.set(oldId, newId));
+        for (const [, mark] of grid.entries()) {
+            const remapped = helixIdRemap.get(mark.helixId);
+            if (remapped !== undefined) {
+                mark.helixId = remapped;
+            }
+        }
+        if (helices) {
+            const remappedHelices = sortedActive.map((oldId) => helices[oldId] ?? []);
+            helices.length = 0;
+            helices.push(...remappedHelices);
+        }
+        if (combinedPairs.length > 0) {
+            console.log(`[trialComb] Combined ${combinedPairs.length} helix pairs: ` +
+                combinedPairs.map(p => `${p.merged}->${p.keep}`).join(', '));
+            if (removedHelices.length > 0) {
+                console.log(`[trialComb] Removed empty helices: [${removedHelices.join(', ')}]`);
+            }
+        }
+        else {
+            console.log('[trialComb] No helix combinations applied.');
+        }
+        return {
+            combinedPairs,
+            combinedHelices: Array.from(touchedHelices).sort((a, b) => a - b),
+            removedHelices,
+            helixIdRemap: Object.fromEntries(helixIdRemap.entries())
+        };
+    }
+    toscad.trialComb = trialComb;
+    function HelixPos(grid, helices) {
+        const HEX_AXIAL_DIRS = [
+            { q: 1, r: 0 },
+            { q: 1, r: -1 },
+            { q: 0, r: -1 },
+            { q: -1, r: 0 },
+            { q: -1, r: 1 },
+            { q: 0, r: 1 }
+        ];
+        const axialAdd = (a, b) => ({ q: a.q + b.q, r: a.r + b.r });
+        const axialDistance = (a, b) => {
+            const dq = a.q - b.q;
+            const dr = a.r - b.r;
+            const ds = (-a.q - a.r) - (-b.q - b.r);
+            return Math.max(Math.abs(dq), Math.abs(dr), Math.abs(ds));
+        };
+        const axialKey = (a) => `${a.q},${a.r}`;
+        const edgeKey = (a, b) => `${a}|${b}`;
+        const axialRToOddQRow = (q, r) => r + ((q - (q & 1)) / 2);
+        const averageHelixCenter = (helix) => {
+            if (!helix || helix.length === 0)
+                return null;
+            const sum = new THREE.Vector3();
+            let count = 0;
+            for (const nt of helix) {
+                if (!(nt instanceof Nucleotide))
+                    continue;
+                sum.add(nt.getPos());
+                count++;
+            }
+            if (count === 0)
+                return null;
+            return sum.divideScalar(count);
+        };
+        const estimateHexBasis3D = (allHelices) => {
+            const centers = [];
+            const axisSamples = [];
+            for (const helix of allHelices) {
+                if (!helix || helix.length === 0)
+                    continue;
+                const center = averageHelixCenter(helix);
+                if (center)
+                    centers.push(center);
+                const ep = helixEndpoints(helix);
+                if (!ep)
+                    continue;
+                const axis = ep.end2.getPos().clone().sub(ep.end1.getPos());
+                if (axis.lengthSq() > 1e-8)
+                    axisSamples.push(axis.normalize());
+            }
+            if (centers.length === 0)
+                return null;
+            const origin = new THREE.Vector3();
+            for (const c of centers)
+                origin.add(c);
+            origin.divideScalar(centers.length);
+            let axisVec = new THREE.Vector3(0, 0, 1);
+            if (axisSamples.length > 0) {
+                axisVec.set(0, 0, 0);
+                for (const s of axisSamples)
+                    axisVec.add(s);
+                if (axisVec.lengthSq() < 1e-8)
+                    axisVec.set(0, 0, 1);
+                else
+                    axisVec.normalize();
+            }
+            const projectedCenters = centers.map((c) => {
+                const rel = c.clone().sub(origin);
+                return rel.sub(axisVec.clone().multiplyScalar(rel.dot(axisVec)));
+            });
+            let e1 = new THREE.Vector3(1, 0, 0);
+            let bestD2 = Infinity;
+            for (let i = 0; i < projectedCenters.length; i++) {
+                for (let j = i + 1; j < projectedCenters.length; j++) {
+                    const d = projectedCenters[j].clone().sub(projectedCenters[i]);
+                    const d2 = d.lengthSq();
+                    if (d2 > 1e-8 && d2 < bestD2) {
+                        bestD2 = d2;
+                        e1 = d.normalize();
+                    }
+                }
+            }
+            let e2 = axisVec.clone().cross(e1);
+            if (e2.lengthSq() < 1e-8) {
+                const fallback = Math.abs(axisVec.x) < 0.9
+                    ? new THREE.Vector3(1, 0, 0)
+                    : new THREE.Vector3(0, 1, 0);
+                e2 = axisVec.clone().cross(fallback);
+            }
+            e2.normalize();
+            e1 = e2.clone().cross(axisVec).normalize();
+            const nearestDistances = [];
+            for (let i = 0; i < projectedCenters.length; i++) {
+                let nearest = Infinity;
+                for (let j = 0; j < projectedCenters.length; j++) {
+                    if (i === j)
+                        continue;
+                    const d = projectedCenters[j].clone().sub(projectedCenters[i]).length();
+                    if (d > 1e-6 && d < nearest)
+                        nearest = d;
+                }
+                if (nearest < Infinity)
+                    nearestDistances.push(nearest);
+            }
+            let spacing = 1;
+            if (nearestDistances.length > 0) {
+                nearestDistances.sort((a, b) => a - b);
+                spacing = nearestDistances[Math.floor(nearestDistances.length / 2)] || 1;
+                if (spacing <= 1e-6)
+                    spacing = 1;
+            }
+            const qVec = e1.clone().multiplyScalar(spacing);
+            const rVec = e1.clone().multiplyScalar(0.5 * spacing)
+                .add(e2.clone().multiplyScalar((Math.sqrt(3) / 2) * spacing));
+            return { origin, qVec, rVec, axisVec };
+        };
+        const vectorToAxialContinuous = (v, basis) => {
+            const inPlane = v.clone().sub(basis.axisVec.clone().multiplyScalar(v.dot(basis.axisVec)));
+            const aa = basis.qVec.dot(basis.qVec);
+            const ab = basis.qVec.dot(basis.rVec);
+            const bb = basis.rVec.dot(basis.rVec);
+            const ap = basis.qVec.dot(inPlane);
+            const bp = basis.rVec.dot(inPlane);
+            const det = aa * bb - ab * ab;
+            if (Math.abs(det) < 1e-10)
+                return null;
+            return {
+                q: (ap * bb - bp * ab) / det,
+                r: (bp * aa - ap * ab) / det
+            };
+        };
+        const quantizeToHexDirection = (v, basis) => {
+            let best = HEX_AXIAL_DIRS[0];
+            let bestScore = -Infinity;
+            const dirVec = v.clone().sub(basis.axisVec.clone().multiplyScalar(v.dot(basis.axisVec)));
+            if (dirVec.lengthSq() < 1e-12)
+                return best;
+            dirVec.normalize();
+            for (const d of HEX_AXIAL_DIRS) {
+                const world = basis.qVec.clone().multiplyScalar(d.q).add(basis.rVec.clone().multiplyScalar(d.r)).normalize();
+                const score = dirVec.dot(world);
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = d;
+                }
+            }
+            return { q: best.q, r: best.r };
+        };
+        const collectHelixAdjacency = (currentGrid) => {
+            const adjacency = new Map();
+            const ensure = (a, b) => {
+                if (!adjacency.has(a))
+                    adjacency.set(a, new Map());
+                const row = adjacency.get(a);
+                row.set(b, (row.get(b) ?? 0) + 1);
+            };
+            const allNtIds = new Set();
+            for (const [ntId] of currentGrid.entries())
+                allNtIds.add(ntId);
+            const visited = new Set();
+            for (const [ntId] of currentGrid.entries()) {
+                if (visited.has(ntId))
+                    continue;
+                const startNt = elements.get(ntId);
+                if (!startNt || !(startNt instanceof Nucleotide))
+                    continue;
+                let fivePrime = startNt;
+                const walkBack = new Set();
+                walkBack.add(fivePrime.id);
+                while (true) {
+                    const prev = fivePrime.n5;
+                    if (!prev || !(prev instanceof Nucleotide))
+                        break;
+                    if (!allNtIds.has(prev.id))
+                        break;
+                    if (walkBack.has(prev.id))
+                        break;
+                    walkBack.add(prev.id);
+                    fivePrime = prev;
+                }
+                let curr = fivePrime;
+                const walkForward = new Set();
+                let prevMark = null;
+                while (curr && curr instanceof Nucleotide && allNtIds.has(curr.id)) {
+                    if (walkForward.has(curr.id))
+                        break;
+                    walkForward.add(curr.id);
+                    visited.add(curr.id);
+                    const mark = currentGrid.get(curr.id);
+                    if (mark) {
+                        if (prevMark && prevMark.helixId !== mark.helixId) {
+                            ensure(prevMark.helixId, mark.helixId);
+                            ensure(mark.helixId, prevMark.helixId);
+                        }
+                        prevMark = mark;
+                    }
+                    else {
+                        prevMark = null;
+                    }
+                    const n3ref = curr.n3;
+                    curr = (n3ref && n3ref instanceof Nucleotide) ? n3ref : null;
+                }
+            }
+            return adjacency;
+        };
+        const nearestOpenAround = (target, occupied, maxRadius = 16) => {
+            if (!occupied.has(axialKey(target)))
+                return target;
+            for (let radius = 1; radius <= maxRadius; radius++) {
+                let best = null;
+                let bestDist = Infinity;
+                for (let dq = -radius; dq <= radius; dq++) {
+                    const rMin = Math.max(-radius, -dq - radius);
+                    const rMax = Math.min(radius, -dq + radius);
+                    for (let dr = rMin; dr <= rMax; dr++) {
+                        const cand = { q: target.q + dq, r: target.r + dr };
+                        const k = axialKey(cand);
+                        if (occupied.has(k))
+                            continue;
+                        const d = axialDistance(cand, target);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            best = cand;
+                        }
+                    }
+                }
+                if (best)
+                    return best;
+            }
+            return { q: target.q + maxRadius + 1, r: target.r };
+        };
+        const computeOddQGridPositions = (currentGrid, allHelices) => {
+            const positions = new Map();
+            const helixCount = Math.max(0, ...Array.from(currentGrid.values()).map((m) => m.helixId + 1));
+            if (helixCount === 0)
+                return positions;
+            const basis = estimateHexBasis3D(allHelices);
+            const adjacency = collectHelixAdjacency(currentGrid);
+            const centers = new Map();
+            const projectedAxial = new Map();
+            for (let h = 0; h < helixCount; h++) {
+                const helix = allHelices[h] ?? [];
+                const c = averageHelixCenter(helix);
+                if (!c)
+                    continue;
+                centers.set(h, c);
+                if (basis) {
+                    const rel = c.clone().sub(basis.origin);
+                    const uv = vectorToAxialContinuous(rel, basis);
+                    if (uv)
+                        projectedAxial.set(h, uv);
+                }
+            }
+            const preferredDelta = new Map();
+            if (basis) {
+                for (let a = 0; a < helixCount; a++) {
+                    const row = adjacency.get(a);
+                    if (!row)
+                        continue;
+                    const ca = centers.get(a);
+                    if (!ca)
+                        continue;
+                    for (const [b] of row.entries()) {
+                        const cb = centers.get(b);
+                        if (!cb)
+                            continue;
+                        const d = quantizeToHexDirection(cb.clone().sub(ca), basis);
+                        preferredDelta.set(edgeKey(a, b), d);
+                        preferredDelta.set(edgeKey(b, a), { q: -d.q, r: -d.r });
+                    }
+                }
+            }
+            const placed = new Map();
+            const occupied = new Set();
+            const place = (helixId, coord) => {
+                const k = axialKey(coord);
+                if (occupied.has(k))
+                    return false;
+                placed.set(helixId, coord);
+                occupied.add(k);
+                return true;
+            };
+            const allIds = Array.from({ length: helixCount }, (_, i) => i);
+            const roots = [0, ...allIds.filter((h) => h !== 0)].filter((h, i, arr) => h >= 0 && arr.indexOf(h) === i);
+            for (const h of allIds) {
+                const degree = adjacency.get(h)?.size ?? 0;
+                if (degree > 3) {
+                    console.warn(`[HelixPos] Helix ${h} has ${degree} neighbors (>3). This may indicate a combinedHelices issue.`);
+                }
+            }
+            for (const root of roots) {
+                if (placed.has(root))
+                    continue;
+                const preferredRoot = projectedAxial.get(root)
+                    ? { q: Math.round(projectedAxial.get(root).q), r: Math.round(projectedAxial.get(root).r) }
+                    : { q: 0, r: 0 };
+                const rootCoord = (root === 0 && !occupied.has(axialKey({ q: 0, r: 0 })))
+                    ? { q: 0, r: 0 }
+                    : nearestOpenAround(preferredRoot, occupied);
+                place(root, rootCoord);
+                const queue = [root];
+                let qi = 0;
+                while (qi < queue.length) {
+                    const current = queue[qi++];
+                    const currentPos = placed.get(current);
+                    if (!currentPos)
+                        continue;
+                    const neighbors = Array.from((adjacency.get(current) ?? new Map()).entries())
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([id]) => id);
+                    for (const nb of neighbors) {
+                        if (placed.has(nb))
+                            continue;
+                        const pref = preferredDelta.get(edgeKey(current, nb)) ?? HEX_AXIAL_DIRS[0];
+                        const base = axialAdd(currentPos, pref);
+                        const candidates = HEX_AXIAL_DIRS
+                            .map((d) => axialAdd(currentPos, d))
+                            .sort((a, b) => {
+                            const score = (coord) => {
+                                let s = 0;
+                                if (coord.q === base.q && coord.r === base.r)
+                                    s -= 5;
+                                const nbRow = adjacency.get(nb);
+                                if (nbRow) {
+                                    for (const [p] of nbRow.entries()) {
+                                        const placedP = placed.get(p);
+                                        if (!placedP)
+                                            continue;
+                                        const pd = preferredDelta.get(edgeKey(p, nb));
+                                        if (!pd)
+                                            continue;
+                                        const expected = axialAdd(placedP, pd);
+                                        s += axialDistance(coord, expected) * 10;
+                                    }
+                                }
+                                const proj = projectedAxial.get(nb);
+                                if (proj) {
+                                    const dq = coord.q - proj.q;
+                                    const dr = coord.r - proj.r;
+                                    s += dq * dq + dr * dr;
+                                }
+                                return s;
+                            };
+                            return score(a) - score(b);
+                        });
+                        let placedNow = false;
+                        for (const cand of candidates) {
+                            if (place(nb, cand)) {
+                                placedNow = true;
+                                queue.push(nb);
+                                break;
+                            }
+                        }
+                        if (!placedNow) {
+                            const fallback = nearestOpenAround(base, occupied);
+                            if (place(nb, fallback)) {
+                                queue.push(nb);
+                            }
+                        }
+                    }
+                }
+            }
+            for (let h = 0; h < helixCount; h++) {
+                if (placed.has(h))
+                    continue;
+                const proj = projectedAxial.get(h);
+                const preferred = proj
+                    ? { q: Math.round(proj.q), r: Math.round(proj.r) }
+                    : { q: 0, r: 0 };
+                place(h, nearestOpenAround(preferred, occupied));
+            }
+            for (let h = 0; h < helixCount; h++) {
+                const a = placed.get(h) ?? { q: h, r: 0 };
+                const y = axialRToOddQRow(a.q, a.r);
+                positions.set(h, [a.q, y]);
+            }
+            return positions;
+        };
+        return computeOddQGridPositions(grid, helices);
+    }
+    toscad.HelixPos = HelixPos;
     /**
      * buildScadnano2 — topology-driven scadnano export.
      *
@@ -1090,7 +1774,7 @@ var toscad;
      *  4. Sequence is built in backbone-walk order (guaranteed 5'→3').
      */
     // TODO: needs more testing.
-    function buildScadnano2(grid, helices) {
+    function buildScadnano2(grid, helices, helixPositions) {
         // ── Scaffold detection ──────────────────────────────────────────
         const scaffoldStrand = getScaffoldStrand();
         const SCAFFOLD_COLOR = '#0066cc';
@@ -1105,7 +1789,7 @@ var toscad;
         }
         const scadHelices = Array.from({ length: helixCount }, (_, i) => ({
             max_offset: (helixMaxOffsets.get(i) ?? 0) + 1,
-            grid_position: [0, i]
+            grid_position: helixPositions?.get(i) ?? [0, i]
         }));
         // ── Step 1: Discover all strands via backbone topology ──────────
         // Build a set of all nucleotide ids that exist in the grid so we
