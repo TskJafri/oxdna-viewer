@@ -35,6 +35,8 @@
       "./ts/file_handling/GLTFExporter.ts",
       "./ts/file_handling/xyz_reader.ts",
       "./ts/file_handling/scadnano_reader.ts",
+      "./ts/file_handling/scadnano_export.ts",
+      "./ts/file_handling/plateDB.ts",
       "./ts/helix/dsdnahelix.ts",
       "./ts/helix/ssrna.ts",
       "./ts/helix/conversion2.ts",
@@ -63,7 +65,6 @@
       "ts/ox_serve/relax_scenarios.ts",
       "ts/file_handling/order_parameter_selector.ts",
       "./ts/editing/distance.ts",
-      "./ts/file_handling/plateDB.ts",
       "./ts/editing/selections.ts",
       "./ts/api/plugin_api.ts",
       "./ts/file_handling/taco.ts"

@@ -1774,7 +1774,7 @@ var toscad;
      *  4. Sequence is built in backbone-walk order (guaranteed 5'→3').
      */
     // TODO: needs more testing.
-    function buildScadnano2(grid, helices, helixPositions) {
+    function buildScadnano2(grid, helices, gridType, helixPositions) {
         // ── Scaffold detection ──────────────────────────────────────────
         const scaffoldStrand = getScaffoldStrand();
         const SCAFFOLD_COLOR = '#0066cc';
@@ -1938,7 +1938,7 @@ var toscad;
         }
         return {
             version: '0.20.1',
-            grid: 'square',
+            grid: gridType,
             helices: scadHelices,
             strands: scadStrands
         };

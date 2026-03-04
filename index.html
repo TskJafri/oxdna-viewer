@@ -170,6 +170,35 @@
         </div>
     </div>
     
+    <div id='scadnanoDialog' class="dialog" data-role="dialog">
+        <div class="dialog-title">Scadnano Export</div>
+        <div class="dialog-content">
+            <label>File name:</label>
+            <input type="text" id="scadnanoFilename" value="output" data-role="input">
+            <hr>
+            
+            <label style="display: flex; align-items: center; cursor: pointer;">
+                <input type="checkbox" id="scadnanoIncludeHPos" onchange="toggleGridDropdown(this)"> 
+                <span style="margin-left: 8px;">Calculate Helix Positions</span>
+            </label>
+            
+            <div style="margin-left: 24px; margin-top: 8px;">
+                <label for="scadnanoGrid" style="display:block; margin-bottom:6px;">Grid type</label>
+                <select id="scadnanoGrid" disabled>
+                    <option value="honeycomb" selected>Honeycomb</option>
+                    <option value="square">Square</option>
+                </select>
+            </div>
+        </div>
+        
+        <div class="dialog-actions">
+            <button class="button js-dialog-close">Cancel</button>
+            <button class="button primary js-dialog-close" onclick="scadnanoDialogExport()">
+                Export
+            </button>
+        </div>
+    </div>
+
     <div id='importNanobaseDialog' class="dialog" data-role="dialog">
         <h2>Import Nanobase</h2>
         Type the link of a Nanobase structure to load it into oxView.
@@ -422,9 +451,7 @@
                     <img src="./img/ico/oxdna_logo.png" height="30px" >
                     <span class="caption">oxDNA</span>
                 </button>
-                <button class="ribbon-button" onclick="makeScadnanoJsonFile()"
-                    title="Download the current scene as a Scadnano file." style="width: 65px;">
-                    <!-- <span class="mif-floppy-disk mif-2x"></span> -->
+                <button class="ribbon-button" onclick="Metro.dialog.open('#scadnanoDialog')" title="Download the current scene as a Scadnano file.">
                     <img src="./img/ico/scadnano_logo.svg" height="30px">
                     <span class="caption">Scadnano</span>
                 </button>
@@ -1443,8 +1470,9 @@
         <script src="./dist/editing/selections.js"></script>
         <script src="./dist/api/plugin_api.js"></script>
         <script src="./dist/helix/dsdnahelix.js"></script>
-        <script src="./dist/helix/ssrna.js"></script>
         <script src="./dist/helix/conversion2.js"></script>
+        <script src="./dist/helix/ssrna.js"></script>
+        <script src="./dist/file_handling/scadnano_export.js"></script>
         <script src="./dist/file_handling/taco.js"></script>
         
         <script>

@@ -1888,6 +1888,7 @@ namespace toscad {
     export function buildScadnano2(
         grid: GridMap,
         helices: Nucleotide[][],
+        gridType?: string,
         helixPositions?: Map<number, [number, number]>
     ) {
         // ── Scaffold detection ──────────────────────────────────────────
@@ -2089,7 +2090,7 @@ namespace toscad {
 
         return {
             version: '0.20.1',
-            grid: 'square',
+            grid: gridType,
             helices: scadHelices,
             strands: scadStrands
         };
