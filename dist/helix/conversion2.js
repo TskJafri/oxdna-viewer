@@ -1011,6 +1011,58 @@ var toscad;
         }
         return axis.lengthSq() > 1e-12 ? axis.normalize() : null;
     }
+    function computeHelixCentroid(helix) {
+        if (!helix || helix.length === 0)
+            return null;
+        const sum = new THREE.Vector3();
+        let count = 0;
+        for (const nt of helix) {
+            if (!nt)
+                continue;
+            const pos = nt.getPos();
+            if (!pos)
+                continue;
+            sum.add(pos);
+            count++;
+        }
+        return count > 0 ? sum.divideScalar(count) : null;
+    }
+    /**
+     * Returns true when helix A and helix B are colinear — i.e., the
+     * centre of helix B lies within `maxOffAxisDist` (simulation length
+     * units) of the infinite line defined by helix A's centroid + its
+     * PCA axis.  The check is symmetric: we test B against A *and*
+     * A against B and require both to pass.
+     *
+     * Typical inter-helix spacing in DNA origami is ~2–3 oxDNA units,
+     * so stacked (colinear) helices should have a rejection distance
+     * close to 0; side-by-side helices will have ~2–3 units.
+     */
+    function areHelicesColinear(helixAId, helixBId, helices, pcaAxisCache, centroidCache, maxOffAxisDist = 10) {
+        if (!helices)
+            return true;
+        const getAxis = (hId) => {
+            if (!pcaAxisCache.has(hId))
+                pcaAxisCache.set(hId, computeHelixPcaAxis(helices[hId]));
+            return pcaAxisCache.get(hId) ?? null;
+        };
+        const getCentroid = (hId) => {
+            if (!centroidCache.has(hId))
+                centroidCache.set(hId, computeHelixCentroid(helices[hId]));
+            return centroidCache.get(hId) ?? null;
+        };
+        const axisA = getAxis(helixAId);
+        const centroidA = getCentroid(helixAId);
+        const centroidB = getCentroid(helixBId);
+        if (!axisA || !centroidA || !centroidB)
+            return true; // no data — allow
+        // Perpendicular (rejection) distance from centroidB to the line
+        // through centroidA along axisA:
+        //   d = |(centroidB - centroidA) × axisA|
+        const diff = centroidB.clone().sub(centroidA);
+        const rejection = diff.clone().cross(axisA).length();
+        return rejection <= maxOffAxisDist;
+    }
     function areHelixPcaAxesCompatible(helixAId, helixBId, helices, pcaAxisCache, maxAngleDeg = 45) {
         if (!helices)
             return true;
@@ -1029,12 +1081,14 @@ var toscad;
         return cosine >= cosThreshold;
     }
     // combine helices based on >3 connections, using collectCrossovers() to find candidates.
-    function combinedHelices(grid, helices, binderHelices) {
+    function combinedHelices(maxOffsetDist, grid, helices, binderHelices) {
         const retiredHelices = new Set();
         const touchedHelices = new Set();
         const combinedPairs = [];
         const binderSet = new Set(binderHelices ?? []);
         const pcaAxisCache = new Map();
+        const centroidCache = new Map();
+        const maxOffs = maxOffsetDist;
         const buildAdjacency = (crossovers) => {
             const adjacency = new Map();
             const ensure = (hId) => {
@@ -1063,13 +1117,14 @@ var toscad;
             }
             return offsetSets;
         };
+        // stupid??
         const offsetsDisjoint = (a, b) => {
             if (!a || !b || a.size === 0 || b.size === 0)
                 return false;
             const smaller = a.size <= b.size ? a : b;
             const larger = a.size <= b.size ? b : a;
-            for (const off of smaller) {
-                if (larger.has(off))
+            for (const offs of smaller) {
+                if (larger.has(offs))
                     return false;
             }
             return true;
@@ -1095,11 +1150,14 @@ var toscad;
                 helices[keep].push(...helices[merged]);
                 helices[merged] = [];
             }
+            // Recalculate the PCA axis and centroid for the merged helix after combining
             retiredHelices.add(merged);
             touchedHelices.add(keep);
             touchedHelices.add(merged);
             pcaAxisCache.delete(keep);
             pcaAxisCache.delete(merged);
+            centroidCache.delete(keep);
+            centroidCache.delete(merged);
             combinedPairs.push({ keep, merged });
         };
         const positions = helices ? getRelativePositions(helices) : new Map();
@@ -1128,8 +1186,10 @@ var toscad;
                     .filter(n => !retiredHelices.has(n) && n !== hub && !binderSet.has(n));
                 if (neighbors.length === 0)
                     continue;
+                // Step 1: try combining one neighbor directly into the overloaded hub.
                 const compatibleWithHub = neighbors.filter(n => offsetsDisjoint(offsetSets.get(hub), offsetSets.get(n))
-                    && areHelixPcaAxesCompatible(hub, n, helices, pcaAxisCache, 45));
+                    && areHelixPcaAxesCompatible(hub, n, helices, pcaAxisCache, 45)
+                    && areHelicesColinear(hub, n, helices, pcaAxisCache, centroidCache, maxOffs));
                 if (compatibleWithHub.length > 0) {
                     let bestNeighbor = compatibleWithHub[0];
                     let bestDist = distanceSquared(hub, bestNeighbor, positions);
@@ -1140,9 +1200,18 @@ var toscad;
                             bestNeighbor = candidate;
                         }
                     }
+                    // Refresh hub's offset snapshot BEFORE the merge so Step 2 sees the full combined range.
+                    const neighborOffs = offsetSets.get(bestNeighbor);
+                    if (neighborOffs) {
+                        if (!offsetSets.has(hub))
+                            offsetSets.set(hub, new Set());
+                        for (const off of neighborOffs)
+                            offsetSets.get(hub).add(off);
+                    }
                     mergeHelixInto(hub, bestNeighbor);
                     mergedInThisIteration = true;
                 }
+                // Step 2: try combining overloaded hub neighbors with each other.
                 const remainingNeighbors = neighbors
                     .filter(n => !retiredHelices.has(n));
                 while (remainingNeighbors.length >= 2) {
@@ -1156,6 +1225,8 @@ var toscad;
                                 continue;
                             if (!areHelixPcaAxesCompatible(a, b, helices, pcaAxisCache, 45))
                                 continue;
+                            if (!areHelicesColinear(a, b, helices, pcaAxisCache, centroidCache, maxOffs))
+                                continue;
                             const distSq = distanceSquared(a, b, positions);
                             if (distSq < bestPairDist) {
                                 bestPairDist = distSq;
@@ -1167,6 +1238,14 @@ var toscad;
                         break;
                     const keep = Math.min(bestPair[0], bestPair[1]);
                     const merged = Math.max(bestPair[0], bestPair[1]);
+                    // Refresh keep's offset snapshot so the next pair check in this loop sees the combined range.
+                    const mergedOffs = offsetSets.get(merged);
+                    if (mergedOffs) {
+                        if (!offsetSets.has(keep))
+                            offsetSets.set(keep, new Set());
+                        for (const off of mergedOffs)
+                            offsetSets.get(keep).add(off);
+                    }
                     mergeHelixInto(keep, merged);
                     mergedInThisIteration = true;
                     const mergedIdx = remainingNeighbors.indexOf(merged);
@@ -1309,6 +1388,15 @@ var toscad;
                         continue;
                     const keep = Math.min(a, b);
                     const merged = Math.max(a, b);
+                    // Refresh keep's offset snapshot before merging so later candidates in this pass
+                    // see the full combined range and don't incorrectly pass the disjoint check.
+                    const trialMergedOffs = offsetSets.get(merged);
+                    if (trialMergedOffs) {
+                        if (!offsetSets.has(keep))
+                            offsetSets.set(keep, new Set());
+                        for (const off of trialMergedOffs)
+                            offsetSets.get(keep).add(off);
+                    }
                     for (const [, mark] of grid.entries()) {
                         if (mark.helixId === merged) {
                             mark.helixId = keep;

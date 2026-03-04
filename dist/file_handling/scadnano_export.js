@@ -11,7 +11,7 @@ async function makeScadnanoJsonFile(name, gridType = 'square') {
         const { grid, binderHelices } = toscad.setGrid(helices);
         toscad.directionAlign2(grid);
         toscad.alignGridPrim(grid, binderHelices);
-        toscad.combinedHelices(grid, helices, binderHelices);
+        toscad.combinedHelices(10, grid, helices, binderHelices);
         const scadnano = toscad.buildScadnano2(grid, helices, gridType);
         const fileName = name ? `${name}.sc` : "output.sc";
         makeTextFile(fileName, JSON.stringify(scadnano, null, 2));
@@ -32,7 +32,7 @@ async function makeScadnanowHexPos(name, gridType = 'honeycomb') {
         const { grid, binderHelices } = toscad.setGrid(helices);
         toscad.directionAlign2(grid);
         toscad.alignGridPrim(grid, binderHelices);
-        toscad.combinedHelices(grid, helices, binderHelices);
+        toscad.combinedHelices(10, grid, helices, binderHelices);
         const helixpos = toscad.HelixPos(grid, helices);
         const scadnano = toscad.buildScadnano2(grid, helices, gridType, helixpos);
         const fileName = name ? `${name}.sc` : "output.sc";
