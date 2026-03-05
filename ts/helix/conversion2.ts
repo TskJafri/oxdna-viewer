@@ -1143,7 +1143,8 @@ namespace toscad {
         return cosine >= cosThreshold;
     }
 
-    // combine helices based on >3 connections, using collectCrossovers() to find candidates.
+    // 2 helices are candidates for combining when one of their mutual connection has >3 helices connected to it.
+    // They get combined only if they have no offset overalp and their PCA axes are compatible (roughly parallel, allowing for some angle).
     export function combinedHelices(maxOffsetDist: number, grid: GridMap, helices?: Nucleotide[][], binderHelices?: number[]) {
         const retiredHelices = new Set<number>();
         const touchedHelices = new Set<number>();

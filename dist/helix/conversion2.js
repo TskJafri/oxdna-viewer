@@ -1080,7 +1080,8 @@ var toscad;
         const cosine = Math.min(1, Math.max(-1, Math.abs(axisA.dot(axisB))));
         return cosine >= cosThreshold;
     }
-    // combine helices based on >3 connections, using collectCrossovers() to find candidates.
+    // 2 helices are candidates for combining when one of their mutual connection has >3 helices connected to it.
+    // They get combined only if they have no offset overalp and their PCA axes are compatible (roughly parallel, allowing for some angle).
     function combinedHelices(maxOffsetDist, grid, helices, binderHelices) {
         const retiredHelices = new Set();
         const touchedHelices = new Set();
