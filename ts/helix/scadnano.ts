@@ -37,6 +37,8 @@ namespace scadnano {
     const NODE_RADIUS  = 0.55;
     // Ghost dot radius (background grid marker)
     const GHOST_RADIUS = 0.14;
+    // All dots (grid ghosts + nodes) use one shared yellow.
+    const DOT_COLOR = 0xffd400;
     const RING_DEFAULT_COLOR = 0x000000;
     const RING_SELECTED_COLOR = 0xff4da6;
 
@@ -53,6 +55,7 @@ namespace scadnano {
     interface NodeRecord {
         node: HelixNode;
         mesh: THREE.Mesh;
+        labelSprite: THREE.Sprite;
     }
 
     // ── Coordinate helpers ────────────────────────────────────────────────────
@@ -86,17 +89,6 @@ namespace scadnano {
         if (!best) return null;
         return bestDist <= COL_SPACING * 0.8 ? best : null;
     }
-
-    // ── Colour palette for auto-assigning colours to new nodes ────────────────
-    // Saturated, clearly distinguishable colours that all look good on white.
-
-    const PALETTE: number[] = [
-        0x1565c0, 0x2e7d32, 0xc62828, 0x6a1b9a,
-        0xe65100, 0x00695c, 0xad1457, 0x4527a0,
-        0x0277bd, 0x558b2f, 0x4e342e, 0x00838f,
-    ];
-    let _paletteIdx = 0;
-    function nextColor(): number { return PALETTE[_paletteIdx++ % PALETTE.length]; }
 
     // ── Main editor class ──────────────────────────────────────────────────────
 
@@ -174,7 +166,7 @@ namespace scadnano {
 
             // ── Shared geometries ──────────────────────────────────────────────
             this.ghostGeo = new THREE.CircleGeometry(GHOST_RADIUS, 12);
-            this.ghostMat = new THREE.MeshBasicMaterial({ color: 0xc0c8d8 });  // light-mode dot
+            this.ghostMat = new THREE.MeshBasicMaterial({ color: DOT_COLOR });
             this.nodeGeo  = new THREE.CircleGeometry(NODE_RADIUS, 36);
             this.ringGeo  = new THREE.RingGeometry(NODE_RADIUS + 0.04, NODE_RADIUS + 0.20, 36);
             this.ringMat  = new THREE.MeshBasicMaterial({ color: RING_DEFAULT_COLOR, opacity: 0.18, transparent: true, side: THREE.DoubleSide });
@@ -204,7 +196,7 @@ namespace scadnano {
             if (this.records.has(key)) return;
 
             const pos   = oddQToWorld(node.col, node.row);
-            const color = node.color ?? nextColor();
+            const color = DOT_COLOR;
 
             const mat  = new THREE.MeshBasicMaterial({ color });
             const mesh = new THREE.Mesh(this.nodeGeo, mat);
@@ -218,8 +210,14 @@ namespace scadnano {
             this.scene.add(ring);
             mesh.userData.ring = ring;
 
+            // Always show helix number for each node.
+            const labelSprite = this._createNodeLabelSprite(String(node.id));
+            labelSprite.position.set(pos.x, pos.y, 1.2);
+            this.scene.add(labelSprite);
+            mesh.userData.labelSprite = labelSprite;
+
             this.scene.add(mesh);
-            this.records.set(key, { node: { ...node, color }, mesh });
+            this.records.set(key, { node: { ...node, color }, mesh, labelSprite });
 
             this.onNodesChanged?.();
         }
@@ -233,6 +231,11 @@ namespace scadnano {
             this.scene.remove(rec.mesh);
             const ring = rec.mesh.userData.ring as THREE.Mesh | undefined;
             if (ring) this.scene.remove(ring);
+            this.scene.remove(rec.labelSprite);
+            const labelMaterial = rec.labelSprite.material as THREE.SpriteMaterial;
+            const labelTexture = labelMaterial.map;
+            if (labelTexture) labelTexture.dispose();
+            labelMaterial.dispose();
 
             this.records.delete(key);
             if (this.selectedKey === key) this.selectedKey = null;
@@ -249,6 +252,11 @@ namespace scadnano {
                 const rec = this.records.get(k)!;
                 const ring = rec.mesh.userData.ring as THREE.Mesh | undefined;
                 if (ring) this.scene.remove(ring);
+                this.scene.remove(rec.labelSprite);
+                const labelMaterial = rec.labelSprite.material as THREE.SpriteMaterial;
+                const labelTexture = labelMaterial.map;
+                if (labelTexture) labelTexture.dispose();
+                labelMaterial.dispose();
                 this.scene.remove(rec.mesh);
             });
             this.records.clear();
@@ -320,6 +328,11 @@ namespace scadnano {
             this.camera.updateProjectionMatrix();
         }
 
+        /** Recompute renderer/camera sizing from current canvas dimensions. */
+        resize(): void {
+            this._onResize();
+        }
+
         dispose(): void {
             this.renderer.dispose();
         }
@@ -378,6 +391,7 @@ namespace scadnano {
 
             const ring = rec.mesh.userData.ring as THREE.Mesh | undefined;
             if (ring) ring.position.set(pos.x, pos.y, 0.5);
+            rec.labelSprite.position.set(pos.x, pos.y, 1.2);
 
             this.records.delete(fromKey);
             this.records.set(toKey, rec);
@@ -426,6 +440,36 @@ namespace scadnano {
             // Stub kept for future canvas-based label rendering.
         }
 
+        private _createNodeLabelSprite(text: string): THREE.Sprite {
+            const canvas = document.createElement('canvas');
+            canvas.width = 128;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+                const fallbackMat = new THREE.SpriteMaterial({ color: 0x111111 });
+                return new THREE.Sprite(fallbackMat);
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.font = 'bold 30px Arial';
+            ctx.fillStyle = '#111111';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.needsUpdate = true;
+
+            const material = new THREE.SpriteMaterial({
+                map: texture,
+                transparent: true,
+                depthTest: false,
+            });
+            const sprite = new THREE.Sprite(material);
+            sprite.scale.set(1.5, 0.75, 1);
+            return sprite;
+        }
+
         private _screenToNDC(clientX: number, clientY: number): THREE.Vector2 {
             const rect = this.canvas.getBoundingClientRect();
             return new THREE.Vector2(
@@ -461,10 +505,6 @@ namespace scadnano {
             const key = this._key(cell.col, cell.row);
             if (this.records.has(key)) {
                 this._setSelectedKey(key);
-            } else {
-                // Debug mode behavior: allow adding nodes on empty cells.
-                this.addNode({ col: cell.col, row: cell.row, id: Date.now() });
-                this._setSelectedKey(this._key(cell.col, cell.row));
             }
         }
 

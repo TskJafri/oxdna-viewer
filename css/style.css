@@ -3,6 +3,77 @@ body {
     margin: 0;
     overflow: hidden;
 }
+
+:root {
+  --scadnano-pane-width: 38vw;
+}
+
+#scadnanoGridPane {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: var(--scadnano-pane-width);
+  height: 100vh;
+  z-index: 3;
+  display: none;
+  background: #ffffff;
+  border-right: 1px solid #d9d9d9;
+}
+
+#scadnanoGridCanvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: calc(100% - 46px);
+  z-index: 1;
+}
+
+#scadnanoGridExportBtn {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 8px;
+  height: 32px;
+  border: 1px solid #b7b7b7;
+  background: #ffffff;
+  color: #1d1d1d;
+  font-size: 13px;
+  cursor: pointer;
+  z-index: 4;
+}
+
+#scadnanoGridExportBtn:hover {
+  background: #f4f4f4;
+}
+
+body.scadnano-grid-open #scadnanoGridPane {
+  display: block;
+}
+
+body.scadnano-grid-open aside.sidebar,
+body.scadnano-grid-open #menu,
+body.scadnano-grid-open #container,
+body.scadnano-grid-open #threeCanvas,
+body.scadnano-grid-open #floatingMenu,
+body.scadnano-grid-open #hoverInfo,
+body.scadnano-grid-open #colorbarCanvas,
+body.scadnano-grid-open .window {
+  transform: translateX(var(--scadnano-pane-width));
+  transition: transform 140ms ease-out;
+}
+
+aside.sidebar,
+#menu,
+#container,
+#threeCanvas,
+#floatingMenu,
+#hoverInfo,
+#colorbarCanvas,
+.window {
+  transition: transform 140ms ease-out;
+}
+
 canvas {
     position: absolute;
     height: 100%;

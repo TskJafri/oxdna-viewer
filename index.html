@@ -1352,6 +1352,11 @@
 
     <div hidden=true id="hoverInfo">Description</div>
 
+    <div id="scadnanoGridPane">
+        <canvas id="scadnanoGridCanvas"></canvas>
+        <button id="scadnanoGridExportBtn" type="button">Export</button>
+    </div>
+
     <!--Canvas-->
     <div id="container">
         <div><canvas id="colorbarCanvas"></canvas></div>
@@ -1475,7 +1480,7 @@
         <script src="./dist/helix/ssrna.js"></script>
         <script src="./dist/file_handling/scadnano_export.js"></script>
         <script src="./dist/file_handling/taco.js"></script>
-        
+
         <script>
             //https://stackoverflow.com/questions/326069/how-to-identify-if-a-webpage-is-being-loaded-inside-an-iframe-or-directly-into-t
             function inIframe () {
