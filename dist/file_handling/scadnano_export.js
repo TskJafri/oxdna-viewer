@@ -1,60 +1,46 @@
 /// <reference path="../typescript_definitions/index.d.ts" />
-async function makeScadnanoJsonFile(name, gridType = 'square') {
-    try {
-        const nucleotideElements = new Map();
-        elements.forEach((element, id) => {
-            if (element instanceof Nucleotide) {
-                nucleotideElements.set(id, element);
-            }
-        });
-        const helices = await honda.findHelices(nucleotideElements, 3);
-        const { grid, binderHelices } = toscad.setGrid(helices);
-        toscad.directionAlign2(grid);
-        toscad.alignGridPrim(grid, binderHelices);
-        toscad.combinedHelices(15, grid, helices, binderHelices);
-        const scadnano = toscad.buildScadnano2(grid, helices, gridType);
-        const fileName = name ? `${name}.sc` : "output.sc";
-        makeTextFile(fileName, JSON.stringify(scadnano, null, 2));
-    }
-    catch (err) {
-        notify(`Scadnano export failed: ${err}`, "alert");
-    }
-}
-async function makeScadnanowHexPos(name, gridType = 'honeycomb') {
-    try {
-        const nucleotideElements = new Map();
-        elements.forEach((element, id) => {
-            if (element instanceof Nucleotide) {
-                nucleotideElements.set(id, element);
-            }
-        });
-        const helices = await honda.findHelices(nucleotideElements, 3);
-        const { grid, binderHelices } = toscad.setGrid(helices);
-        toscad.directionAlign2(grid);
-        toscad.alignGridPrim(grid, binderHelices);
-        toscad.combinedHelices(15, grid, helices, binderHelices);
-        const helixpos = toscad.HelixPos(grid, helices);
-        const scadnano = toscad.buildScadnano2(grid, helices, gridType, helixpos);
-        const fileName = name ? `${name}.sc` : "output.sc";
-        makeTextFile(fileName, JSON.stringify(scadnano, null, 2));
-    }
-    catch (err) {
-        notify(`Scadnano export failed: ${err}`, "alert");
-    }
-}
-async function calculateScadnanoHelixPos() {
+let currentScadnanoHelices = null;
+let currentScadnanoConnections = [];
+async function calculateScadnanoHelices() {
     const nucleotideElements = new Map();
     elements.forEach((element, id) => {
         if (element instanceof Nucleotide) {
             nucleotideElements.set(id, element);
         }
     });
-    const helices = await honda.findHelices(nucleotideElements, 3);
+    return honda.findHelices(nucleotideElements, 3);
+}
+async function calculateScadnanoHelixPos() {
+    const helices = await calculateScadnanoHelices();
+    currentScadnanoHelices = helices;
     const { grid, binderHelices } = toscad.setGrid(helices);
     toscad.directionAlign2(grid);
     toscad.alignGridPrim(grid, binderHelices);
     toscad.combinedHelices(15, grid, helices, binderHelices);
+    const { crossovers } = toscad.collectCrossovers(grid);
+    currentScadnanoConnections = buildScadnanoConnections(crossovers);
     return toscad.HelixPos(grid, helices);
+}
+function buildScadnanoConnections(crossovers) {
+    const uniquePairs = new Set();
+    const pairs = [];
+    for (const [fromHelix, toMap] of crossovers.entries()) {
+        for (const [toHelix, counts] of toMap.entries()) {
+            const totalConnections = Number(counts?.sameWalk ?? 0) + Number(counts?.diffWalk ?? 0);
+            if (totalConnections <= 0)
+                continue;
+            const a = Math.min(fromHelix, toHelix);
+            const b = Math.max(fromHelix, toHelix);
+            if (a === b)
+                continue;
+            const key = `${a}:${b}`;
+            if (uniquePairs.has(key))
+                continue;
+            uniquePairs.add(key);
+            pairs.push([a, b]);
+        }
+    }
+    return pairs;
 }
 function normalizeHelixPosMap(input) {
     if (!input)
@@ -169,6 +155,12 @@ function getScadnanoGridPane() {
 function getScadnanoGridCanvas() {
     return document.getElementById('scadnanoGridCanvas');
 }
+function setScadnanoPaneWidth(widthPx) {
+    const minW = 240;
+    const maxW = Math.max(minW, Math.floor(window.innerWidth * 0.75));
+    const clamped = Math.max(minW, Math.min(maxW, Math.round(widthPx)));
+    document.documentElement.style.setProperty('--scadnano-pane-width', `${clamped}px`);
+}
 function resizeScadnanoGridCanvas() {
     const pane = getScadnanoGridPane();
     const canvas = getScadnanoGridCanvas();
@@ -190,6 +182,31 @@ function publishCurrentHelixPosFromEditor() {
         return;
     window.currentScadnanoHelixPos = mapFromEditorNodes(scadnanoGridEditor);
 }
+async function ensureScadnanoHelicesCache() {
+    if (currentScadnanoHelices && currentScadnanoHelices.length > 0) {
+        return currentScadnanoHelices;
+    }
+    try {
+        currentScadnanoHelices = await calculateScadnanoHelices();
+        return currentScadnanoHelices;
+    }
+    catch (err) {
+        notify(`Unable to map grid helix selection: ${err}`, 'warning');
+        return null;
+    }
+}
+async function selectHelixFromGridNode(helixId) {
+    const helices = await ensureScadnanoHelicesCache();
+    if (!helices)
+        return;
+    const helix = helices[helixId];
+    if (!Array.isArray(helix) || helix.length === 0)
+        return;
+    const selectElements = window?.api?.selectElements;
+    if (typeof selectElements !== 'function')
+        return;
+    selectElements(helix);
+}
 function ensureScadnanoGridEditor() {
     if (scadnanoGridEditor)
         return scadnanoGridEditor;
@@ -201,6 +218,12 @@ function ensureScadnanoGridEditor() {
         return null;
     scadnanoGridEditor = new scadnanoNs.HoneycombEditor(canvas);
     scadnanoGridEditor.onNodesChanged = publishCurrentHelixPosFromEditor;
+    scadnanoGridEditor.onNodeSelected = (node) => {
+        const helixId = Number(node?.id);
+        if (!Number.isFinite(helixId))
+            return;
+        void selectHelixFromGridNode(helixId);
+    };
     return scadnanoGridEditor;
 }
 window.showScadnanoGridFromHelixPos = function (helixPosInput) {
@@ -225,12 +248,24 @@ window.showScadnanoGridFromHelixPos = function (helixPosInput) {
         return;
     }
     editor.loadFromHelixPos(map);
+    if (typeof editor.setConnections === 'function') {
+        editor.setConnections(currentScadnanoConnections);
+    }
     publishCurrentHelixPosFromEditor();
 };
 window.hideScadnanoGridPane = function () {
     document.body.classList.remove('scadnano-grid-open');
 };
 function initScadnanoGridPaneControls() {
+    const closeBtn = document.getElementById('scdgridClose');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+            const hidePane = window.hideScadnanoGridPane;
+            if (typeof hidePane === 'function') {
+                hidePane();
+            }
+        });
+    }
     const exportBtn = document.getElementById('scadnanoGridExportBtn');
     if (exportBtn) {
         exportBtn.addEventListener('click', () => {
@@ -243,6 +278,30 @@ function initScadnanoGridPaneControls() {
             doExport(window.currentScadnanoHelixPos);
         });
     }
+    const resizeHandle = document.getElementById('scadnanoGridResizeHandle');
+    let resizing = false;
+    if (resizeHandle) {
+        resizeHandle.addEventListener('mousedown', (e) => {
+            resizing = true;
+            document.body.classList.add('scadnano-grid-resizing');
+            e.preventDefault();
+        });
+    }
+    window.addEventListener('mousemove', (e) => {
+        if (!resizing)
+            return;
+        setScadnanoPaneWidth(e.clientX);
+        resizeScadnanoGridCanvas();
+        if (scadnanoGridEditor && typeof scadnanoGridEditor.resize === 'function') {
+            scadnanoGridEditor.resize();
+        }
+    });
+    window.addEventListener('mouseup', () => {
+        if (!resizing)
+            return;
+        resizing = false;
+        document.body.classList.remove('scadnano-grid-resizing');
+    });
     window.addEventListener('resize', () => {
         resizeScadnanoGridCanvas();
         if (scadnanoGridEditor && typeof scadnanoGridEditor.resize === 'function') {

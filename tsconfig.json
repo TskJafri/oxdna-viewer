@@ -38,7 +38,7 @@
       "./ts/file_handling/scadnano_export.ts",
       "./ts/file_handling/plateDB.ts",
       "./ts/helix/dsdnahelix.ts",
-      "./ts/helix/scadnano.ts",
+      "./ts/helix/scadnano_gridview.ts",
       "./ts/helix/ssrna.ts",
       "./ts/helix/conversion2.ts",
       "./ts/model/aminoAcid.ts",

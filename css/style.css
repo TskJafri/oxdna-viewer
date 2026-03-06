@@ -20,6 +20,20 @@ body {
   border-right: 1px solid #d9d9d9;
 }
 
+#scadnanoGridResizeHandle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 5;
+}
+
+#scadnanoGridResizeHandle:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
 #scadnanoGridCanvas {
   position: absolute;
   top: 0;
@@ -27,6 +41,27 @@ body {
   width: 100%;
   height: calc(100% - 46px);
   z-index: 1;
+}
+
+#scdgridClose {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  width: 20px;
+  height: 20px;
+  border: 1px solid #b3b3b3;
+  background: #ffffff;
+  color: #7a7a7a;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  z-index: 4;
+}
+
+#scdgridClose:hover {
+  background: #f4f4f4;
+  color: #5f5f5f;
 }
 
 #scadnanoGridExportBtn {
@@ -49,29 +84,6 @@ body {
 
 body.scadnano-grid-open #scadnanoGridPane {
   display: block;
-}
-
-body.scadnano-grid-open aside.sidebar,
-body.scadnano-grid-open #menu,
-body.scadnano-grid-open #container,
-body.scadnano-grid-open #threeCanvas,
-body.scadnano-grid-open #floatingMenu,
-body.scadnano-grid-open #hoverInfo,
-body.scadnano-grid-open #colorbarCanvas,
-body.scadnano-grid-open .window {
-  transform: translateX(var(--scadnano-pane-width));
-  transition: transform 140ms ease-out;
-}
-
-aside.sidebar,
-#menu,
-#container,
-#threeCanvas,
-#floatingMenu,
-#hoverInfo,
-#colorbarCanvas,
-.window {
-  transition: transform 140ms ease-out;
 }
 
 canvas {
@@ -121,6 +133,16 @@ canvas {
     width: 100%;
     opacity: 0.95;
     background: white;
+  transition: transform 140ms ease-out;
+}
+
+/* Match oxView sidebar feel: shift the whole menu right, keep width unchanged. */
+body.scadnano-grid-open #menu {
+  transform: translateX(var(--scadnano-pane-width));
+}
+
+body.scadnano-grid-resizing #menu {
+  transition: none;
 }
 
 #baseList {

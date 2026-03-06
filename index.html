@@ -1352,8 +1352,11 @@
 
     <div hidden=true id="hoverInfo">Description</div>
 
+    <!--Scadnano grid pane-->
     <div id="scadnanoGridPane">
+        <button id="scdgridClose" type="button" title="Close grid" aria-label="Close grid">&times;</button>
         <canvas id="scadnanoGridCanvas"></canvas>
+        <div id="scadnanoGridResizeHandle" title="Drag to resize"></div>
         <button id="scadnanoGridExportBtn" type="button">Export</button>
     </div>
 
@@ -1475,7 +1478,7 @@
         <script src="./dist/editing/selections.js"></script>
         <script src="./dist/api/plugin_api.js"></script>
         <script src="./dist/helix/dsdnahelix.js"></script>
-        <script src="./dist/helix/scadnano.js"></script>
+        <script src="./dist/helix/scadnano_gridview.js"></script>
         <script src="./dist/helix/conversion2.js"></script>
         <script src="./dist/helix/ssrna.js"></script>
         <script src="./dist/file_handling/scadnano_export.js"></script>
