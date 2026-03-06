@@ -109,12 +109,39 @@ async function exportScadnanoWithHelixPos(name, gridType, helixPos) {
     const fileName = name ? `${name}.sc` : 'output.sc';
     makeTextFile(fileName, JSON.stringify(scadnano, null, 2));
 }
+async function exportScadnanoNoPos(name, gridType) {
+    const nucleotideElements = new Map();
+    elements.forEach((element, id) => {
+        if (element instanceof Nucleotide) {
+            nucleotideElements.set(id, element);
+        }
+    });
+    const helices = await honda.findHelices(nucleotideElements, 3);
+    const { grid, binderHelices } = toscad.setGrid(helices);
+    toscad.directionAlign2(grid);
+    toscad.alignGridPrim(grid, binderHelices);
+    toscad.combinedHelices(15, grid, helices, binderHelices);
+    const scadnano = toscad.buildScadnano2(grid, helices, gridType);
+    const fileName = name ? `${name}.sc` : 'output.sc';
+    makeTextFile(fileName, JSON.stringify(scadnano, null, 2));
+}
 async function scadnanoDialogExport() {
     const nameInput = document.getElementById('scadnanoFilename');
     const helixPosCheckbox = document.getElementById('scadnanoIncludeHPos');
     const scadnanoGrid = document.getElementById('scadnanoGrid');
     if (!nameInput || !helixPosCheckbox || !scadnanoGrid) {
         console.warn('scadnano export dialog missing inputs');
+        return;
+    }
+    const name = nameInput.value.trim() || 'output';
+    const gridType = scadnanoGrid.value === 'honeycomb' ? 'honeycomb' : 'square';
+    if (!helixPosCheckbox.checked) {
+        try {
+            await exportScadnanoNoPos(name, gridType);
+        }
+        catch (err) {
+            notify(`Scadnano export failed: ${err}`, 'alert');
+        }
         return;
     }
     try {
@@ -125,7 +152,7 @@ async function scadnanoDialogExport() {
             notify('Scadnano grid view is unavailable in this page.', 'alert');
             return;
         }
-        showGrid(helixPos);
+        showGrid(helixPos, gridType);
     }
     catch (err) {
         notify(`Scadnano export failed: ${err}`, 'alert');
@@ -149,6 +176,7 @@ window.exportScadnanoFromGridView = async function (helixPosInput) {
     }
 };
 let scadnanoGridEditor = null;
+let scadnanoGridEditorType = null;
 function getScadnanoGridPane() {
     return document.getElementById('scadnanoGridPane');
 }
@@ -207,16 +235,28 @@ async function selectHelixFromGridNode(helixId) {
         return;
     selectElements(helix);
 }
-function ensureScadnanoGridEditor() {
-    if (scadnanoGridEditor)
+function ensureScadnanoGridEditor(gridType) {
+    if (scadnanoGridEditor && scadnanoGridEditorType === gridType)
         return scadnanoGridEditor;
+    if (scadnanoGridEditor && scadnanoGridEditorType !== gridType) {
+        if (typeof scadnanoGridEditor.dispose === 'function') {
+            scadnanoGridEditor.dispose();
+        }
+        scadnanoGridEditor = null;
+        scadnanoGridEditorType = null;
+    }
     const canvas = getScadnanoGridCanvas();
     if (!canvas)
         return null;
     const scadnanoNs = window.scadnano;
-    if (!scadnanoNs || typeof scadnanoNs.HoneycombEditor !== 'function')
+    if (!scadnanoNs)
         return null;
-    scadnanoGridEditor = new scadnanoNs.HoneycombEditor(canvas);
+    const editorCtorName = gridType === 'square' ? 'SquareEditor' : 'HoneycombEditor';
+    const EditorCtor = scadnanoNs[editorCtorName];
+    if (typeof EditorCtor !== 'function')
+        return null;
+    scadnanoGridEditor = new EditorCtor(canvas);
+    scadnanoGridEditorType = gridType;
     scadnanoGridEditor.onNodesChanged = publishCurrentHelixPosFromEditor;
     scadnanoGridEditor.onNodeSelected = (node) => {
         const helixId = Number(node?.id);
@@ -226,15 +266,16 @@ function ensureScadnanoGridEditor() {
     };
     return scadnanoGridEditor;
 }
-window.showScadnanoGridFromHelixPos = function (helixPosInput) {
+window.showScadnanoGridFromHelixPos = function (helixPosInput, gridTypeInput) {
     const pane = getScadnanoGridPane();
     if (!pane) {
         notify('Scadnano grid pane is unavailable.', 'alert');
         return;
     }
+    const gridType = gridTypeInput === 'square' ? 'square' : 'honeycomb';
     document.body.classList.add('scadnano-grid-open');
     resizeScadnanoGridCanvas();
-    const editor = ensureScadnanoGridEditor();
+    const editor = ensureScadnanoGridEditor(gridType);
     if (!editor) {
         notify('Unable to open scadnano grid view.', 'alert');
         return;

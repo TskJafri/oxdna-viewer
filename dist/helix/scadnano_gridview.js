@@ -1,9 +1,9 @@
 /**
  * scadnano.ts  –  Standalone 2D Helix Position Editor
  *
- * Renders a parity-staggered honeycomb-like lattice using Three.js.
+ * Renders editable helix lattices using Three.js.
  *
- * This is intentionally NOT standard odd-q offset. Layout is driven by parity:
+ * Honeycomb layout is intentionally NOT standard odd-q offset. It is driven by parity:
  *   if (col + row) is even => shift UP by D/4
  *   if (col + row) is odd  => shift DOWN by D/4
  *
@@ -29,8 +29,10 @@ var scadnano;
     // Parity offset = ±D/4 based on (col + row) parity
     scadnano.COL_SPACING = 2.5;
     scadnano.ROW_SPACING = 1.5 * scadnano.COL_SPACING;
-    const X_SCALE = 0.866025 * scadnano.COL_SPACING;
-    const PARITY_OFFSET = scadnano.COL_SPACING / 4;
+    const HONEYCOMB_X_SCALE = 0.866025 * scadnano.COL_SPACING;
+    const HONEYCOMB_PARITY_OFFSET = scadnano.COL_SPACING / 4;
+    const SQUARE_X_SCALE = scadnano.COL_SPACING;
+    const SQUARE_ROW_SPACING = scadnano.COL_SPACING;
     // Node circle radius in Three.js world units
     const NODE_RADIUS = 0.55;
     // Ghost dot radius (background grid marker)
@@ -42,17 +44,29 @@ var scadnano;
     // ── Coordinate helpers ────────────────────────────────────────────────────
     /** Convert a grid coordinate (col, row) to Three.js world coords. */
     function oddQToWorld(col, row) {
+        return honeycombToWorld(col, row);
+    }
+    scadnano.oddQToWorld = oddQToWorld;
+    function honeycombToWorld(col, row) {
         const isEvenParity = (((col + row) & 1) === 0);
-        const offset = isEvenParity ? -PARITY_OFFSET : PARITY_OFFSET;
-        const x = col * X_SCALE;
+        const offset = isEvenParity ? -HONEYCOMB_PARITY_OFFSET : HONEYCOMB_PARITY_OFFSET;
+        const x = col * HONEYCOMB_X_SCALE;
         const screenY = row * scadnano.ROW_SPACING + offset;
         const y = -screenY;
         return new THREE.Vector2(x, y);
     }
-    scadnano.oddQToWorld = oddQToWorld;
-    /** Find the nearest grid cell to a world position. */
-    function worldToNearestCell(wx, wy) {
-        const colEst = Math.round(wx / X_SCALE);
+    scadnano.honeycombToWorld = honeycombToWorld;
+    function squareToWorld(col, row) {
+        const x = col * SQUARE_X_SCALE;
+        const screenY = row * SQUARE_ROW_SPACING;
+        return new THREE.Vector2(x, -screenY);
+    }
+    scadnano.squareToWorld = squareToWorld;
+    function gridToWorld(col, row, layout) {
+        return layout === 'square' ? squareToWorld(col, row) : honeycombToWorld(col, row);
+    }
+    function honeycombWorldToNearestCell(wx, wy) {
+        const colEst = Math.round(wx / HONEYCOMB_X_SCALE);
         const rowEst = Math.round((-wy) / scadnano.ROW_SPACING);
         let best = null;
         let bestDist = Infinity;
@@ -60,7 +74,7 @@ var scadnano;
             for (let dr = -2; dr <= 2; dr++) {
                 const c = colEst + dc;
                 const r = rowEst + dr;
-                const p = oddQToWorld(c, r);
+                const p = honeycombToWorld(c, r);
                 const d = Math.hypot(p.x - wx, p.y - wy);
                 if (d < bestDist) {
                     bestDist = d;
@@ -72,7 +86,41 @@ var scadnano;
             return null;
         return bestDist <= scadnano.COL_SPACING * 0.8 ? best : null;
     }
+    function squareWorldToNearestCell(wx, wy) {
+        return {
+            col: Math.round(wx / SQUARE_X_SCALE),
+            row: Math.round((-wy) / SQUARE_ROW_SPACING),
+        };
+    }
+    /** Find the nearest grid cell to a world position. */
+    function worldToNearestCell(wx, wy, layout = 'honeycomb') {
+        if (layout === 'square')
+            return squareWorldToNearestCell(wx, wy);
+        return honeycombWorldToNearestCell(wx, wy);
+    }
     scadnano.worldToNearestCell = worldToNearestCell;
+    function estimateVisibleGridBounds(camera, layout) {
+        const worldLeft = camera.left + camera.position.x;
+        const worldRight = camera.right + camera.position.x;
+        const worldTop = camera.top + camera.position.y;
+        const worldBottom = camera.bottom + camera.position.y;
+        if (layout === 'square') {
+            const colMin = Math.floor(worldLeft / SQUARE_X_SCALE) - 3;
+            const colMax = Math.ceil(worldRight / SQUARE_X_SCALE) + 3;
+            const screenYMin = -worldTop;
+            const screenYMax = -worldBottom;
+            const rowMin = Math.floor(screenYMin / SQUARE_ROW_SPACING) - 3;
+            const rowMax = Math.ceil(screenYMax / SQUARE_ROW_SPACING) + 3;
+            return { colMin, colMax, rowMin, rowMax };
+        }
+        const colMin = Math.floor(worldLeft / HONEYCOMB_X_SCALE) - 3;
+        const colMax = Math.ceil(worldRight / HONEYCOMB_X_SCALE) + 3;
+        const screenYMin = -worldTop;
+        const screenYMax = -worldBottom;
+        const rowMin = Math.floor(screenYMin / scadnano.ROW_SPACING) - 3;
+        const rowMax = Math.ceil(screenYMax / scadnano.ROW_SPACING) + 3;
+        return { colMin, colMax, rowMin, rowMax };
+    }
     // ── Main editor class ──────────────────────────────────────────────────────
     class HoneycombEditor {
         canvas;
@@ -82,6 +130,7 @@ var scadnano;
         renderer;
         // Node state
         records = new Map();
+        layout;
         // Ghost (background grid) meshes – reused geometry
         ghostGeo;
         ghostMat;
@@ -117,6 +166,7 @@ var scadnano;
             const { gridCols = [-2, 8], gridRows = [-2, 10], initialNodes = [] } = options;
             [this.minCol, this.maxCol] = gridCols;
             [this.minRow, this.maxRow] = gridRows;
+            this.layout = options.layout === 'square' ? 'square' : 'honeycomb';
             // ── Scene ──────────────────────────────────────────────────────────
             this.scene = new THREE.Scene();
             this.scene.background = new THREE.Color(0xfafafa); // light mode
@@ -154,7 +204,7 @@ var scadnano;
             const key = this._key(node.col, node.row);
             if (this.records.has(key))
                 return;
-            const pos = oddQToWorld(node.col, node.row);
+            const pos = gridToWorld(node.col, node.row, this.layout);
             const color = DOT_COLOR;
             const mat = new THREE.MeshBasicMaterial({ color });
             const mesh = new THREE.Mesh(this.nodeGeo, mat);
@@ -334,7 +384,7 @@ var scadnano;
         _cellFromMouseEvent(e) {
             const ndc = this._screenToNDC(e.clientX, e.clientY);
             const world = this._ndcToWorld(ndc);
-            return worldToNearestCell(world.x, world.y);
+            return worldToNearestCell(world.x, world.y, this.layout);
         }
         _moveNode(fromKey, toCol, toRow) {
             const rec = this.records.get(fromKey);
@@ -345,7 +395,7 @@ var scadnano;
                 return fromKey;
             if (this.records.has(toKey))
                 return fromKey;
-            const pos = oddQToWorld(toCol, toRow);
+            const pos = gridToWorld(toCol, toRow, this.layout);
             rec.node.col = toCol;
             rec.node.row = toRow;
             rec.mesh.position.set(pos.x, pos.y, 0);
@@ -406,7 +456,7 @@ var scadnano;
                     const key = this._key(col, row);
                     if (this.ghostMeshes.has(key))
                         continue;
-                    const p = oddQToWorld(col, row);
+                    const p = gridToWorld(col, row, this.layout);
                     const mesh = new THREE.Mesh(this.ghostGeo, this.ghostMat);
                     mesh.position.set(p.x, p.y, -1);
                     mesh.userData.isGhost = true;
@@ -417,18 +467,8 @@ var scadnano;
             }
         }
         _ensureGridCoverage() {
-            const cam = this.camera;
-            const worldLeft = cam.left + cam.position.x;
-            const worldRight = cam.right + cam.position.x;
-            const worldTop = cam.top + cam.position.y;
-            const worldBottom = cam.bottom + cam.position.y;
-            const colMin = Math.floor(worldLeft / X_SCALE) - 3;
-            const colMax = Math.ceil(worldRight / X_SCALE) + 3;
-            const screenYMin = -worldTop;
-            const screenYMax = -worldBottom;
-            const rowMin = Math.floor(screenYMin / scadnano.ROW_SPACING) - 3;
-            const rowMax = Math.ceil(screenYMax / scadnano.ROW_SPACING) + 3;
-            this._buildGrid(colMin, colMax, rowMin, rowMax);
+            const bounds = estimateVisibleGridBounds(this.camera, this.layout);
+            this._buildGrid(bounds.colMin, bounds.colMax, bounds.rowMin, bounds.rowMax);
         }
         _buildAxisLabels() {
             // We rely on HTML overlay labels in editor-dev.html; nothing to do here.
@@ -589,4 +629,10 @@ var scadnano;
         }
     }
     scadnano.HoneycombEditor = HoneycombEditor;
+    class SquareEditor extends HoneycombEditor {
+        constructor(canvas, options = {}) {
+            super(canvas, { ...options, layout: 'square' });
+        }
+    }
+    scadnano.SquareEditor = SquareEditor;
 })(scadnano || (scadnano = {}));
