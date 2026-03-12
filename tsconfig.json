@@ -34,7 +34,6 @@
       "./ts/file_handling/stl_exporter.ts",
       "./ts/file_handling/GLTFExporter.ts",
       "./ts/file_handling/xyz_reader.ts",
-      "./ts/file_handling/scadnano_reader.ts",
       "./ts/file_handling/scadnano_export.ts",
       "./ts/file_handling/plateDB.ts",
       "./ts/helix/dsdnahelix.ts",

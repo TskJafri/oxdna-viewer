@@ -19,7 +19,7 @@ async function calculateScadnanoHelixPos() {
     toscad.combinedHelices(15, grid, helices, binderHelices);
     const { crossovers } = toscad.collectCrossovers(grid);
     currentScadnanoConnections = buildScadnanoConnections(crossovers);
-    return toscad.HelixPos(grid, helices);
+    return toscad.HelixPosByRelativeBfs(grid, helices);
 }
 function buildScadnanoConnections(crossovers) {
     const uniquePairs = new Set();

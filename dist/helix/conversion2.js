@@ -1466,6 +1466,247 @@ var toscad;
         };
     }
     toscad.trialComb = trialComb;
+    function subtractPositions(map, keyA, keyB) {
+        const posA = map.get(keyA);
+        const posB = map.get(keyB);
+        if (!posA || !posB)
+            return null;
+        return {
+            x: posA.x - posB.x,
+            y: posA.y - posB.y
+        };
+    }
+    function HelixPosByRelativeBfs(grid, helices) {
+        const placed = new Map();
+        const occupied = new Set();
+        const placedByCoord = new Map();
+        const orphaned = [];
+        const orphanedIds = new Set();
+        const relativePositions = getRelativePositions(helices);
+        const { crossovers, helixIds } = collectCrossovers(grid);
+        const helixCount = Math.max(helices.length, ...Array.from(grid.values()).map((mark) => mark.helixId + 1), ...Array.from(helixIds).map((helixId) => helixId + 1), 0);
+        const positionKey = (coord) => `${coord.x},${coord.y}`;
+        const isOpen = (coord) => !occupied.has(positionKey(coord));
+        const getOccupant = (coord) => placedByCoord.get(positionKey(coord));
+        const tryPlace = (helixId, coord) => {
+            if (placed.has(helixId) || !isOpen(coord))
+                return false;
+            placed.set(helixId, coord);
+            occupied.add(positionKey(coord));
+            placedByCoord.set(positionKey(coord), helixId);
+            return true;
+        };
+        const enqueueOrphan = (helixId, parentId) => {
+            if (placed.has(helixId) || orphanedIds.has(helixId))
+                return;
+            orphaned.push({ helixId, parentId });
+            orphanedIds.add(helixId);
+        };
+        const buildAdjacency = () => {
+            const adjacency = new Map();
+            const ensure = (helixId) => {
+                if (!adjacency.has(helixId))
+                    adjacency.set(helixId, new Set());
+                return adjacency.get(helixId);
+            };
+            for (let helixId = 0; helixId < helixCount; helixId++)
+                ensure(helixId);
+            for (const [from, toMap] of crossovers.entries()) {
+                const row = ensure(from);
+                for (const to of toMap.keys()) {
+                    row.add(to);
+                    ensure(to).add(from);
+                }
+            }
+            return adjacency;
+        };
+        const adjacency = buildAdjacency();
+        // Spiral outward from `origin` in true Manhattan order (distance 1, 2, 3, …)
+        // so orphans are always placed as close to their parent as possible.
+        const findNearestOpenAround = (origin) => {
+            if (isOpen(origin))
+                return origin;
+            const maxDist = helixCount + 32;
+            for (let dist = 1; dist <= maxDist; dist++) {
+                // Enumerate all integer coords at exact Manhattan distance = dist
+                // and pick the first open one, preferring low |y| then low |x|
+                // (i.e. stay close to the same row as origin first).
+                let best = null;
+                let bestKey = Infinity;
+                for (let dx = -dist; dx <= dist; dx++) {
+                    const dyAbs = dist - Math.abs(dx);
+                    for (const dy of dyAbs === 0 ? [0] : [-dyAbs, dyAbs]) {
+                        const cand = { x: origin.x + dx, y: origin.y + dy };
+                        if (!isOpen(cand))
+                            continue;
+                        // Sort key: |dy| first (favour same row), then |dx|
+                        const key = Math.abs(dy) * (maxDist * 2 + 1) + Math.abs(dx);
+                        if (key < bestKey) {
+                            bestKey = key;
+                            best = cand;
+                        }
+                    }
+                }
+                if (best)
+                    return best;
+            }
+            return { x: origin.x + maxDist + 1, y: origin.y };
+        };
+        const chooseRoot = () => {
+            for (let helixId = 0; helixId < helixCount; helixId++) {
+                if ((adjacency.get(helixId)?.size ?? 0) === 3)
+                    return helixId;
+            }
+            for (let helixId = 0; helixId < helixCount; helixId++) {
+                if ((adjacency.get(helixId)?.size ?? 0) > 0)
+                    return helixId;
+            }
+            return 0;
+        };
+        const getSeedCoordinate = (helixId) => {
+            const degree = adjacency.get(helixId)?.size ?? 0;
+            if (degree === 3)
+                return { x: 0, y: 0 };
+            // Do NOT use raw relativePositions as grid coords — those are in
+            // simulation units (2-3 oxDNA units per helix spacing) and would
+            // place the seed 10-30+ cells away from the origin.
+            // Just find the nearest open cell to the origin.
+            return findNearestOpenAround({ x: 0, y: 0 });
+        };
+        // Returns the nearest already-placed neighbor's grid coord, or falls
+        // back to the given default.  Used to anchor orphan/straggler placement.
+        const nearestPlacedNeighbor = (helixId, fallback) => {
+            for (const nbId of adjacency.get(helixId) ?? []) {
+                const nb = placed.get(nbId);
+                if (nb)
+                    return nb;
+            }
+            return fallback;
+        };
+        const placeNeighborGroup = (parentId, queue) => {
+            const parentCoord = placed.get(parentId);
+            if (!parentCoord)
+                return;
+            const neighbors = Array.from(adjacency.get(parentId) ?? [])
+                .map((helixId) => ({
+                helixId,
+                delta: subtractPositions(relativePositions, helixId, parentId)
+            }))
+                .filter((entry) => !!entry.delta)
+                .sort((a, b) => {
+                const dyDelta = Math.abs(b.delta.y) - Math.abs(a.delta.y);
+                if (dyDelta !== 0)
+                    return dyDelta;
+                const dxDelta = Math.abs(b.delta.x) - Math.abs(a.delta.x);
+                if (dxDelta !== 0)
+                    return dxDelta;
+                return a.helixId - b.helixId;
+            });
+            if (neighbors.length === 0)
+                return;
+            const planned = new Set();
+            const assignedTargets = new Map();
+            const yCandidate = neighbors[0];
+            // For helices with ≤3 connections the y direction is forced by grid parity:
+            //   (x + y) odd  → +1 (e.g. even-x/odd-y, odd-x/even-y)
+            //   (x + y) even → -1 (e.g. even-x/even-y, odd-x/odd-y)
+            // Using & 1 instead of % 2 so negatives resolve correctly.
+            // For ≥4 connections use the deltaY sign as before.
+            const totalConnections = adjacency.get(parentId)?.size ?? 0;
+            const yStep = totalConnections <= 3
+                ? (((parentCoord.x + parentCoord.y) & 1) === 1 ? 1 : -1)
+                : (yCandidate.delta.y < 0 ? 1 : -1);
+            assignedTargets.set(yCandidate.helixId, { x: parentCoord.x, y: parentCoord.y + yStep });
+            planned.add(yCandidate.helixId);
+            const remaining = neighbors.filter((entry) => !planned.has(entry.helixId));
+            const positive = remaining
+                .filter((entry) => entry.delta.x >= 0)
+                .sort((a, b) => b.delta.x - a.delta.x || a.helixId - b.helixId);
+            const negative = remaining
+                .filter((entry) => entry.delta.x < 0)
+                .sort((a, b) => a.delta.x - b.delta.x || a.helixId - b.helixId);
+            const assignXSlot = (entry, xStep) => {
+                const target = { x: parentCoord.x + xStep, y: parentCoord.y };
+                assignedTargets.set(entry.helixId, target);
+                planned.add(entry.helixId);
+            };
+            if (positive.length > 0 && negative.length > 0) {
+                assignXSlot(positive[0], 1);
+                assignXSlot(negative[0], -1);
+            }
+            else if (positive.length > 0) {
+                assignXSlot(positive[0], 1);
+            }
+            else if (negative.length > 0) {
+                assignXSlot(negative[0], -1);
+            }
+            for (const entry of remaining) {
+                if (!planned.has(entry.helixId))
+                    enqueueOrphan(entry.helixId, parentId);
+            }
+            for (const [helixId, target] of assignedTargets.entries()) {
+                const placedCoord = placed.get(helixId);
+                if (placedCoord) {
+                    continue;
+                }
+                const occupant = getOccupant(target);
+                if (occupant !== undefined && occupant !== helixId) {
+                    enqueueOrphan(helixId, parentId);
+                    continue;
+                }
+                if (tryPlace(helixId, target)) {
+                    queue.push(helixId);
+                }
+                else {
+                    enqueueOrphan(helixId, parentId);
+                }
+            }
+        };
+        const root = chooseRoot();
+        occupied.add('0,0');
+        const rootCoord = getSeedCoordinate(root);
+        if (rootCoord.x === 0 && rootCoord.y === 0) {
+            occupied.delete('0,0');
+        }
+        tryPlace(root, rootCoord);
+        const queue = [root];
+        let qIdx = 0;
+        while (qIdx < queue.length) {
+            placeNeighborGroup(queue[qIdx++], queue);
+        }
+        for (const orphan of orphaned) {
+            if (placed.has(orphan.helixId))
+                continue;
+            // Anchor to the nearest already-placed neighbor (any connection),
+            // not just the first parent that orphaned this helix.  This prevents
+            // a helix from landing far away because it was orphaned early by a
+            // distant parent.
+            const fallback = placed.get(orphan.parentId) ?? placed.get(root) ?? { x: 0, y: 0 };
+            const anchor = nearestPlacedNeighbor(orphan.helixId, fallback);
+            const openCoord = findNearestOpenAround(anchor);
+            if (tryPlace(orphan.helixId, openCoord)) {
+                queue.push(orphan.helixId);
+            }
+        }
+        while (qIdx < queue.length) {
+            placeNeighborGroup(queue[qIdx++], queue);
+        }
+        for (let helixId = 0; helixId < helixCount; helixId++) {
+            if (placed.has(helixId))
+                continue;
+            // Anchor stragglers to a placed neighbor, not raw relativePositions
+            // (which are in simulation units and would scatter them far away).
+            const anchor = nearestPlacedNeighbor(helixId, { x: 0, y: 0 });
+            tryPlace(helixId, findNearestOpenAround(anchor));
+        }
+        const result = new Map();
+        for (let helixId = 0; helixId < helixCount; helixId++) {
+            const coord = placed.get(helixId) ?? { x: helixId, y: 0 };
+            result.set(helixId, [coord.x, coord.y]);
+        }
+        return result;
+    }
+    toscad.HelixPosByRelativeBfs = HelixPosByRelativeBfs;
     function HelixPos(grid, helices) {
         const HEX_AXIAL_DIRS = [
             { q: 1, r: 0 },
@@ -1485,7 +1726,8 @@ var toscad;
         const axialKey = (a) => `${a.q},${a.r}`;
         const edgeKey = (a, b) => `${a}|${b}`;
         const axialRToOddQRow = (q, r) => r + ((q - (q & 1)) / 2);
-        const averageHelixCenter = (helix) => {
+        // yes
+        const helixCOM = (helix) => {
             if (!helix || helix.length === 0)
                 return null;
             const sum = new THREE.Vector3();
@@ -1500,13 +1742,15 @@ var toscad;
                 return null;
             return sum.divideScalar(count);
         };
+        // Creates a coordinate system based on 
         const estimateHexBasis3D = (allHelices) => {
             const centers = [];
             const axisSamples = [];
+            // "PCA" is basically using endpoints 1 and 2 as a rough axis direction, and then averaging the centroids to find the origin.
             for (const helix of allHelices) {
                 if (!helix || helix.length === 0)
                     continue;
-                const center = averageHelixCenter(helix);
+                const center = helixCOM(helix);
                 if (center)
                     centers.push(center);
                 const ep = helixEndpoints(helix);
@@ -1518,10 +1762,12 @@ var toscad;
             }
             if (centers.length === 0)
                 return null;
+            // find the average center to use as the origin
             const origin = new THREE.Vector3();
             for (const c of centers)
                 origin.add(c);
             origin.divideScalar(centers.length);
+            // Average helix direction to get a rough axis. Not really for any rigorous reason, it works fine for this and thus, we will use it.
             let axisVec = new THREE.Vector3(0, 0, 1);
             if (axisSamples.length > 0) {
                 axisVec.set(0, 0, 0);
@@ -1532,8 +1778,11 @@ var toscad;
                 else
                     axisVec.normalize();
             }
+            // smart and concise way of finding the perpendicular direction of the spread...
+            // removes the entire axisVec vector from the axes, so only the perpendicular spread remains.
             const projectedCenters = centers.map((c) => {
                 const rel = c.clone().sub(origin);
+                // normalized already, so no need to divide by axisVec.lengthSq()
                 return rel.sub(axisVec.clone().multiplyScalar(rel.dot(axisVec)));
             });
             let e1 = new THREE.Vector3(1, 0, 0);
@@ -1708,7 +1957,7 @@ var toscad;
             const projectedAxial = new Map();
             for (let h = 0; h < helixCount; h++) {
                 const helix = allHelices[h] ?? [];
-                const c = averageHelixCenter(helix);
+                const c = helixCOM(helix);
                 if (!c)
                     continue;
                 centers.set(h, c);
