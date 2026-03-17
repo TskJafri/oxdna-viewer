@@ -1,6 +1,13 @@
 /// <reference path="../typescript_definitions/index.d.ts" />
 let currentScadnanoHelices = null;
 let currentScadnanoConnections = [];
+function notifyHelixCoverageMismatch(helices, inputMap) {
+    const helixCount = helices.flat().length;
+    const totalCount = inputMap.size;
+    if (helixCount === totalCount)
+        return;
+    notify(`Helix mapping error: ${helixCount}/${totalCount} nucleotides were mapped. Scadnano conversion will be missing some nucleotides.`, 'alert', true);
+}
 async function calculateScadnanoHelices() {
     const nucleotideElements = new Map();
     elements.forEach((element, id) => {
@@ -8,7 +15,9 @@ async function calculateScadnanoHelices() {
             nucleotideElements.set(id, element);
         }
     });
-    return honda.findHelices(nucleotideElements, 3);
+    const helices = await honda.findHelices(nucleotideElements, 3);
+    notifyHelixCoverageMismatch(helices, nucleotideElements);
+    return helices;
 }
 async function calculateScadnanoHelixPos() {
     const helices = await calculateScadnanoHelices();
@@ -101,6 +110,7 @@ async function exportScadnanoWithHelixPos(name, gridType, helixPos) {
         }
     });
     const helices = await honda.findHelices(nucleotideElements, 3);
+    notifyHelixCoverageMismatch(helices, nucleotideElements);
     const { grid, binderHelices } = toscad.setGrid(helices);
     toscad.directionAlign2(grid);
     toscad.alignGridPrim(grid, binderHelices);
@@ -117,6 +127,7 @@ async function exportScadnanoNoPos(name, gridType) {
         }
     });
     const helices = await honda.findHelices(nucleotideElements, 3);
+    notifyHelixCoverageMismatch(helices, nucleotideElements);
     const { grid, binderHelices } = toscad.setGrid(helices);
     toscad.directionAlign2(grid);
     toscad.alignGridPrim(grid, binderHelices);
@@ -137,7 +148,7 @@ async function scadnanoDialogExport() {
     const gridType = scadnanoGrid.value === 'honeycomb' ? 'honeycomb' : 'square';
     if (!helixPosCheckbox.checked) {
         try {
-            await exportScadnanoNoPos(name, gridType);
+            await exportScadnanoNoPos(name, 'square');
         }
         catch (err) {
             notify(`Scadnano export failed: ${err}`, 'alert');
