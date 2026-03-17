@@ -759,6 +759,26 @@ var toscad;
      */
     function alignGridPrim(grid, binderHelices) {
         const { shifts, helixIds } = collectShiftObservations(grid);
+        const countGridConflicts = (currentGrid) => {
+            const checkMap = new Map();
+            let conflicts = 0;
+            for (const [ntId, pos] of currentGrid.entries()) {
+                if (!checkMap.has(pos.helixId)) {
+                    checkMap.set(pos.helixId, {
+                        forward: new Map(),
+                        backward: new Map()
+                    });
+                }
+                const strandMap = checkMap.get(pos.helixId)[pos.direction];
+                if (strandMap.has(pos.offset) && strandMap.get(pos.offset) !== ntId) {
+                    conflicts++;
+                }
+                else {
+                    strandMap.set(pos.offset, ntId);
+                }
+            }
+            return conflicts;
+        };
         // ── Build weighted edge list for Prim's ─────────────────────────
         // weight = number of crossover observations (higher = more reliable)
         const helixList = Array.from(helixIds).sort((a, b) => a - b);
@@ -954,7 +974,157 @@ var toscad;
                 mark.offset -= globalMin2;
             }
         }
+        // ── Binder post-pass (after alignGridPrim) ─────────────────────
+        const binderPostSet = new Set(binderHelices ?? []);
+        if (binderPostSet.size > 0) {
+            const binderList = Array.from(binderPostSet).sort((a, b) => a - b);
+            console.log(`[alignGridPrim] Binder helices noted: [${binderList.join(', ')}]`);
+            const allNtIds = new Set();
+            for (const [ntId] of grid.entries())
+                allNtIds.add(ntId);
+            const visited = new Set();
+            const binderRuns = [];
+            const ntToRun = new Map();
+            // Rebuild strand runs and keep only runs on binder helices.
+            for (const [ntId] of grid.entries()) {
+                if (visited.has(ntId))
+                    continue;
+                const startNt = elements.get(ntId);
+                if (!startNt || !(startNt instanceof Nucleotide))
+                    continue;
+                let fivePrime = startNt;
+                const walkBack = new Set();
+                walkBack.add(fivePrime.id);
+                while (true) {
+                    const prev = fivePrime.n5;
+                    if (!prev || !(prev instanceof Nucleotide))
+                        break;
+                    if (!allNtIds.has(prev.id))
+                        break;
+                    if (walkBack.has(prev.id))
+                        break;
+                    walkBack.add(prev.id);
+                    fivePrime = prev;
+                }
+                let curr = fivePrime;
+                const walkFwd = new Set();
+                let currentRunNtIds = [];
+                let currentHelix = null;
+                while (curr && curr instanceof Nucleotide && allNtIds.has(curr.id)) {
+                    if (walkFwd.has(curr.id))
+                        break;
+                    walkFwd.add(curr.id);
+                    visited.add(curr.id);
+                    const mark = grid.get(curr.id);
+                    if (!mark) {
+                        if (currentHelix !== null && binderPostSet.has(currentHelix) && currentRunNtIds.length > 0) {
+                            const runIdx = binderRuns.length;
+                            binderRuns.push({ helixId: currentHelix, ntIds: currentRunNtIds });
+                            currentRunNtIds.forEach((id) => ntToRun.set(id, runIdx));
+                        }
+                        currentRunNtIds = [];
+                        currentHelix = null;
+                    }
+                    else if (currentHelix === mark.helixId || currentHelix === null) {
+                        currentHelix = mark.helixId;
+                        currentRunNtIds.push(curr.id);
+                    }
+                    else {
+                        if (binderPostSet.has(currentHelix) && currentRunNtIds.length > 0) {
+                            const runIdx = binderRuns.length;
+                            binderRuns.push({ helixId: currentHelix, ntIds: currentRunNtIds });
+                            currentRunNtIds.forEach((id) => ntToRun.set(id, runIdx));
+                        }
+                        currentHelix = mark.helixId;
+                        currentRunNtIds = [curr.id];
+                    }
+                    const n3ref = curr.n3;
+                    curr = (n3ref && n3ref instanceof Nucleotide) ? n3ref : null;
+                }
+                if (currentHelix !== null && binderPostSet.has(currentHelix) && currentRunNtIds.length > 0) {
+                    const runIdx = binderRuns.length;
+                    binderRuns.push({ helixId: currentHelix, ntIds: currentRunNtIds });
+                    currentRunNtIds.forEach((id) => ntToRun.set(id, runIdx));
+                }
+            }
+            // Force all binder substrands to forward direction.
+            for (const run of binderRuns) {
+                for (const ntId of run.ntIds) {
+                    const mark = grid.get(ntId);
+                    if (mark)
+                        mark.direction = 'forward';
+                }
+            }
+            const runCenter = (run) => {
+                let sum = 0;
+                let count = 0;
+                for (const ntId of run.ntIds) {
+                    const mark = grid.get(ntId);
+                    if (!mark)
+                        continue;
+                    sum += mark.offset;
+                    count++;
+                }
+                return count > 0 ? sum / count : 0;
+            };
+            const shiftRunBy = (run, delta) => {
+                if (delta === 0)
+                    return;
+                for (const ntId of run.ntIds) {
+                    const mark = grid.get(ntId);
+                    if (mark)
+                        mark.offset += delta;
+                }
+            };
+            // Keep pushing the front run by +5 until no binder run overlaps remain.
+            let guard = 0;
+            while (guard++ < 2000) {
+                const overlapBuckets = new Map();
+                for (const run of binderRuns) {
+                    for (const ntId of run.ntIds) {
+                        const mark = grid.get(ntId);
+                        if (!mark || !binderPostSet.has(mark.helixId))
+                            continue;
+                        const key = `${mark.helixId}|${mark.offset}`;
+                        if (!overlapBuckets.has(key))
+                            overlapBuckets.set(key, new Set());
+                        const runIdx = ntToRun.get(ntId);
+                        if (runIdx !== undefined)
+                            overlapBuckets.get(key).add(runIdx);
+                    }
+                }
+                let moved = false;
+                for (const [, runSet] of overlapBuckets.entries()) {
+                    if (runSet.size <= 1)
+                        continue;
+                    let frontRun = null;
+                    let frontCenter = -Infinity;
+                    for (const runIdx of runSet.values()) {
+                        const run = binderRuns[runIdx];
+                        if (!run)
+                            continue;
+                        const c = runCenter(run);
+                        if (c > frontCenter) {
+                            frontCenter = c;
+                            frontRun = run;
+                        }
+                    }
+                    if (frontRun) {
+                        shiftRunBy(frontRun, 5);
+                        moved = true;
+                        break;
+                    }
+                }
+                if (!moved)
+                    break;
+            }
+        }
         console.log(`[alignGridPrim] Aligned ${helixList.length} helices. Shifts:`, Object.fromEntries(Array.from(cumulativeShift.entries()).sort((a, b) => a[0] - b[0])));
+        validateGrid(grid);
+        const conflictsAfter = countGridConflicts(grid);
+        if (conflictsAfter > 0) {
+            throw new Error(`[alignGridPrim] Overlaps remain after post-pass: ${conflictsAfter}`);
+        }
         return { shifts: cumulativeShift };
     }
     toscad.alignGridPrim = alignGridPrim;
@@ -1511,12 +1681,34 @@ var toscad;
             };
             for (let helixId = 0; helixId < helixCount; helixId++)
                 ensure(helixId);
+            // Primary: backbone crossover connections
             for (const [from, toMap] of crossovers.entries()) {
                 const row = ensure(from);
                 for (const to of toMap.keys()) {
                     row.add(to);
                     ensure(to).add(from);
                 }
+            }
+            // Secondary: pair-bridge connections.
+            // Binder helices have NO backbone crossovers (n3/n5 never leave the
+            // same helix), so collectCrossovers misses them entirely.  Instead
+            // they attach to double-stranded helices via base-pair links.
+            // Scan every nucleotide in the grid: if nt A is on helixX and its
+            // pair is on helixY (different), add X<->Y to adjacency.
+            for (const [ntId, mark] of grid.entries()) {
+                const nt = elements.get(ntId);
+                if (!nt || !(nt instanceof Nucleotide))
+                    continue;
+                const pairNt = nt.pair;
+                if (!pairNt || !(pairNt instanceof Nucleotide))
+                    continue;
+                const pairMark = grid.get(pairNt.id);
+                if (!pairMark)
+                    continue;
+                if (pairMark.helixId === mark.helixId)
+                    continue;
+                ensure(mark.helixId).add(pairMark.helixId);
+                ensure(pairMark.helixId).add(mark.helixId);
             }
             return adjacency;
         };
@@ -1606,19 +1798,37 @@ var toscad;
                 return;
             const planned = new Set();
             const assignedTargets = new Map();
-            const yCandidate = neighbors[0];
-            // For helices with ≤3 connections the y direction is forced by grid parity:
-            //   (x + y) odd  → +1 (e.g. even-x/odd-y, odd-x/even-y)
-            //   (x + y) even → -1 (e.g. even-x/even-y, odd-x/odd-y)
-            // Using & 1 instead of % 2 so negatives resolve correctly.
-            // For ≥4 connections use the deltaY sign as before.
-            const totalConnections = adjacency.get(parentId)?.size ?? 0;
-            const yStep = totalConnections <= 3
-                ? (((parentCoord.x + parentCoord.y) & 1) === 1 ? 1 : -1)
-                : (yCandidate.delta.y < 0 ? 1 : -1);
-            assignedTargets.set(yCandidate.helixId, { x: parentCoord.x, y: parentCoord.y + yStep });
-            planned.add(yCandidate.helixId);
-            const remaining = neighbors.filter((entry) => !planned.has(entry.helixId));
+            // Only unplaced neighbors are candidates for new slots.
+            const unplacedNeighbors = neighbors.filter((entry) => !placed.has(entry.helixId));
+            // Assign Y only when at least one candidate is truly vertical,
+            // i.e. |dy| > |dx|. Otherwise skip Y and keep placements on ±X.
+            const verticalCandidates = unplacedNeighbors
+                .filter((entry) => Math.abs(entry.delta.y) > Math.abs(entry.delta.x))
+                .sort((a, b) => {
+                const dyDelta = Math.abs(b.delta.y) - Math.abs(a.delta.y);
+                if (dyDelta !== 0)
+                    return dyDelta;
+                const ratioA = Math.abs(a.delta.y) / (Math.abs(a.delta.x) + 1e-9);
+                const ratioB = Math.abs(b.delta.y) / (Math.abs(b.delta.x) + 1e-9);
+                if (ratioB !== ratioA)
+                    return ratioB - ratioA;
+                return a.helixId - b.helixId;
+            });
+            if (verticalCandidates.length > 0) {
+                const yCandidate = verticalCandidates[0];
+                // For helices with ≤3 connections the y direction is forced by grid parity:
+                //   (x + y) odd  → +1 (e.g. even-x/odd-y, odd-x/even-y)
+                //   (x + y) even → -1 (e.g. even-x/even-y, odd-x/odd-y)
+                // Using & 1 instead of % 2 so negatives resolve correctly.
+                // For ≥4 connections use the deltaY sign as before.
+                const totalConnections = adjacency.get(parentId)?.size ?? 0;
+                const yStep = totalConnections <= 3
+                    ? (((parentCoord.x + parentCoord.y) & 1) === 1 ? 1 : -1)
+                    : (yCandidate.delta.y < 0 ? 1 : -1);
+                assignedTargets.set(yCandidate.helixId, { x: parentCoord.x, y: parentCoord.y + yStep });
+                planned.add(yCandidate.helixId);
+            }
+            const remaining = unplacedNeighbors.filter((entry) => !planned.has(entry.helixId));
             const positive = remaining
                 .filter((entry) => entry.delta.x >= 0)
                 .sort((a, b) => b.delta.x - a.delta.x || a.helixId - b.helixId);
@@ -2386,6 +2596,57 @@ var toscad;
         return avgVector;
     }
     toscad.getCrossoverVector = getCrossoverVector;
+    function getCrossoverVectorWithBinders(helix1, helix2, helices) {
+        // Collect all nucleotides in helix1 into a Set for fast lookup
+        // const h1Set = new Set(helices[helix1].map(n => n.id));
+        const h2Set = new Set(helices[helix2].map(n => n.id));
+        const crossoverVectors = [];
+        // For binder-like regions, pair may be missing on one/both sides.
+        // Use the nucleotide position itself as fallback so these links still
+        // contribute to relative placement.
+        const localCenter = (nt) => {
+            const p = nt.pair;
+            if (p && p instanceof Nucleotide) {
+                return nt.getPos().clone().add(p.getPos()).multiplyScalar(0.5);
+            }
+            return nt.getPos().clone();
+        };
+        const pushVector = (n1, n2) => {
+            const c1 = localCenter(n1);
+            const c2 = localCenter(n2);
+            crossoverVectors.push(new THREE.Vector3().subVectors(c2, c1));
+        };
+        // Scan all nucleotides in helix 1 to find connections to helix 2
+        for (const n1 of helices[helix1]) {
+            // Check 5' backbone connection
+            if (n1.n5 && n1.n5 instanceof Nucleotide && h2Set.has(n1.n5.id)) {
+                const n2 = n1.n5;
+                pushVector(n1, n2);
+            }
+            // Check 3' backbone connection
+            if (n1.n3 && n1.n3 instanceof Nucleotide && h2Set.has(n1.n3.id)) {
+                const n2 = n1.n3;
+                pushVector(n1, n2);
+            }
+            // Check direct pair bridge across helices. This captures binder-like
+            // attachments where backbone crossover signatures are sparse/absent.
+            if (n1.pair && n1.pair instanceof Nucleotide && h2Set.has(n1.pair.id)) {
+                const n2 = n1.pair;
+                pushVector(n1, n2);
+            }
+            // same as running an average over all 4 nucleotides and then running an average over THOSE vectors
+        }
+        if (crossoverVectors.length === 0)
+            return null;
+        // Average all crossover displacement vectors into a final definitive step vector
+        const avgVector = new THREE.Vector3(0, 0, 0);
+        for (const v of crossoverVectors) {
+            avgVector.add(v);
+        }
+        avgVector.divideScalar(crossoverVectors.length);
+        return avgVector;
+    }
+    toscad.getCrossoverVectorWithBinders = getCrossoverVectorWithBinders;
     /**
      * Traverses the connections starting from Helix 0, and plots every connected helix
      * onto a 2D coordinate plane locally aligned relative to Helix 0's axis.
@@ -2399,15 +2660,36 @@ var toscad;
         positions.set(0, { x: 0, y: 0 });
         visited.add(0);
         queue.push(0);
-        // 1. Z-axis (Normal): The physical direction of Helix 0 itself.
+        // 1. Helix long-axis: the direction the helices run along (their "Z").
         const endPts = helixEndpoints(helices[0]);
         let longAxis = new THREE.Vector3(0, 0, 1);
         if (endPts && endPts.end1 && endPts.end2) {
             longAxis.subVectors(endPts.end1.getPos(), endPts.end2.getPos()).normalize();
         }
-        // We need to find the first valid neighbor connection to establish the X-axis (u0)
-        let u0 = null;
-        let u1 = null;
+        // 2. Build a deterministic 2D basis anchored to world axes, NOT to the
+        //    first crossover found.  This ensures the output (x, y) map directly
+        //    to world (X, Y) whenever possible, so plotting pos.x → world-X and
+        //    pos.y → world-Y is always correct rather than being rotated by an
+        //    arbitrary angle depending on BFS order.
+        //
+        //    Strategy: project world-X onto the plane perpendicular to longAxis.
+        //    If longAxis is nearly parallel to world-X, fall back to world-Y,
+        //    then world-Z.
+        const deriveU0 = (axis) => {
+            const candidates = [
+                new THREE.Vector3(1, 0, 0),
+                new THREE.Vector3(0, 1, 0),
+                new THREE.Vector3(0, 0, 1),
+            ];
+            for (const c of candidates) {
+                const proj = c.clone().projectOnPlane(axis);
+                if (proj.lengthSq() > 0.01)
+                    return proj.normalize();
+            }
+            return new THREE.Vector3(1, 0, 0); // degenerate fallback
+        };
+        const u0 = deriveU0(longAxis);
+        const u1 = new THREE.Vector3().crossVectors(longAxis, u0).normalize();
         // BFS
         while (queue.length > 0) {
             const curr = queue.shift();
@@ -2416,15 +2698,8 @@ var toscad;
                 if (i === curr)
                     continue;
                 // getCrossoverVector gives us the true 3D spatial step between core axes
-                const vec = getCrossoverVector(curr, i, helices);
+                const vec = getCrossoverVectorWithBinders(curr, i, helices);
                 if (vec) { // connection exists
-                    // If we haven't established our flat 2D plane yet, do it on the very first connection!
-                    if (!u0 || !u1) {
-                        // Project the crossover vector so it's perfectly orthogonal to Helix 0's Z-axis
-                        const proj = vec.clone().projectOnPlane(longAxis);
-                        u0 = proj.clone().normalize();
-                        u1 = new THREE.Vector3().crossVectors(longAxis, u0).normalize();
-                    }
                     // Assign position if we haven't placed this helix yet
                     if (!visited.has(i)) {
                         visited.add(i);
