@@ -2,6 +2,20 @@
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
 
+/*
+Here's an easy way to use this code:
+
+    const helices = await honda.findHelices(nucleotideElements, 3);
+    const { grid, binderHelices } = toscad.setGrid(helices);
+    toscad.directionAlign2(grid);
+    toscad.alignGridPrim(grid, binderHelices);
+    toscad.combinedHelices(15, grid, helices, binderHelices); // The 15 is arbitrary, just works well for now.
+    const { crossovers } = toscad.collectCrossovers(grid);
+    let helixPos = toscad.HelixPosByRelativeBfs(grid, helices);
+    let gridType = 'honeycomb'; // or 'square'. 
+    const scadnano = toscad.buildScadnano2(grid, helices, gridType, helixPos);
+*/
+
 namespace toscad {
     export function helixEndpoints(helices: Nucleotide[]) {
         // Find the two most distant endpoints in the helix using BFS.
@@ -410,7 +424,7 @@ namespace toscad {
         }
     }
 
-    export function getScaffoldStrand() {
+    function getScaffoldStrand() {
         let maxLen = 0;
         let scaffold: Strand | null = null;
         systems.forEach(s => {
@@ -665,11 +679,96 @@ namespace toscad {
         };
     }
 
+    // Helper function to collect all backbone crossovers with their helix and offset info.
+    // Slightly lengthy but quite useful.
+    export function crossoverNts(
+        grid: GridMap
+    ): Array<{
+        fromHelix: number;
+        toHelix: number;
+        fromOffset: number;
+        toOffset: number;
+        fromNt: Nucleotide;
+        toNt: Nucleotide;
+    }> {
+        const allNtIds = new Set<number>();
+        for (const [ntId] of grid.entries()) allNtIds.add(ntId);
+
+        const visited = new Set<number>();
+        const crossovers: Array<{
+            fromHelix: number;
+            toHelix: number;
+            fromOffset: number;
+            toOffset: number;
+            fromNt: Nucleotide;
+            toNt: Nucleotide;
+        }> = [];
+
+        for (const [ntId] of grid.entries()) {
+            if (visited.has(ntId)) continue;
+
+            const startNt = elements.get(ntId) as Nucleotide | undefined;
+            if (!startNt || !(startNt instanceof Nucleotide)) continue;
+
+            // Find 5' end
+            let fivePrime: Nucleotide = startNt;
+            const walkBack = new Set<number>();
+            walkBack.add(fivePrime.id);
+
+            while (true) {
+                const prev = fivePrime.n5;
+                if (!prev || !(prev instanceof Nucleotide)) break;
+                if (!allNtIds.has(prev.id)) break;
+                if (walkBack.has(prev.id)) break;
+                walkBack.add(prev.id);
+                fivePrime = prev;
+            }
+
+            // Walk 5' -> 3' and record backbone helix transitions
+            let curr: Nucleotide | null = fivePrime;
+            const walkForward = new Set<number>();
+            let prevNt: Nucleotide | null = null;
+            let prevMark: GridMark | null = null;
+
+            while (curr && curr instanceof Nucleotide && allNtIds.has(curr.id)) {
+                if (walkForward.has(curr.id)) break;
+                walkForward.add(curr.id);
+                visited.add(curr.id);
+
+                const mark = grid.get(curr.id);
+
+                if (mark) {
+                    if (prevNt && prevMark && prevMark.helixId !== mark.helixId) {
+                        crossovers.push({
+                            fromHelix: prevMark.helixId,
+                            toHelix: mark.helixId,
+                            fromOffset: prevMark.offset,
+                            toOffset: mark.offset,
+                            fromNt: prevNt,
+                            toNt: curr
+                        });
+                    }
+
+                    prevNt = curr;
+                    prevMark = mark;
+                } else {
+                    prevNt = null;
+                    prevMark = null;
+                }
+
+                const n3ref: any = curr.n3;
+                curr = (n3ref && n3ref instanceof Nucleotide) ? (n3ref as Nucleotide) : null;
+            }
+        }
+
+        return crossovers;
+    }
+
     // ── Shared helper: collect all crossover shift observations ──────
     // For each pair of helices connected by backbone crossovers, returns
     // the list of observed shifts (offsetA - offsetB for each crossover
     // from A→B). Used by both alignGridPrim and alignGridDP.
-    function collectShiftObservations(grid: GridMap) {
+    export function collectShiftObservations(grid: GridMap) {
         const allNtIds = new Set<number>();
         for (const [ntId] of grid.entries()) allNtIds.add(ntId);
 

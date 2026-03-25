@@ -1,6 +1,19 @@
 /// <reference path="../typescript_definitions/index.d.ts" />
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
+/*
+Here's an easy way to use this code:
+
+    const helices = await honda.findHelices(nucleotideElements, 3);
+    const { grid, binderHelices } = toscad.setGrid(helices);
+    toscad.directionAlign2(grid);
+    toscad.alignGridPrim(grid, binderHelices);
+    toscad.combinedHelices(15, grid, helices, binderHelices); // The 15 is arbitrary, just works well for now.
+    const { crossovers } = toscad.collectCrossovers(grid);
+    let helixPos = toscad.HelixPosByRelativeBfs(grid, helices);
+    let gridType = 'honeycomb'; // or 'square'.
+    const scadnano = toscad.buildScadnano2(grid, helices, gridType, helixPos);
+*/
 var toscad;
 (function (toscad) {
     function helixEndpoints(helices) {
@@ -422,7 +435,6 @@ var toscad;
         });
         return scaffold;
     }
-    toscad.getScaffoldStrand = getScaffoldStrand;
     function collectCrossovers(grid) {
         const allNtIds = new Set();
         for (const [ntId] of grid.entries())
@@ -643,6 +655,71 @@ var toscad;
         };
     }
     toscad.directionAlign2 = directionAlign2;
+    // Helper function to collect all backbone crossovers with their helix and offset info.
+    // Slightly lengthy but quite useful.
+    function crossoverNts(grid) {
+        const allNtIds = new Set();
+        for (const [ntId] of grid.entries())
+            allNtIds.add(ntId);
+        const visited = new Set();
+        const crossovers = [];
+        for (const [ntId] of grid.entries()) {
+            if (visited.has(ntId))
+                continue;
+            const startNt = elements.get(ntId);
+            if (!startNt || !(startNt instanceof Nucleotide))
+                continue;
+            // Find 5' end
+            let fivePrime = startNt;
+            const walkBack = new Set();
+            walkBack.add(fivePrime.id);
+            while (true) {
+                const prev = fivePrime.n5;
+                if (!prev || !(prev instanceof Nucleotide))
+                    break;
+                if (!allNtIds.has(prev.id))
+                    break;
+                if (walkBack.has(prev.id))
+                    break;
+                walkBack.add(prev.id);
+                fivePrime = prev;
+            }
+            // Walk 5' -> 3' and record backbone helix transitions
+            let curr = fivePrime;
+            const walkForward = new Set();
+            let prevNt = null;
+            let prevMark = null;
+            while (curr && curr instanceof Nucleotide && allNtIds.has(curr.id)) {
+                if (walkForward.has(curr.id))
+                    break;
+                walkForward.add(curr.id);
+                visited.add(curr.id);
+                const mark = grid.get(curr.id);
+                if (mark) {
+                    if (prevNt && prevMark && prevMark.helixId !== mark.helixId) {
+                        crossovers.push({
+                            fromHelix: prevMark.helixId,
+                            toHelix: mark.helixId,
+                            fromOffset: prevMark.offset,
+                            toOffset: mark.offset,
+                            fromNt: prevNt,
+                            toNt: curr
+                        });
+                    }
+                    prevNt = curr;
+                    prevMark = mark;
+                }
+                else {
+                    prevNt = null;
+                    prevMark = null;
+                }
+                const n3ref = curr.n3;
+                curr = (n3ref && n3ref instanceof Nucleotide) ? n3ref : null;
+            }
+        }
+        return crossovers;
+    }
+    toscad.crossoverNts = crossoverNts;
     // ── Shared helper: collect all crossover shift observations ──────
     // For each pair of helices connected by backbone crossovers, returns
     // the list of observed shifts (offsetA - offsetB for each crossover
@@ -714,6 +791,7 @@ var toscad;
         }
         return { shifts, helixIds };
     }
+    toscad.collectShiftObservations = collectShiftObservations;
     // ── Helper: compute median of a sorted-or-unsorted number array ─
     function median(arr) {
         if (arr.length === 0)
