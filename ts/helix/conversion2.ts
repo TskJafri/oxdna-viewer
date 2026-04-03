@@ -17,16 +17,17 @@ Here's an easy way to use this code:
 */
 
 namespace toscad {
-    export function helixEndpoints(helices: Nucleotide[]) {
+    export function helixEndpoints(helix: Nucleotide[]) {
         // Find the two most distant endpoints in the helix using BFS.
 
         // first we remove duplicates
         // best hope is that there never should be. All of the duplicates must necessarily be removed by findhelix2.ts.
-        const nodes: Nucleotide[] = Array.from(new Map<number, Nucleotide>(helices.map((n: Nucleotide) => [n.id, n])).values());
+        const nodes: Nucleotide[] = Array.from(new Map<number, Nucleotide>(helix.map((n: Nucleotide) => [n.id, n])).values());
         if (!nodes.length) return null;
-        if (nodes.length !== helices.length) {
+        if (nodes.length !== helix.length) {
             console.log("Holy shit the world is doomed");
-            console.log("Just kidding, there are duplicates in the helices");
+            console.log("Just kidding, there are duplicates in the helix");
+            console.log("Did you give 1 helix as input or all of them? This function only takes 1.")
             console.warn("Pay attention something went wrong")
         }
 
@@ -109,6 +110,327 @@ namespace toscad {
     type GridMark = { helixId: number; offset: number; direction: 'forward' | 'backward' };
     type GridMap = Map<number, GridMark>;
     type Direction = 'n3' | 'n5';
+
+    export function crossoverEndpointsHelix(
+        grid: GridMap,
+        helix: Nucleotide[],
+        helixId: number
+    ) {
+        const nodes: Nucleotide[] = Array.from(
+            new Map<number, Nucleotide>(helix.map((nt: Nucleotide) => [nt.id, nt])).values()
+        );
+        if (!nodes.length) return null;
+
+        const nodeById = new Map<number, Nucleotide>(nodes.map((nt: Nucleotide) => [nt.id, nt]));
+        const neighbors = (nt: Nucleotide): Nucleotide[] => {
+            const list: Nucleotide[] = [];
+            const n5 = nt.n5; if (n5 instanceof Nucleotide && nodeById.has(n5.id)) list.push(n5);
+            const n3 = nt.n3; if (n3 instanceof Nucleotide && nodeById.has(n3.id)) list.push(n3);
+            const pair = nt.pair; if (pair instanceof Nucleotide && nodeById.has(pair.id)) list.push(pair);
+            return list;
+        };
+
+        const bfsDistances = (start: Nucleotide) => {
+            const q: Nucleotide[] = [start];
+            const dist = new Map<number, number>();
+            dist.set(start.id, 0);
+
+            for (let i = 0; i < q.length; i++) {
+                const cur = q[i];
+                const d = dist.get(cur.id);
+                if (d === undefined) continue;
+
+                for (const nb of neighbors(cur)) {
+                    if (!dist.has(nb.id)) {
+                        dist.set(nb.id, d + 1);
+                        q.push(nb);
+                    }
+                }
+            }
+
+            return dist;
+        };
+
+        const crossoverNtIdsByHelix = new Map<number, Set<number>>();
+        const ensureSet = (hId: number) => {
+            if (!crossoverNtIdsByHelix.has(hId)) crossoverNtIdsByHelix.set(hId, new Set<number>());
+            return crossoverNtIdsByHelix.get(hId)!;
+        };
+
+        for (const crossover of crossoverNts(grid)) {
+            ensureSet(crossover.fromHelix).add(crossover.fromNt.id);
+            ensureSet(crossover.toHelix).add(crossover.toNt.id);
+        }
+
+        const crossoverIds = crossoverNtIdsByHelix.get(helixId);
+        if (!crossoverIds || crossoverIds.size === 0) return null;
+
+        const helixEnds = helixEndpoints(nodes);
+        if (!helixEnds) return null;
+
+        const closestCrossoverFrom = (start: Nucleotide): Nucleotide | null => {
+            const dist = bfsDistances(start);
+            let bestNt: Nucleotide | null = null;
+            let bestDist = Infinity;
+
+            for (const ntId of crossoverIds) {
+                const d = dist.get(ntId);
+                if (d === undefined) continue;
+                if (d < bestDist) {
+                    const nt = nodeById.get(ntId);
+                    if (!nt) continue;
+                    bestDist = d;
+                    bestNt = nt;
+                }
+            }
+
+            return bestNt;
+        };
+
+        const end1 = closestCrossoverFrom(helixEnds.end1);
+        const end2 = closestCrossoverFrom(helixEnds.end2);
+        if (!end1 || !end2) return null;
+
+        const diameter = bfsDistances(end1).get(end2.id) ?? 0;
+        return { end1, end2, diameter };
+    }
+
+    export function getAngles(
+        grid: GridMap,
+        helices: Nucleotide[][],
+        helixId: number,
+        lattice: string
+    ): Map<number, {
+        helixId: number;
+        adj_helix: number;
+        angle: number;
+    }> {
+        const result = new Map<number, {
+            helixId: number;
+            adj_helix: number;
+            angle: number;
+        }>();
+
+        // Ideal phase remainders within one 10.5-base helical turn.
+        const validPhases: Record<number, number[]> = {
+            0: [0.0, 3.5, 7.0, 10.5],
+            1: [1.75, 5.25, 8.75]
+        };
+
+        const nearestCandidate = (value: number, candidates: number[]) => {
+            if (!candidates.length) return value;
+            return candidates.reduce((best, curr) =>
+                Math.abs(curr - value) < Math.abs(best - value) ? curr : best,
+                candidates[0]
+            );
+        };
+
+        const latticeType = (lattice ?? '').toLowerCase();
+
+        console.log(`[getAngles] Start helix=${helixId}, lattice=${latticeType || 'unspecified'}, snapMode=phaseModulo10.5`);
+
+        const helix = helices[helixId] ?? [];
+
+        const endpointPair = crossoverEndpointsHelix(grid, helix, helixId);
+        if (!endpointPair) {
+            console.log(`[getAngles] No crossover endpoints found for helix ${helixId}`);
+            return result;
+        }
+
+        const end1 = endpointPair.end1;
+        console.log(
+            `[getAngles] crossoverEndpointsHelix(${helixId}) => end1=${endpointPair.end1.id}, end2=${endpointPair.end2.id}, distance=${endpointPair.diameter}`
+        );
+
+        const nodes: Nucleotide[] = Array.from(
+            new Map<number, Nucleotide>(helix.map((nt: Nucleotide) => [nt.id, nt])).values()
+        );
+        const nodeById = new Map<number, Nucleotide>(nodes.map((nt: Nucleotide) => [nt.id, nt]));
+        const neighbors = (nt: Nucleotide): Nucleotide[] => {
+            const list: Nucleotide[] = [];
+            const n5 = nt.n5; if (n5 instanceof Nucleotide && nodeById.has(n5.id)) list.push(n5);
+            const n3 = nt.n3; if (n3 instanceof Nucleotide && nodeById.has(n3.id)) list.push(n3);
+            const pair = nt.pair; if (pair instanceof Nucleotide && nodeById.has(pair.id)) list.push(pair);
+            return list;
+        };
+
+        const bfsDistances = (start: Nucleotide) => {
+            const q: Nucleotide[] = [start];
+            const dist = new Map<number, number>();
+            dist.set(start.id, 0);
+
+            for (let i = 0; i < q.length; i++) {
+                const cur = q[i];
+                const d = dist.get(cur.id);
+                if (d === undefined) continue;
+
+                for (const nb of neighbors(cur)) {
+                    if (!dist.has(nb.id)) {
+                        dist.set(nb.id, d + 1);
+                        q.push(nb);
+                    }
+                }
+            }
+
+            return dist;
+        };
+
+        // nt -> set of connected helix ids through crossover transitions.
+        const ntToConnectedHelices = new Map<number, Set<number>>();
+        const addConnection = (ntId: number, otherHelix: number) => {
+            if (!ntToConnectedHelices.has(ntId)) ntToConnectedHelices.set(ntId, new Set<number>());
+            ntToConnectedHelices.get(ntId)!.add(otherHelix);
+        };
+
+        const crossoverList = crossoverNts(grid);
+        for (const crossover of crossoverList) {
+            addConnection(crossover.fromNt.id, crossover.toHelix);
+            addConnection(crossover.toNt.id, crossover.fromHelix);
+        }
+
+        const helixCrossNtIds = new Set<number>();
+        for (const nt of nodes) {
+            if (ntToConnectedHelices.has(nt.id)) helixCrossNtIds.add(nt.id);
+        }
+        if (!helixCrossNtIds.size) {
+            console.log(`[getAngles] Helix ${helixId} has no crossover nucleotides in this grid`);
+            return result;
+        }
+
+        // Use collectCrossovers to discover which helices this helix connects to.
+        const { crossovers } = collectCrossovers(grid);
+        const connectedHelices = new Set<number>();
+        const forward = crossovers.get(helixId);
+        if (forward) {
+            for (const [toHelix] of forward.entries()) connectedHelices.add(toHelix);
+        }
+        for (const [fromHelix, toMap] of crossovers.entries()) {
+            if (toMap.has(helixId)) connectedHelices.add(fromHelix);
+        }
+
+        // Fallback from per-nt connectivity if collectCrossovers misses anything.
+        for (const ntId of helixCrossNtIds) {
+            const connected = ntToConnectedHelices.get(ntId);
+            if (!connected) continue;
+            for (const h of connected) connectedHelices.add(h);
+        }
+        connectedHelices.delete(helixId);
+        if (!connectedHelices.size) {
+            console.log(`[getAngles] Helix ${helixId} has no connected helices`);
+            return result;
+        }
+
+        const end1Mark = grid.get(end1.id);
+        if (!end1Mark) {
+            console.log(`[getAngles] end1 nt=${end1.id} is missing from grid`);
+            return result;
+        }
+
+        console.log(
+            `[getAngles] Reference nt end1=${end1.id} offset=${end1Mark.offset} direction=${end1Mark.direction}`
+        );
+
+        const end1Connected = ntToConnectedHelices.get(end1.id) ?? new Set<number>();
+        const seenHelices = new Set<number>();
+
+        console.log(
+            `[getAngles] end1 nt=${end1.id} connects to helices: [${Array.from(end1Connected).sort((a, b) => a - b).join(', ')}]`
+        );
+
+        // Baseline: helix connected at end1 has zero relative angle.
+        for (const h of end1Connected) {
+            if (!connectedHelices.has(h)) continue;
+            result.set(h, {
+                helixId,
+                adj_helix: h,
+                angle: 0
+            });
+            seenHelices.add(h);
+            console.log(
+                `[getAngles] Baseline angle set: nt=${end1.id}, helix ${helixId} -> helix ${h}, angle=0`
+            );
+        }
+
+        const startNode = nodeById.get(end1.id) ?? end1;
+        const distFromEnd1 = bfsDistances(startNode);
+        const orderedCrossovers = Array.from(helixCrossNtIds)
+            .filter((ntId) => ntId !== end1.id)
+            .map((ntId) => ({ ntId, dist: distFromEnd1.get(ntId) }))
+            .filter((entry): entry is { ntId: number; dist: number } => entry.dist !== undefined)
+            .sort((a, b) => a.dist - b.dist || a.ntId - b.ntId);
+
+        for (const { ntId, dist } of orderedCrossovers) {
+            if (seenHelices.size >= connectedHelices.size) break;
+
+            const candidateConnections = ntToConnectedHelices.get(ntId);
+            if (!candidateConnections) {
+                console.log(`[getAngles] Skip nt=${ntId} (distance=${dist}): no connected helices found`);
+                continue;
+            }
+
+            const candidateConnectionList = Array.from(candidateConnections).sort((a, b) => a - b);
+            console.log(
+                `[getAngles] Consider nt=${ntId} (distance=${dist}) connected helices=[${candidateConnectionList.join(', ')}]`
+            );
+
+            const freshHelices: number[] = [];
+            for (const h of candidateConnections) {
+                if (!connectedHelices.has(h)) continue;
+                if (seenHelices.has(h)) continue;
+                if (end1Connected.has(h)) continue;
+                freshHelices.push(h);
+            }
+            if (freshHelices.length === 0) {
+                console.log(
+                    `[getAngles] Skip nt=${ntId}: only already-seen or end1-connected helices`
+                );
+                continue;
+            }
+
+            const otherMark = grid.get(ntId);
+            if (!otherMark) {
+                console.log(`[getAngles] Skip nt=${ntId}: missing grid mark`);
+                continue;
+            }
+
+            const rawX = otherMark.offset - end1Mark.offset;
+            const absX = Math.abs(rawX);
+            const sign = Math.sign(rawX) || 1;
+            const y = end1Mark.direction === otherMark.direction ? 0 : 1;
+            const phase = absX % 10.5;
+            const phases = validPhases[y] ?? [];
+            const idealPhase = nearestCandidate(phase, phases);
+            const idealAbsX = (Math.floor(absX / 10.5) * 10.5) + idealPhase;
+            const idealX = idealAbsX * sign;
+            const angleRaw = (360 / 10.5) * idealX + (y * 180);
+            const angle = Math.round(((angleRaw % 360) + 360) % 360);
+
+            console.log(
+                `[getAngles] Use nts end1=${end1.id} and other=${ntId}; ` +
+                `offsets=(${end1Mark.offset},${otherMark.offset}) directions=(${end1Mark.direction},${otherMark.direction}) ` +
+                `rawX=${rawX} absX=${absX} y=${y} phase=${phase} idealPhase=${idealPhase} idealX=${idealX} raw=${angleRaw} angle=${angle}`
+            );
+
+            for (const h of freshHelices) {
+                result.set(h, {
+                    helixId,
+                    adj_helix: h,
+                    angle: angle
+                });
+                seenHelices.add(h);
+                console.log(
+                    `[getAngles] Angle set: helix ${helixId} -> helix ${h} via nt ${ntId} = ${angle}`
+                );
+            }
+        }
+
+        console.log(
+            `[getAngles] Final angle map for helix ${helixId}: ` +
+            `${JSON.stringify(Array.from(result.entries()).sort((a, b) => a[0] - b[0]))}`
+        );
+
+        return result;
+    }
 
     // Helper interface to keep track of where we are on both strands
     interface DualCursor {
@@ -575,28 +897,48 @@ namespace toscad {
      * BFS from helix 0 (anchor). Flip immediately, re-scan, proceed.
      */
 
-    // TODO: needs more testing.
     export function directionAlign2(grid: GridMap) {
 
-        // ── Initial scan to discover all helices ────────────────────────
-        const { helixIds } = collectCrossovers(grid);
+        // ── Initial scan to discover all helices and crossover stats ────
+        const { crossovers, helixIds } = collectCrossovers(grid);
 
         const anchored = new Set<number>();
         const flippedHelices: number[] = [];
+        let edgeCount = 0;
+
+        for (const [fromHelix, neighbors] of crossovers.entries()) {
+            for (const [toHelix, stats] of neighbors.entries()) {
+                if (fromHelix >= toHelix) continue;
+                if (stats.sameWalk + stats.diffWalk <= 0) continue;
+                edgeCount++;
+            }
+        }
+
+        const applyFlipToCrossoverStats = (helixId: number) => {
+            const neighbors = crossovers.get(helixId);
+            if (!neighbors) return;
+
+            for (const [neighborHelix, stats] of neighbors.entries()) {
+                const reverseStats = crossovers.get(neighborHelix)?.get(helixId);
+                if (!reverseStats) continue;
+
+                const same = stats.sameWalk;
+                stats.sameWalk = stats.diffWalk;
+                stats.diffWalk = same;
+
+                const reverseSame = reverseStats.sameWalk;
+                reverseStats.sameWalk = reverseStats.diffWalk;
+                reverseStats.diffWalk = reverseSame;
+            }
+        };
 
         // Anchor helix 0
         anchored.add(0);
         const queue: number[] = [0];
         let qIdx = 0;
 
-        // Unoptimized, brute force code.
-        // Every flip, it rescans all crossovers/
-        // Need to make it more efficient.
         while (qIdx < queue.length) {
             const currHelix = queue[qIdx++];
-
-            // Re-scan crossovers from the CURRENT grid state (post-flips)
-            const { crossovers } = collectCrossovers(grid);
 
             const neighbors = crossovers.get(currHelix);
             if (!neighbors) continue;
@@ -624,6 +966,7 @@ namespace toscad {
                 if (shouldFlip) {
                     gridFlip(grid, neighborHelix);
                     flippedHelices.push(neighborHelix);
+                    applyFlipToCrossoverStats(neighborHelix);
                 }
 
                 anchored.add(neighborHelix);
@@ -641,7 +984,6 @@ namespace toscad {
 
             while (subIdx < subQueue.length) {
                 const currHelix = subQueue[subIdx++];
-                const { crossovers } = collectCrossovers(grid);
                 const neighbors = crossovers.get(currHelix);
                 if (!neighbors) continue;
 
@@ -663,6 +1005,7 @@ namespace toscad {
                     if (totalSameWalk > totalDiffWalk) {
                         gridFlip(grid, neighborHelix);
                         flippedHelices.push(neighborHelix);
+                        applyFlipToCrossoverStats(neighborHelix);
                     }
 
                     anchored.add(neighborHelix);
@@ -675,7 +1018,7 @@ namespace toscad {
 
         return {
             flippedHelices: flippedHelices.sort((a, b) => a - b),
-            edgeCount: 0
+            edgeCount
         };
     }
 

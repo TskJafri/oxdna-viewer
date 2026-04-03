@@ -39,6 +39,7 @@ async function calculateScadnanoHelixPos(): Promise<Map<number, [number, number]
     const { crossovers } = toscad.collectCrossovers(grid);
     currentScadnanoConnections = buildScadnanoConnections(crossovers);
     return toscad.HelixPosByRelativeBfs(grid, helices);
+    // return toscad.helixPosCrossover(grid);
 }
 
 function buildScadnanoConnections(crossovers: Map<number, Map<number, { sameWalk: number; diffWalk: number }>>): Array<[number, number]> {
