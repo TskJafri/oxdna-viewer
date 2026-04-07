@@ -172,7 +172,7 @@ async function scadnanoDialogExport() {
 
     if (!helixPosCheckbox.checked) {
         try {
-            await exportScadnanoNoPos(name, 'square');
+            await exportScadnanoNoPos(name, gridType);
         } catch (err) {
             notify(`Scadnano export failed: ${err}`, 'alert');
         }

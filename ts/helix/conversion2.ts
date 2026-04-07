@@ -110,6 +110,41 @@ namespace toscad {
     type GridMark = { helixId: number; offset: number; direction: 'forward' | 'backward' };
     type GridMap = Map<number, GridMark>;
     type Direction = 'n3' | 'n5';
+    type LatticeKind = 'honeycomb' | 'square';
+    type PhaseParity = 0 | 1;
+
+    interface LatticePhaseConfig {
+        basesPerTurn: number;
+        phases: Record<PhaseParity, number[]>;
+        voidPhase: number | null;
+        tieEpsilon: number;
+    }
+
+    const LATTICE_CONFIG: Record<LatticeKind, LatticePhaseConfig> = {
+        honeycomb: {
+            basesPerTurn: 10.5,
+            phases: {
+                0: [0.0, 3.5, 7.0, 10.5],
+                // 1: [1.75, 5.25, 8.75]
+                // 1: [2.77, 6.27, 9.77]
+                1: [0.7292, 4.229, 7.7292]
+            },
+            voidPhase: 5.25,
+            tieEpsilon: 0.01
+        },
+        square: {
+            basesPerTurn: 32 / 3,
+            phases: {
+                0: [0.0, 8 / 3, 16 / 3, 8.0, 32 / 3],
+                1: [4 / 3, 4.0, 20 / 3, 28 / 3]
+            },
+            voidPhase: null,
+            tieEpsilon: 0.01
+        }
+    };
+
+    const resolveLatticeKind = (lattice: string): LatticeKind =>
+        (lattice ?? '').toLowerCase() === 'square' ? 'square' : 'honeycomb';
 
     export function crossoverEndpointsHelix(
         grid: GridMap,
@@ -211,23 +246,36 @@ namespace toscad {
             angle: number;
         }>();
 
-        // Ideal phase remainders within one 10.5-base helical turn.
-        const validPhases: Record<number, number[]> = {
-            0: [0.0, 3.5, 7.0, 10.5],
-            1: [1.75, 5.25, 8.75]
-        };
+        const requestedLattice = (lattice ?? '').toLowerCase();
+        const latticeType = resolveLatticeKind(lattice);
+        const latticeConfig = LATTICE_CONFIG[latticeType];
 
-        const nearestCandidate = (value: number, candidates: number[]) => {
+        const nearestPhase = (value: number, parity: PhaseParity) => {
+            const candidates = latticeConfig.phases[parity] ?? [];
             if (!candidates.length) return value;
-            return candidates.reduce((best, curr) =>
-                Math.abs(curr - value) < Math.abs(best - value) ? curr : best,
-                candidates[0]
-            );
+
+            return candidates.reduce((prev, curr) => {
+                const distPrev = Math.abs(prev - value);
+                const distCurr = Math.abs(curr - value);
+
+                // For opposite-direction snaps, avoid void phase ties when configured.
+                if (
+                    parity === 1
+                    && latticeConfig.voidPhase !== null
+                    && Math.abs(distPrev - distCurr) < latticeConfig.tieEpsilon
+                ) {
+                    if (prev === latticeConfig.voidPhase && curr !== latticeConfig.voidPhase) return curr;
+                    if (curr === latticeConfig.voidPhase && prev !== latticeConfig.voidPhase) return prev;
+                }
+
+                return distCurr < distPrev ? curr : prev;
+            }, candidates[0]);
         };
 
-        const latticeType = (lattice ?? '').toLowerCase();
-
-        console.log(`[getAngles] Start helix=${helixId}, lattice=${latticeType || 'unspecified'}, snapMode=phaseModulo10.5`);
+        console.log(
+            `[getAngles] Start helix=${helixId}, requestedLattice=${requestedLattice || 'unspecified'}, ` +
+            `resolvedLattice=${latticeType}, basesPerTurn=${latticeConfig.basesPerTurn}, snapMode=phaseDictionary`
+        );
 
         const helix = helices[helixId] ?? [];
 
@@ -237,9 +285,37 @@ namespace toscad {
             return result;
         }
 
-        const end1 = endpointPair.end1;
+        const firstEnd = endpointPair.end1;
+        const secondEnd = endpointPair.end2;
+        const firstEndMark = grid.get(firstEnd.id);
+        const secondEndMark = grid.get(secondEnd.id);
+
+        if (!firstEndMark && !secondEndMark) {
+            console.log(
+                `[getAngles] Both endpoint marks missing from grid: end1=${firstEnd.id}, end2=${secondEnd.id}`
+            );
+            return result;
+        }
+
+        const useSecondEnd = !firstEndMark
+            || (!!firstEndMark && !!secondEndMark && secondEndMark.offset < firstEndMark.offset);
+
+        const end1 = useSecondEnd ? secondEnd : firstEnd;
+        const end2 = useSecondEnd ? firstEnd : secondEnd;
+        const end1Mark = useSecondEnd ? secondEndMark : firstEndMark;
+        const end2Mark = useSecondEnd ? firstEndMark : secondEndMark;
+
+        if (!end1Mark) {
+            console.log(`[getAngles] Chosen endpoint nt=${end1.id} is missing from grid`);
+            return result;
+        }
+
         console.log(
             `[getAngles] crossoverEndpointsHelix(${helixId}) => end1=${endpointPair.end1.id}, end2=${endpointPair.end2.id}, distance=${endpointPair.diameter}`
+        );
+        console.log(
+            `[getAngles] Reference endpoint selected: end1=${end1.id} (offset=${end1Mark.offset}), ` +
+            `end2=${end2.id} (offset=${end2Mark?.offset ?? 'missing'})`
         );
 
         const nodes: Nucleotide[] = Array.from(
@@ -320,12 +396,6 @@ namespace toscad {
             return result;
         }
 
-        const end1Mark = grid.get(end1.id);
-        if (!end1Mark) {
-            console.log(`[getAngles] end1 nt=${end1.id} is missing from grid`);
-            return result;
-        }
-
         console.log(
             `[getAngles] Reference nt end1=${end1.id} offset=${end1Mark.offset} direction=${end1Mark.direction}`
         );
@@ -396,19 +466,20 @@ namespace toscad {
             const rawX = otherMark.offset - end1Mark.offset;
             const absX = Math.abs(rawX);
             const sign = Math.sign(rawX) || 1;
-            const y = end1Mark.direction === otherMark.direction ? 0 : 1;
-            const phase = absX % 10.5;
-            const phases = validPhases[y] ?? [];
-            const idealPhase = nearestCandidate(phase, phases);
-            const idealAbsX = (Math.floor(absX / 10.5) * 10.5) + idealPhase;
-            const idealX = idealAbsX * sign;
-            const angleRaw = (360 / 10.5) * idealX + (y * 180);
+            const y: PhaseParity = end1Mark.direction === otherMark.direction ? 0 : 1;
+            const phase = absX % latticeConfig.basesPerTurn;
+            const phases = latticeConfig.phases[y] ?? [];
+            const idealPhase = nearestPhase(phase, y);
+            const idealAbsX = (Math.floor(absX / latticeConfig.basesPerTurn) * latticeConfig.basesPerTurn) + idealPhase;
+            const idealX = idealAbsX * sign + 1;
+            const angleRaw = (360 / latticeConfig.basesPerTurn) * idealX + (y * 215 * sign);
             const angle = Math.round(((angleRaw % 360) + 360) % 360);
 
             console.log(
                 `[getAngles] Use nts end1=${end1.id} and other=${ntId}; ` +
                 `offsets=(${end1Mark.offset},${otherMark.offset}) directions=(${end1Mark.direction},${otherMark.direction}) ` +
-                `rawX=${rawX} absX=${absX} y=${y} phase=${phase} idealPhase=${idealPhase} idealX=${idealX} raw=${angleRaw} angle=${angle}`
+                `rawX=${rawX} absX=${absX} y=${y} basesPerTurn=${latticeConfig.basesPerTurn} ` +
+                `phase=${phase} candidates=[${phases.join(', ')}] idealPhase=${idealPhase} idealX=${idealX} raw=${angleRaw} angle=${angle}`
             );
 
             for (const h of freshHelices) {

@@ -149,7 +149,7 @@ async function scadnanoDialogExport() {
     const gridType = scadnanoGrid.value === 'honeycomb' ? 'honeycomb' : 'square';
     if (!helixPosCheckbox.checked) {
         try {
-            await exportScadnanoNoPos(name, 'square');
+            await exportScadnanoNoPos(name, gridType);
         }
         catch (err) {
             notify(`Scadnano export failed: ${err}`, 'alert');
