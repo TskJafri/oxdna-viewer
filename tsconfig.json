@@ -1,13 +1,15 @@
 {
     "compilerOptions": {
         "outDir": "./dist/",        // path to output directory
+      "rootDir": "./ts/",         // common source directory for emitted files
         //"sourceMap": true,          // allow sourcemap support
         "strictNullChecks": false,   // disable strict null checking because it doesn't like our file parsing code
         "module": "esnext",            // specify module code generation
         //"jsx": "react",             // use typescript to transpile jsx to js
         "target": "esnext",            // specify ECMAScript target version
         //"allowJs": true,             // allow a partial TypeScript and JavaScript codebase     
-        "moduleResolution": "node"       
+      "moduleResolution": "node",
+      "ignoreDeprecations": "6.0"
     },
     "files": [
       "./ts/main.ts",
@@ -40,6 +42,7 @@
       "./ts/helix/scadnano_gridview.ts",
       "./ts/helix/ssrna.ts",
       "./ts/helix/conversion2.ts",
+      "./ts/helix/gridpos.ts",
       "./ts/model/aminoAcid.ts",
       "./ts/model/basicElement.ts",
       "./ts/model/DNA.ts",
