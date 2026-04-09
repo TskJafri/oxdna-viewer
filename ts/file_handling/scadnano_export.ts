@@ -38,7 +38,11 @@ async function calculateScadnanoHelixPos(): Promise<Map<number, [number, number]
     toscad.combinedHelices(15, grid, helices, binderHelices);
     const { crossovers } = toscad.collectCrossovers(grid);
     currentScadnanoConnections = buildScadnanoConnections(crossovers);
-    return toscad.HelixPosByRelativeBfs(grid, helices);
+    let angles = toscad.getAngles(grid, helices, 'honeycomb');
+    let corrected = toscad.anglecomb(grid, helices, 'honeycomb', angles);
+    let correct = toscad.anglecorr(grid, helices, 'honeycomb', corrected.networkMap);
+    // return toscad.HelixPosByRelativeBfs(grid, helices);
+    return toscad.calculateGlobalPositions(correct.networkMap)
     // return toscad.HelixPosAngles(grid, helices, 'honeycomb');
     // return toscad.helixPosCrossover(grid);
 }

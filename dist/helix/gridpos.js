@@ -26,221 +26,8 @@ var toscad;
             tieEpsilon: 0.01
         }
     };
-    function getAnglesold(grid, helices, helixId, lattice) {
-        const result = new Map();
-        const requestedLattice = (lattice ?? '').toLowerCase();
-        const latticeType = resolveLatticeKind(lattice);
-        const latticeConfig = LATTICE_CONFIG[latticeType];
-        const nearestPhase = (value, parity) => {
-            const candidates = latticeConfig.phases[parity] ?? [];
-            if (!candidates.length)
-                return value;
-            return candidates.reduce((prev, curr) => {
-                const distPrev = Math.abs(prev - value);
-                const distCurr = Math.abs(curr - value);
-                // For opposite-direction snaps, avoid void phase ties when configured.
-                if (parity === 1
-                    && latticeConfig.voidPhase !== null
-                    && Math.abs(distPrev - distCurr) < latticeConfig.tieEpsilon) {
-                    if (prev === latticeConfig.voidPhase && curr !== latticeConfig.voidPhase)
-                        return curr;
-                    if (curr === latticeConfig.voidPhase && prev !== latticeConfig.voidPhase)
-                        return prev;
-                }
-                return distCurr < distPrev ? curr : prev;
-            }, candidates[0]);
-        };
-        console.log(`[getAngles] Start helix=${helixId}, requestedLattice=${requestedLattice || 'unspecified'}, ` +
-            `resolvedLattice=${latticeType}, basesPerTurn=${latticeConfig.basesPerTurn}, snapMode=phaseDictionary`);
-        const helix = helices[helixId] ?? [];
-        const endpointPair = toscad.crossoverEndpointsHelix(grid, helix, helixId);
-        if (!endpointPair) {
-            console.log(`[getAngles] No crossover endpoints found for helix ${helixId}`);
-            return result;
-        }
-        const end1t = endpointPair.end1;
-        const end2t = endpointPair.end2;
-        const end1mark = grid.get(end1t.id);
-        const end2mark = grid.get(end2t.id);
-        if (!end1mark && !end2mark) {
-            console.log(`[getAngles] Both endpoint marks missing from grid: end1=${end1t.id}, end2=${end2t.id}`);
-            return result;
-        }
-        const useSecondEnd = !end1mark
-            || (!!end1mark && !!end2mark && end2mark.offset < end1mark.offset);
-        const end1 = useSecondEnd ? end2t : end1t;
-        const end2 = useSecondEnd ? end1t : end2t;
-        const end1Mark = useSecondEnd ? end2mark : end1mark;
-        const end2Mark = useSecondEnd ? end1mark : end2mark;
-        if (!end1Mark) {
-            console.log(`[getAngles] Chosen endpoint nt=${end1.id} is missing from grid`);
-            return result;
-        }
-        console.log(`[getAngles] crossoverEndpointsHelix(${helixId}) => end1=${endpointPair.end1.id}, end2=${endpointPair.end2.id}, distance=${endpointPair.diameter}`);
-        console.log(`[getAngles] Reference endpoint selected: end1=${end1.id} (offset=${end1Mark.offset}), ` +
-            `end2=${end2.id} (offset=${end2Mark?.offset ?? 'missing'})`);
-        const nodes = Array.from(new Map(helix.map((nt) => [nt.id, nt])).values());
-        const nodeById = new Map(nodes.map((nt) => [nt.id, nt]));
-        const neighbors = (nt) => {
-            const list = [];
-            const n5 = nt.n5;
-            if (n5 instanceof Nucleotide && nodeById.has(n5.id))
-                list.push(n5);
-            const n3 = nt.n3;
-            if (n3 instanceof Nucleotide && nodeById.has(n3.id))
-                list.push(n3);
-            const pair = nt.pair;
-            if (pair instanceof Nucleotide && nodeById.has(pair.id))
-                list.push(pair);
-            return list;
-        };
-        const bfsDistances = (start) => {
-            const q = [start];
-            const dist = new Map();
-            dist.set(start.id, 0);
-            for (let i = 0; i < q.length; i++) {
-                const cur = q[i];
-                const d = dist.get(cur.id);
-                if (d === undefined)
-                    continue;
-                for (const nb of neighbors(cur)) {
-                    if (!dist.has(nb.id)) {
-                        dist.set(nb.id, d + 1);
-                        q.push(nb);
-                    }
-                }
-            }
-            return dist;
-        };
-        // nt -> set of connected helix ids through crossover transitions.
-        const ntToConnectedHelices = new Map();
-        const addConnection = (ntId, otherHelix) => {
-            if (!ntToConnectedHelices.has(ntId))
-                ntToConnectedHelices.set(ntId, new Set());
-            ntToConnectedHelices.get(ntId).add(otherHelix);
-        };
-        const crossoverList = toscad.crossoverNts(grid);
-        for (const crossover of crossoverList) {
-            addConnection(crossover.fromNt.id, crossover.toHelix);
-            addConnection(crossover.toNt.id, crossover.fromHelix);
-        }
-        const helixCrossNtIds = new Set();
-        for (const nt of nodes) {
-            if (ntToConnectedHelices.has(nt.id))
-                helixCrossNtIds.add(nt.id);
-        }
-        if (!helixCrossNtIds.size) {
-            console.log(`[getAngles] Helix ${helixId} has no crossover nucleotides in this grid`);
-            return result;
-        }
-        // Use collectCrossovers to discover which helices this helix connects to.
-        const { crossovers } = toscad.collectCrossovers(grid);
-        const connectedHelices = new Set();
-        const forward = crossovers.get(helixId);
-        if (forward) {
-            for (const [toHelix] of forward.entries())
-                connectedHelices.add(toHelix);
-        }
-        for (const [fromHelix, toMap] of crossovers.entries()) {
-            if (toMap.has(helixId))
-                connectedHelices.add(fromHelix);
-        }
-        // Fallback from per-nt connectivity if collectCrossovers misses anything.
-        for (const ntId of helixCrossNtIds) {
-            const connected = ntToConnectedHelices.get(ntId);
-            if (!connected)
-                continue;
-            for (const h of connected)
-                connectedHelices.add(h);
-        }
-        connectedHelices.delete(helixId);
-        if (!connectedHelices.size) {
-            console.log(`[getAngles] Helix ${helixId} has no connected helices`);
-            return result;
-        }
-        console.log(`[getAngles] Reference nt end1=${end1.id} offset=${end1Mark.offset} direction=${end1Mark.direction}`);
-        const end1Connected = ntToConnectedHelices.get(end1.id) ?? new Set();
-        const seenHelices = new Set();
-        console.log(`[getAngles] end1 nt=${end1.id} connects to helices: [${Array.from(end1Connected).sort((a, b) => a - b).join(', ')}]`);
-        // Baseline: helix connected at end1 has zero relative angle.
-        for (const h of end1Connected) {
-            if (!connectedHelices.has(h))
-                continue;
-            result.set(h, {
-                helixId,
-                adj_helix: h,
-                angle: 0
-            });
-            seenHelices.add(h);
-            console.log(`[getAngles] Baseline angle set: nt=${end1.id}, helix ${helixId} -> helix ${h}, angle=0`);
-        }
-        const startNode = nodeById.get(end1.id) ?? end1;
-        const distFromEnd1 = bfsDistances(startNode);
-        const orderedCrossovers = Array.from(helixCrossNtIds)
-            .filter((ntId) => ntId !== end1.id)
-            .map((ntId) => ({ ntId, dist: distFromEnd1.get(ntId) }))
-            .filter((entry) => entry.dist !== undefined)
-            .sort((a, b) => a.dist - b.dist || a.ntId - b.ntId);
-        for (const { ntId, dist } of orderedCrossovers) {
-            if (seenHelices.size >= connectedHelices.size)
-                break;
-            const candidateConnections = ntToConnectedHelices.get(ntId);
-            if (!candidateConnections) {
-                console.log(`[getAngles] Skip nt=${ntId} (distance=${dist}): no connected helices found`);
-                continue;
-            }
-            const candidateConnectionList = Array.from(candidateConnections).sort((a, b) => a - b);
-            console.log(`[getAngles] Consider nt=${ntId} (distance=${dist}) connected helices=[${candidateConnectionList.join(', ')}]`);
-            const freshHelices = [];
-            for (const h of candidateConnections) {
-                if (!connectedHelices.has(h))
-                    continue;
-                if (seenHelices.has(h))
-                    continue;
-                if (end1Connected.has(h))
-                    continue;
-                freshHelices.push(h);
-            }
-            if (freshHelices.length === 0) {
-                console.log(`[getAngles] Skip nt=${ntId}: only already-seen or end1-connected helices`);
-                continue;
-            }
-            const crossoverMark = grid.get(ntId);
-            if (!crossoverMark) {
-                console.log(`[getAngles] Skip nt=${ntId}: missing grid mark`);
-                continue;
-            }
-            const rawX = crossoverMark.offset - end1Mark.offset;
-            const absX = Math.abs(rawX);
-            const sign = Math.sign(rawX) || 1;
-            const y = end1Mark.direction === crossoverMark.direction ? 0 : 1;
-            const phase = absX % latticeConfig.basesPerTurn;
-            const phases = latticeConfig.phases[y] ?? [];
-            const idealPhase = nearestPhase(phase, y);
-            const idealAbsX = (Math.floor(absX / latticeConfig.basesPerTurn) * latticeConfig.basesPerTurn) + idealPhase;
-            const idealX = idealAbsX * sign;
-            const angleRaw = (360 / latticeConfig.basesPerTurn) * idealX + (y * 215 * sign);
-            const angle = (Math.round((angleRaw % 360)) + 360) % 360;
-            console.log(`[getAngles] Use nts end1=${end1.id} and other=${ntId}; ` +
-                `offsets=(${end1Mark.offset},${crossoverMark.offset}) directions=(${end1Mark.direction},${crossoverMark.direction}) ` +
-                `rawX=${rawX} absX=${absX} y=${y} basesPerTurn=${latticeConfig.basesPerTurn} ` +
-                `phase=${phase} candidates=[${phases.join(', ')}] idealPhase=${idealPhase} idealX=${idealX} raw=${angleRaw} angle=${angle}`);
-            for (const h of freshHelices) {
-                result.set(h, {
-                    helixId,
-                    adj_helix: h,
-                    angle: angle
-                });
-                seenHelices.add(h);
-                console.log(`[getAngles] Angle set: helix ${helixId} -> helix ${h} via nt ${ntId} = ${angle}`);
-            }
-        }
-        console.log(`[getAngles] Final angle map for helix ${helixId}: ` +
-            `${JSON.stringify(Array.from(result.entries()).sort((a, b) => a[0] - b[0]))}`);
-        return result;
-    }
-    toscad.getAnglesold = getAnglesold;
-    function getAngles(grid, helices, helixId, lattice) {
+    // helper function
+    function getAngleHelix(grid, helices, helixId, lattice) {
         void helices;
         const result = new Map();
         const latticeType = resolveLatticeKind(lattice);
@@ -352,7 +139,232 @@ var toscad;
         }
         return result;
     }
+    function getAngles(grid, helices, lattice = 'honeycomb') {
+        const networkMap = new Map();
+        const helixIds = new Set();
+        for (const [, mark] of grid.entries()) {
+            helixIds.add(mark.helixId);
+        }
+        const sortedhids = Array.from(helixIds).sort((a, b) => a - b);
+        for (const currentHID of sortedhids) {
+            const helixAngles = getAngleHelix(grid, helices, currentHID, lattice);
+            const angleMap = new Map();
+            for (const [adjHelixId, angleInfo] of helixAngles.entries()) {
+                angleMap.set(adjHelixId, angleInfo.angle);
+            }
+            networkMap.set(currentHID, angleMap);
+        }
+        return networkMap;
+    }
     toscad.getAngles = getAngles;
+    function angleCollisions(networkMap) {
+        const overlappingHelices = [];
+        for (const [helixId, angleMap] of networkMap.entries()) {
+            if (!angleMap || angleMap.size === 0)
+                continue;
+            const anglesToNeighbors = new Map();
+            for (const [adjHelix, angle] of angleMap.entries()) {
+                if (!anglesToNeighbors.has(angle))
+                    anglesToNeighbors.set(angle, []);
+                anglesToNeighbors.get(angle).push(adjHelix);
+            }
+            const localConflicts = [];
+            for (const [angle, collidedHelices] of anglesToNeighbors.entries()) {
+                const uniqueCollided = Array.from(new Set(collidedHelices)).sort((a, b) => a - b);
+                if (uniqueCollided.length < 2)
+                    continue;
+                localConflicts.push({
+                    angle,
+                    colliding_adj_helices: uniqueCollided
+                });
+            }
+            if (localConflicts.length > 0) {
+                localConflicts.sort((a, b) => a.angle - b.angle);
+                overlappingHelices.push({
+                    helixId,
+                    conflicts: localConflicts
+                });
+            }
+        }
+        overlappingHelices.sort((a, b) => a.helixId - b.helixId);
+        return overlappingHelices;
+    }
+    toscad.angleCollisions = angleCollisions;
+    function disjoint(helices, h1, h2, grid) {
+        const buildSignedOffsets = (helixId) => {
+            const signedOffsets = new Set();
+            const nts = helices[helixId] ?? [];
+            for (const nt of nts) {
+                const mark = grid.get(nt.id);
+                if (!mark || mark.helixId !== helixId)
+                    continue;
+                const x = mark.offset;
+                const y = mark.direction === 'backward' ? 1 : 0;
+                signedOffsets.add((2 * x) + y);
+            }
+            return signedOffsets;
+        };
+        const set1 = buildSignedOffsets(h1);
+        const set2 = buildSignedOffsets(h2);
+        if (set1.size === 0 || set2.size === 0)
+            return false;
+        const smaller = set1.size <= set2.size ? set1 : set2;
+        const larger = set1.size <= set2.size ? set2 : set1;
+        for (const offs of smaller) {
+            if (larger.has(offs))
+                return false;
+        }
+        return true;
+    }
+    function anglecomb(grid, helices, lattice = 'honeycomb', angleMap = getAngles(grid, helices, lattice)) {
+        let networkMap = angleMap;
+        const mergedPairs = [];
+        const mergeHelixInto = (keepHelix, mergedHelix) => {
+            for (const [, mark] of grid.entries()) {
+                if (mark.helixId === mergedHelix) {
+                    mark.helixId = keepHelix;
+                }
+            }
+            if (helices[mergedHelix] && helices[mergedHelix].length > 0) {
+                if (!helices[keepHelix])
+                    helices[keepHelix] = [];
+                helices[keepHelix].push(...helices[mergedHelix]);
+                helices[mergedHelix] = [];
+            }
+        };
+        let pass = 0;
+        while (pass++ < 200) {
+            const collisionReports = angleCollisions(networkMap);
+            if (collisionReports.length === 0) {
+                console.log(`[anglecomb] pass=${pass} no collisions remain`);
+                break;
+            }
+            let mergedInThisPass = false;
+            outer: for (const report of collisionReports) {
+                const sourceHelix = report.helixId;
+                for (const conflict of report.conflicts) {
+                    const collidedHelices = conflict.colliding_adj_helices
+                        .filter((helixId) => helixId !== sourceHelix)
+                        .sort((a, b) => a - b);
+                    if (collidedHelices.length < 2)
+                        continue;
+                    for (let i = 0; i < collidedHelices.length; i++) {
+                        const helixA = collidedHelices[i];
+                        for (let j = i + 1; j < collidedHelices.length; j++) {
+                            const helixB = collidedHelices[j];
+                            if (!disjoint(helices, helixA, helixB, grid))
+                                continue;
+                            const keepHelix = Math.min(helixA, helixB);
+                            const mergedHelix = Math.max(helixA, helixB);
+                            mergeHelixInto(keepHelix, mergedHelix);
+                            mergedPairs.push({
+                                sourceHelix,
+                                keepHelix,
+                                mergedHelix,
+                                angle: conflict.angle
+                            });
+                            console.log(`[anglecomb] combined helix ${mergedHelix} into ${keepHelix} in helices[][] and grid ` +
+                                `(source=${sourceHelix}, angle=${conflict.angle})`);
+                            mergedInThisPass = true;
+                            break outer;
+                        }
+                    }
+                }
+            }
+            if (!mergedInThisPass) {
+                console.log(`[anglecomb] pass=${pass} collisions remain but no disjoint collision pairs could be merged`);
+                break;
+            }
+            networkMap = getAngles(grid, helices, lattice);
+        }
+        networkMap = getAngles(grid, helices, lattice);
+        return { networkMap, mergedPairs };
+    }
+    toscad.anglecomb = anglecomb;
+    function anglecorr(grid, helices, lattice = 'honeycomb', angleMap = getAngles(grid, helices, lattice)) {
+        let networkMap = angleMap;
+        const correctedPairs = [];
+        const normalizeAngle = (angle) => ((angle % 360) + 360) % 360;
+        let pass = 0;
+        while (pass++ < 200) {
+            const collisionReports = angleCollisions(networkMap);
+            if (collisionReports.length === 0) {
+                console.log(`[anglecorr] pass=${pass} no collisions remain`);
+                break;
+            }
+            let correctedInThisPass = false;
+            outer: for (const report of collisionReports) {
+                const sourceHelix = report.helixId;
+                const sourceMap = networkMap.get(sourceHelix);
+                if (!sourceMap || sourceMap.size === 0)
+                    continue;
+                const baseHelices = Array.from(sourceMap.entries())
+                    .filter(([, angle]) => normalizeAngle(angle) === 0)
+                    .map(([adjHelix]) => adjHelix);
+                const baseHelix = baseHelices.length > 0 ? Math.min(...baseHelices) : null;
+                for (const conflict of report.conflicts) {
+                    const collidedHelices = conflict.colliding_adj_helices
+                        .filter((helixId) => helixId !== sourceHelix)
+                        .sort((a, b) => a - b);
+                    if (collidedHelices.length < 2)
+                        continue;
+                    for (let i = 0; i < collidedHelices.length; i++) {
+                        const helixA = collidedHelices[i];
+                        for (let j = i + 1; j < collidedHelices.length; j++) {
+                            const helixB = collidedHelices[j];
+                            if (disjoint(helices, helixA, helixB, grid))
+                                continue;
+                            const connectionCount = sourceMap.size;
+                            if (connectionCount >= 4) {
+                                console.warn(`[anglecorr] source=${sourceHelix} has ${connectionCount} connections and non-disjoint ` +
+                                    `collision at angle=${conflict.angle}; no empty spots available`);
+                                continue;
+                            }
+                            const pairDescending = [helixA, helixB].sort((a, b) => b - a);
+                            let adjustedHelix = pairDescending.find((hId) => hId !== baseHelix) ?? pairDescending[0];
+                            const oldAngleValue = sourceMap.get(adjustedHelix);
+                            if (oldAngleValue === undefined)
+                                continue;
+                            const oldAngle = normalizeAngle(oldAngleValue);
+                            const usedAngles = new Set();
+                            for (const [adjHelix, angle] of sourceMap.entries()) {
+                                if (adjHelix === adjustedHelix)
+                                    continue;
+                                usedAngles.add(normalizeAngle(angle));
+                            }
+                            let newAngle = normalizeAngle(oldAngle + 120);
+                            if (usedAngles.has(newAngle)) {
+                                newAngle = normalizeAngle(newAngle + 120);
+                            }
+                            if (usedAngles.has(newAngle)) {
+                                console.warn(`[anglecorr] source=${sourceHelix} could not place corrected angle for helix=${adjustedHelix}; ` +
+                                    `all 120-degree alternatives occupied`);
+                                continue;
+                            }
+                            sourceMap.set(adjustedHelix, newAngle);
+                            correctedPairs.push({
+                                sourceHelix,
+                                adjustedHelix,
+                                oldAngle,
+                                newAngle,
+                                conflictAngle: conflict.angle
+                            });
+                            console.log(`[anglecorr] corrected source=${sourceHelix}: helix ${adjustedHelix} angle ${oldAngle} -> ${newAngle} ` +
+                                `(conflict angle=${conflict.angle})`);
+                            correctedInThisPass = true;
+                            break outer;
+                        }
+                    }
+                }
+            }
+            if (!correctedInThisPass) {
+                console.log(`[anglecorr] pass=${pass} collisions remain but no non-disjoint collision could be corrected`);
+                break;
+            }
+        }
+        return { networkMap, correctedPairs };
+    }
+    toscad.anglecorr = anglecorr;
     // ── Shared helper: collect all crossover shift observations ──────
     // For each pair of helices connected by backbone crossovers, returns
     // the list of observed shifts (offsetA - offsetB for each crossover
@@ -1048,6 +1060,7 @@ var toscad;
             const { crossovers, helixIds } = toscad.collectCrossovers(grid);
             const adjacency = buildAdjacency(crossovers);
             const offsetSets = buildOffsetSets();
+            const areOffsetsDisjoint = (a, b) => helices ? disjoint(helices, a, b, grid) : offsetsDisjoint(offsetSets.get(a), offsetSets.get(b));
             for (const hId of helixIds) {
                 if (!adjacency.has(hId))
                     adjacency.set(hId, new Set());
@@ -1069,7 +1082,7 @@ var toscad;
                 if (neighbors.length === 0)
                     continue;
                 // Step 1: try combining one neighbor directly into the overloaded hub.
-                const compatibleWithHub = neighbors.filter(n => offsetsDisjoint(offsetSets.get(hub), offsetSets.get(n))
+                const compatibleWithHub = neighbors.filter(n => areOffsetsDisjoint(hub, n)
                     && areHelixPcaAxesCompatible(hub, n, helices, pcaAxisCache, 45)
                     && areHelicesColinear(hub, n, helices, pcaAxisCache, centroidCache, maxOffs));
                 if (compatibleWithHub.length > 0) {
@@ -1103,7 +1116,7 @@ var toscad;
                         for (let j = i + 1; j < remainingNeighbors.length; j++) {
                             const a = remainingNeighbors[i];
                             const b = remainingNeighbors[j];
-                            if (!offsetsDisjoint(offsetSets.get(a), offsetSets.get(b)))
+                            if (!areOffsetsDisjoint(a, b))
                                 continue;
                             if (!areHelixPcaAxesCompatible(a, b, helices, pcaAxisCache, 45))
                                 continue;
@@ -1242,6 +1255,7 @@ var toscad;
             const { crossovers, helixIds } = toscad.collectCrossovers(grid);
             const adjacency = buildAdjacency(crossovers);
             const offsetSets = buildOffsetSets();
+            const areOffsetsDisjoint = (a, b) => helices ? disjoint(helices, a, b, grid) : offsetsDisjoint(offsetSets.get(a), offsetSets.get(b));
             for (const hId of helixIds) {
                 if (!adjacency.has(hId))
                     adjacency.set(hId, new Set());
@@ -1264,7 +1278,7 @@ var toscad;
                     const bNeighbors = adjacency.get(b) ?? new Set();
                     if (!setEqual(aNeighbors, bNeighbors))
                         continue;
-                    if (!offsetsDisjoint(offsetSets.get(a), offsetSets.get(b)))
+                    if (!areOffsetsDisjoint(a, b))
                         continue;
                     if (!areHelixPcaAxesCompatible(a, b, helices, pcaAxisCache, 45))
                         continue;
@@ -1357,6 +1371,275 @@ var toscad;
             y: posA.y - posB.y
         };
     }
+    /**
+     * Calculates absolute grid coordinates from local helix-to-helix angles.
+     *
+     * Phase 1: Build a strict lattice spanning tree from helix 0 using
+     * weighted BFS (top-3 children only at each node).
+     *
+     * Phase 2: Place deferred/artefact helices in nearest open coordinates
+     * around their parent once the phase-1 core is locked.
+     */
+    function calculateGlobalPositions(networkMap, crossoverWeights, options) {
+        const ANGLES = [0, 120, 240];
+        const STEP_BY_PARITY = {
+            even: {
+                0: { dCol: 1, dRow: 0 },
+                120: { dCol: -1, dRow: 0 },
+                240: { dCol: 0, dRow: -1 }
+            },
+            odd: {
+                0: { dCol: 1, dRow: 0 },
+                120: { dCol: 0, dRow: 1 },
+                240: { dCol: -1, dRow: 0 }
+            }
+        };
+        const normalizeAngle = (angle) => ((angle % 360) + 360) % 360;
+        const angleDistance = (a, b) => {
+            const diff = Math.abs(normalizeAngle(a) - normalizeAngle(b));
+            return Math.min(diff, 360 - diff);
+        };
+        const parityAt = (coord) => (((coord.col + coord.row) & 1) === 0 ? 'even' : 'odd');
+        const snapToLatticeAngle = (angle) => {
+            let best = ANGLES[0];
+            let bestDist = Number.POSITIVE_INFINITY;
+            for (const candidate of ANGLES) {
+                const dist = angleDistance(angle, candidate);
+                if (dist < bestDist || (dist === bestDist && candidate < best)) {
+                    best = candidate;
+                    bestDist = dist;
+                }
+            }
+            return best;
+        };
+        const latticeAngleFromDelta = (coord, dCol, dRow) => {
+            const parity = parityAt(coord);
+            for (const angle of ANGLES) {
+                const delta = STEP_BY_PARITY[parity][angle];
+                if (delta.dCol === dCol && delta.dRow === dRow)
+                    return angle;
+            }
+            return null;
+        };
+        const weightMap = new Map();
+        const ensureWeightRow = (helixId) => {
+            if (!weightMap.has(helixId))
+                weightMap.set(helixId, new Map());
+            return weightMap.get(helixId);
+        };
+        const setWeight = (from, to, weight) => {
+            ensureWeightRow(from).set(to, weight);
+        };
+        if (crossoverWeights instanceof Map) {
+            for (const [from, row] of crossoverWeights.entries()) {
+                for (const [to, weight] of row.entries()) {
+                    setWeight(from, to, weight);
+                }
+            }
+        }
+        else if (Array.isArray(crossoverWeights)) {
+            for (const edge of crossoverWeights) {
+                if ('fromHelix' in edge && 'toHelix' in edge) {
+                    setWeight(edge.fromHelix, edge.toHelix, edge.weight);
+                }
+                else {
+                    setWeight(edge.from, edge.to, edge.weight);
+                }
+            }
+        }
+        const getWeight = (a, b) => {
+            const direct = weightMap.get(a)?.get(b);
+            if (direct !== undefined)
+                return direct;
+            const reverse = weightMap.get(b)?.get(a);
+            if (reverse !== undefined)
+                return reverse;
+            return 1;
+        };
+        const allHelixIds = new Set();
+        allHelixIds.add(0);
+        for (const [from, row] of networkMap.entries()) {
+            allHelixIds.add(from);
+            for (const to of row.keys())
+                allHelixIds.add(to);
+        }
+        for (const [from, row] of weightMap.entries()) {
+            allHelixIds.add(from);
+            for (const to of row.keys())
+                allHelixIds.add(to);
+        }
+        const positions = new Map();
+        const occupied = new Map();
+        const globalRotationOffsets = new Map();
+        const deferredQueue = [];
+        const deferredSeen = new Set();
+        const keyOf = (coord) => `${coord.col},${coord.row}`;
+        const enqueueDeferred = (parentId, helixId, inheritedOffset) => {
+            const key = `${parentId}|${helixId}`;
+            if (deferredSeen.has(key) || positions.has(helixId))
+                return;
+            deferredSeen.add(key);
+            deferredQueue.push({ parentId, helixId, inheritedOffset });
+        };
+        const maxSearchRadius = Math.max(1, options?.maxSearchRadius ?? 256);
+        const latticeNeighbors = (coord) => {
+            const parity = parityAt(coord);
+            return ANGLES.map((angle) => {
+                const step = STEP_BY_PARITY[parity][angle];
+                return {
+                    col: coord.col + step.dCol,
+                    row: coord.row + step.dRow
+                };
+            });
+        };
+        const findNearestOpen = (anchor) => {
+            if (!occupied.has(keyOf(anchor)))
+                return { col: anchor.col, row: anchor.row };
+            const visited = new Set();
+            const queue = [{ coord: anchor, dist: 0 }];
+            visited.add(keyOf(anchor));
+            let qIdx = 0;
+            while (qIdx < queue.length) {
+                const { coord, dist } = queue[qIdx++];
+                if (dist >= maxSearchRadius)
+                    continue;
+                const neighbors = latticeNeighbors(coord).sort((a, b) => {
+                    const da = Math.abs(a.col - anchor.col) + Math.abs(a.row - anchor.row);
+                    const db = Math.abs(b.col - anchor.col) + Math.abs(b.row - anchor.row);
+                    if (da !== db)
+                        return da - db;
+                    if (a.col !== b.col)
+                        return a.col - b.col;
+                    return a.row - b.row;
+                });
+                for (const next of neighbors) {
+                    const nextKey = keyOf(next);
+                    if (visited.has(nextKey))
+                        continue;
+                    visited.add(nextKey);
+                    if (!occupied.has(nextKey))
+                        return next;
+                    queue.push({ coord: next, dist: dist + 1 });
+                }
+            }
+            const fallback = { col: anchor.col + maxSearchRadius + 1, row: anchor.row };
+            while (occupied.has(keyOf(fallback))) {
+                fallback.col += 1;
+            }
+            return fallback;
+        };
+        const computeChildOffset = (parentId, childId, parentCoord, childCoord, parentLocalAngle, snappedForwardAngle) => {
+            const dColBack = parentCoord.col - childCoord.col;
+            const dRowBack = parentCoord.row - childCoord.row;
+            const backGlobal = latticeAngleFromDelta(childCoord, dColBack, dRowBack);
+            const desiredBackGlobalAngle = backGlobal !== null
+                ? backGlobal
+                : normalizeAngle(snappedForwardAngle + 180);
+            const childLocalBack = networkMap.get(childId)?.get(parentId);
+            if (typeof childLocalBack === 'number') {
+                return normalizeAngle(desiredBackGlobalAngle - childLocalBack);
+            }
+            const inferredBackLocal = normalizeAngle(parentLocalAngle + 180);
+            return normalizeAngle(desiredBackGlobalAngle - inferredBackLocal);
+        };
+        const processNode = (node, targetQueue) => {
+            const parentCoord = positions.get(node.helixId);
+            if (!parentCoord)
+                return;
+            const localEdges = networkMap.get(node.helixId);
+            if (!localEdges || localEdges.size === 0)
+                return;
+            const candidates = Array.from(localEdges.entries())
+                .filter(([neighborId]) => neighborId !== node.helixId && !positions.has(neighborId))
+                .map(([neighborId, localAngle]) => ({
+                neighborId,
+                localAngle: normalizeAngle(localAngle),
+                weight: getWeight(node.helixId, neighborId)
+            }))
+                .sort((a, b) => {
+                if (b.weight !== a.weight)
+                    return b.weight - a.weight;
+                return a.neighborId - b.neighborId;
+            });
+            const selected = candidates.slice(0, 3);
+            const overflow = candidates.slice(3);
+            for (const item of overflow) {
+                enqueueDeferred(node.helixId, item.neighborId, node.offset);
+            }
+            for (const item of selected) {
+                if (positions.has(item.neighborId))
+                    continue;
+                const predictedGlobal = normalizeAngle(item.localAngle + node.offset);
+                const snappedAngle = snapToLatticeAngle(predictedGlobal);
+                const step = STEP_BY_PARITY[parityAt(parentCoord)][snappedAngle];
+                const childCoord = {
+                    col: parentCoord.col + step.dCol,
+                    row: parentCoord.row + step.dRow
+                };
+                const cellKey = keyOf(childCoord);
+                const occupant = occupied.get(cellKey);
+                if (occupant !== undefined && occupant !== item.neighborId) {
+                    enqueueDeferred(node.helixId, item.neighborId, node.offset);
+                    continue;
+                }
+                positions.set(item.neighborId, childCoord);
+                occupied.set(cellKey, item.neighborId);
+                const childOffset = computeChildOffset(node.helixId, item.neighborId, parentCoord, childCoord, item.localAngle, snappedAngle);
+                globalRotationOffsets.set(item.neighborId, childOffset);
+                targetQueue.push({ helixId: item.neighborId, offset: childOffset });
+            }
+        };
+        // Phase 1: strict weighted BFS spanning tree from helix 0.
+        positions.set(0, { col: 0, row: 0 });
+        occupied.set('0,0', 0);
+        globalRotationOffsets.set(0, 0);
+        const mainQueue = [{ helixId: 0, offset: 0 }];
+        let mainIdx = 0;
+        while (mainIdx < mainQueue.length) {
+            processNode(mainQueue[mainIdx++], mainQueue);
+        }
+        // Phase 2: place deferred artefacts nearest to their parent.
+        const runDeferredSubBfs = options?.runDeferredSubBfs ?? false;
+        const deferredSubQueue = [];
+        let deferredIdx = 0;
+        while (deferredIdx < deferredQueue.length) {
+            const item = deferredQueue[deferredIdx++];
+            if (positions.has(item.helixId))
+                continue;
+            const parentCoord = positions.get(item.parentId) ?? positions.get(0) ?? { col: 0, row: 0 };
+            const coord = findNearestOpen(parentCoord);
+            positions.set(item.helixId, coord);
+            occupied.set(keyOf(coord), item.helixId);
+            const inherited = globalRotationOffsets.get(item.parentId);
+            const chosenOffset = inherited !== undefined ? inherited : item.inheritedOffset;
+            globalRotationOffsets.set(item.helixId, chosenOffset);
+            if (runDeferredSubBfs) {
+                deferredSubQueue.push({ helixId: item.helixId, offset: chosenOffset });
+            }
+        }
+        if (runDeferredSubBfs) {
+            let subIdx = 0;
+            while (subIdx < deferredSubQueue.length) {
+                processNode(deferredSubQueue[subIdx++], deferredSubQueue);
+            }
+        }
+        // Ensure every helix in the input graph gets a coordinate.
+        const rootCoord = positions.get(0) ?? { col: 0, row: 0 };
+        const sortedHelixIds = Array.from(allHelixIds).sort((a, b) => a - b);
+        for (const helixId of sortedHelixIds) {
+            if (positions.has(helixId))
+                continue;
+            const coord = findNearestOpen(rootCoord);
+            positions.set(helixId, coord);
+            occupied.set(keyOf(coord), helixId);
+        }
+        const result = new Map();
+        for (const [helixId, coord] of positions.entries()) {
+            result.set(helixId, [coord.col, coord.row]);
+        }
+        return result;
+    }
+    toscad.calculateGlobalPositions = calculateGlobalPositions;
     function HelixPosByRelativeBfs(grid, helices) {
         const placed = new Map();
         const occupied = new Set();
