@@ -29,20 +29,37 @@ async function calculateScadnanoHelices(): Promise<Nucleotide[][]> {
     return helices;
 }
 
-async function calculateScadnanoHelixPos(): Promise<Map<number, [number, number]>> {
+async function prepareScadnanoLayout(latticeType: ScadnanoGridType): Promise<{
+    helices: Nucleotide[][];
+    grid: any;
+    helixPos: Map<number, [number, number]>;
+}> {
     const helices = await calculateScadnanoHelices();
     currentScadnanoHelices = helices;
+
     const { grid, binderHelices } = toscad.setGrid(helices);
     toscad.directionAlign2(grid);
     toscad.alignGridPrim(grid, binderHelices);
-    toscad.combinedHelices(15, grid, helices, binderHelices);
+    // toscad.combinedHelices(15, grid, helices, binderHelices);
+
     const { crossovers } = toscad.collectCrossovers(grid);
     currentScadnanoConnections = buildScadnanoConnections(crossovers);
-    let angles = toscad.getAngles(grid, helices, 'honeycomb');
-    let corrected = toscad.anglecomb(grid, helices, 'honeycomb', angles);
-    let correct = toscad.anglecorr(grid, helices, 'honeycomb', corrected.networkMap);
+
+    const angles = toscad.getAngles(grid, helices, latticeType);
+    const corrected = toscad.anglecomb(grid, helices, latticeType, angles);
+    const correct = toscad.anglecorr(grid, helices, latticeType, corrected.networkMap);
+
+    return {
+        helices,
+        grid,
+        helixPos: toscad.calculateGlobalPositions(correct.networkMap, undefined, undefined, latticeType)
+    };
+}
+
+async function calculateScadnanoHelixPos(latticeType: ScadnanoGridType = 'square'): Promise<Map<number, [number, number]>> {
+    const { helixPos } = await prepareScadnanoLayout(latticeType);
     // return toscad.HelixPosByRelativeBfs(grid, helices);
-    return toscad.calculateGlobalPositions(correct.networkMap)
+    return helixPos;
     // return toscad.HelixPosAngles(grid, helices, 'honeycomb');
     // return toscad.helixPosCrossover(grid);
 }
@@ -121,40 +138,17 @@ function normalizeHelixPosMap(input: any): Map<number, [number, number]> | null 
     return null;
 }
 
-async function exportScadnanoWithHelixPos(name: string, gridType: string, helixPos: Map<number, [number, number]>) {
-    const nucleotideElements = new Map<number, Nucleotide>();
-    elements.forEach((element, id) => {
-        if (element instanceof Nucleotide) {
-            nucleotideElements.set(id, element);
-        }
-    });
-
-    const helices = await honda.findHelices(nucleotideElements, 3);
-    notifyHelixCoverageMismatch(helices, nucleotideElements);
-    const { grid, binderHelices } = toscad.setGrid(helices);
-    toscad.directionAlign2(grid);
-    toscad.alignGridPrim(grid, binderHelices);
-    toscad.combinedHelices(15, grid, helices, binderHelices);
+async function exportScadnanoWithHelixPos(name: string, gridType: ScadnanoGridType, helixPos: Map<number, [number, number]>) {
+    const latticeType: ScadnanoGridType = gridType === 'honeycomb' ? 'honeycomb' : 'square';
+    const { helices, grid } = await prepareScadnanoLayout(latticeType);
 
     const scadnano = toscad.buildScadnano2(grid, helices, gridType, helixPos);
     const fileName = name ? `${name}.sc` : 'output.sc';
     makeTextFile(fileName, JSON.stringify(scadnano, null, 2));
 }
 
-async function exportScadnanoNoPos(name: string, gridType: string) {
-    const nucleotideElements = new Map<number, Nucleotide>();
-    elements.forEach((element, id) => {
-        if (element instanceof Nucleotide) {
-            nucleotideElements.set(id, element);
-        }
-    });
-
-    const helices = await honda.findHelices(nucleotideElements, 3);
-    notifyHelixCoverageMismatch(helices, nucleotideElements);
-    const { grid, binderHelices } = toscad.setGrid(helices);
-    toscad.directionAlign2(grid);
-    toscad.alignGridPrim(grid, binderHelices);
-    toscad.combinedHelices(15, grid, helices, binderHelices);
+async function exportScadnanoNoPos(name: string, gridType: ScadnanoGridType) {
+    const { helices, grid } = await prepareScadnanoLayout('square');
 
     const scadnano = toscad.buildScadnano2(grid, helices, gridType);
     const fileName = name ? `${name}.sc` : 'output.sc';
@@ -185,7 +179,7 @@ async function scadnanoDialogExport() {
     }
 
     try {
-        const helixPos = await calculateScadnanoHelixPos();
+        const helixPos = await calculateScadnanoHelixPos(gridType);
         (window as any).currentScadnanoHelixPos = helixPos;
         const showGrid = (window as any).showScadnanoGridFromHelixPos;
         if (typeof showGrid !== 'function') {
