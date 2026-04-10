@@ -298,51 +298,51 @@ namespace honda {
         return avg;
     };
 
-		export function rnaseparation(fishies: Nucleotide[]) {
-			const not_sodead_fishies: Nucleotide[][] = [];
-			const deadfishies: Nucleotide[] = [];
+	export function rnaseparation(fishies: Nucleotide[]) {
+		const not_sodead_fishies: Nucleotide[][] = [];
+		const deadfishies: Nucleotide[] = [];
 
-			if (!fishies.length) return {not_sodead_fishies, deadfishies};
+		if (!fishies.length) return {not_sodead_fishies, deadfishies};
 
-			const fishSet = new Set<number>(fishies.map(nt => nt.id));
-			const idToNt = new Map<number, Nucleotide>();
-			fishies.forEach(nt => idToNt.set(nt.id, nt));
-			const visited = new Set<number>();
+		const fishSet = new Set<number>(fishies.map(nt => nt.id));
+		const idToNt = new Map<number, Nucleotide>();
+		fishies.forEach(nt => idToNt.set(nt.id, nt));
+		const visited = new Set<number>();
 
-			for (const seed of fishies) {
-				if (visited.has(seed.id)) continue;
+		for (const seed of fishies) {
+			if (visited.has(seed.id)) continue;
 
-				const component: Nucleotide[] = [];
-				const stack: Nucleotide[] = [seed];
+			const component: Nucleotide[] = [];
+			const stack: Nucleotide[] = [seed];
 
-				while (stack.length) {
-					const curr = stack.pop() as Nucleotide;
-					if (visited.has(curr.id)) continue;
-					visited.add(curr.id);
-					component.push(curr);
+			while (stack.length) {
+				const curr = stack.pop() as Nucleotide;
+				if (visited.has(curr.id)) continue;
+				visited.add(curr.id);
+				component.push(curr);
 
-					const n5 = curr.n5 as Nucleotide | null;
-					const n3 = curr.n3 as Nucleotide | null;
+				const n5 = curr.n5 as Nucleotide | null;
+				const n3 = curr.n3 as Nucleotide | null;
 
-					if (n5 && fishSet.has(n5.id) && !visited.has(n5.id)) {
-						const next = idToNt.get(n5.id) || n5;
-						stack.push(next);
-					}
-					if (n3 && fishSet.has(n3.id) && !visited.has(n3.id)) {
-						const next = idToNt.get(n3.id) || n3;
-						stack.push(next);
-					}
+				if (n5 && fishSet.has(n5.id) && !visited.has(n5.id)) {
+					const next = idToNt.get(n5.id) || n5;
+					stack.push(next);
 				}
-
-				if (component.length >= 4) {
-					not_sodead_fishies.push(component);
-				} else {
-					component.forEach(nt => deadfishies.push(nt));
+				if (n3 && fishSet.has(n3.id) && !visited.has(n3.id)) {
+					const next = idToNt.get(n3.id) || n3;
+					stack.push(next);
 				}
 			}
 
-			return {not_sodead_fishies, deadfishies};
+			if (component.length >= 4) {
+				not_sodead_fishies.push(component);
+			} else {
+				component.forEach(nt => deadfishies.push(nt));
+			}
 		}
+
+		return {not_sodead_fishies, deadfishies};
+	}
 
 	export function rnaGenerateHelix(partials: Nucleotide[][], deadfishies: Nucleotide[] = []) {
 		const helices: Nucleotide[][] = [];
