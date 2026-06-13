@@ -178,6 +178,24 @@ var toscad;
         return networkMap;
     }
     toscad.getAngles = getAngles;
+    // For every helix, count how many backbone crossovers it shares with each neighbor. Useful to remove bad combinations (such as end-only, which happens when a helix is broken in 2 pieces)
+    function getConnectionCounts(grid) {
+        const counts = new Map();
+        const bump = (a, b) => {
+            if (!counts.has(a))
+                counts.set(a, new Map());
+            const inner = counts.get(a);
+            inner.set(b, (inner.get(b) ?? 0) + 1);
+        };
+        for (const crossover of toscad.crossoverNts(grid)) {
+            if (crossover.fromHelix === crossover.toHelix)
+                continue;
+            bump(crossover.fromHelix, crossover.toHelix);
+            bump(crossover.toHelix, crossover.fromHelix);
+        }
+        return counts;
+    }
+    toscad.getConnectionCounts = getConnectionCounts;
     // helper function to check for angle collisions in the map.
     function angleCollisions(networkMap) {
         const overlappingHelices = [];
@@ -264,6 +282,75 @@ var toscad;
             // Remove the merged helix node and keep helix indexing compact.
             helices.splice(mergedHelix, 1);
         };
+        // Diagnostic helper: summarise a helix's grid footprint. Useful in
+        // the merge / rejection logs so we can tell at a glance whether two
+        // helices are plausibly pieces of the same physical strand or are
+        // far apart in offset space (= probably not the same helix).
+        const summarizeHelix = (helixId) => {
+            const nts = helices[helixId] ?? [];
+            let minOffset = Number.POSITIVE_INFINITY;
+            let maxOffset = Number.NEGATIVE_INFINITY;
+            let fwdCount = 0;
+            let backCount = 0;
+            let counted = 0;
+            for (const nt of nts) {
+                if (!(nt instanceof Nucleotide))
+                    continue;
+                const mark = grid.get(nt.id);
+                if (!mark || mark.helixId !== helixId)
+                    continue;
+                if (mark.offset < minOffset)
+                    minOffset = mark.offset;
+                if (mark.offset > maxOffset)
+                    maxOffset = mark.offset;
+                if (mark.direction === 'forward')
+                    fwdCount++;
+                else
+                    backCount++;
+                counted++;
+            }
+            if (counted === 0)
+                return `[empty]`;
+            return `[offsets=${minOffset}..${maxOffset}, fwd=${fwdCount}, back=${backCount}, total=${counted}]`;
+        };
+        // Helix axis (normalised). Picks the nucleotide at the helix's min
+        // and max grid offsets and returns (pos(min) - pos(max)).normalize().
+        // Two helices that are physically pieces of the same line have
+        // |axisA · axisB| ≈ 1; two unrelated helices oriented differently
+        // give a much smaller dot. Returns null when the helix is a single
+        // point or otherwise has no definable axis.
+        const helixAxis = (helixId) => {
+            const nts = helices[helixId] ?? [];
+            let minOffset = Number.POSITIVE_INFINITY;
+            let maxOffset = Number.NEGATIVE_INFINITY;
+            let minNt = null;
+            let maxNt = null;
+            for (const nt of nts) {
+                if (!(nt instanceof Nucleotide))
+                    continue;
+                const mark = grid.get(nt.id);
+                if (!mark || mark.helixId !== helixId)
+                    continue;
+                if (mark.offset < minOffset) {
+                    minOffset = mark.offset;
+                    minNt = nt;
+                }
+                if (mark.offset > maxOffset) {
+                    maxOffset = mark.offset;
+                    maxNt = nt;
+                }
+            }
+            if (!minNt || !maxNt || minNt === maxNt)
+                return null;
+            const a = minNt.getPos();
+            const b = maxNt.getPos();
+            const dir = a.clone().sub(b);
+            const len = dir.length();
+            if (!isFinite(len) || len === 0)
+                return null;
+            return dir.divideScalar(len);
+        };
+        const AXIS_DOT_THRESHOLD = 0.95;
         let pass = 0;
         while (pass++ < 200) {
             const collisionReports = angleCollisions(networkMap);
@@ -271,9 +358,12 @@ var toscad;
                 console.log(`[anglecomb] pass=${pass} no collisions remain`);
                 break;
             }
+            // Rebuild crossover-count map each pass — merges shift helix IDs.
+            const connectionCounts = getConnectionCounts(grid);
             let mergedInThisPass = false;
             outer: for (const report of collisionReports) {
                 const sourceHelix = report.helixId;
+                const sourceCounts = connectionCounts.get(sourceHelix);
                 for (const conflict of report.conflicts) {
                     const collidedHelices = conflict.colliding_adj_helices
                         .filter((helixId) => helixId !== sourceHelix)
@@ -284,10 +374,43 @@ var toscad;
                         const helixA = collidedHelices[i];
                         for (let j = i + 1; j < collidedHelices.length; j++) {
                             const helixB = collidedHelices[j];
+                            // Gate: angle inference between A and B rests on
+                            // crossovers source→A × source→B. If either side has
+                            // <2 crossovers, the consensus is built off a single
+                            // (possibly accidental) link — discard the merge.
+                            const countA = sourceCounts?.get(helixA) ?? 0;
+                            const countB = sourceCounts?.get(helixB) ?? 0;
+                            const directAB = connectionCounts.get(helixA)?.get(helixB) ?? 0;
+                            if (countA < 2 || countB < 2) {
+                                console.log(`[anglecomb] rejected potential merge: source=${sourceHelix}, ` +
+                                    `helixA=${helixA} ${summarizeHelix(helixA)} (crossovers=${countA}), ` +
+                                    `helixB=${helixB} ${summarizeHelix(helixB)} (crossovers=${countB}), ` +
+                                    `directAB=${directAB}, angle=${conflict.angle} — weakConnection`);
+                                continue;
+                            }
+                            // Gate: helices being merged should be roughly
+                            // collinear in 3D. Two pieces of the same broken
+                            // helix share an axis (parallel or antiparallel,
+                            // hence absolute dot). Unrelated helices typically
+                            // have very different axes.
+                            const axisA = helixAxis(helixA);
+                            const axisB = helixAxis(helixB);
+                            const axisDot = (axisA && axisB) ? Math.abs(axisA.dot(axisB)) : NaN;
+                            if (!axisA || !axisB || axisDot < AXIS_DOT_THRESHOLD) {
+                                console.log(`[anglecomb] rejected potential merge: source=${sourceHelix}, ` +
+                                    `helixA=${helixA} ${summarizeHelix(helixA)}, ` +
+                                    `helixB=${helixB} ${summarizeHelix(helixB)}, ` +
+                                    `|axisA·axisB|=${isFinite(axisDot) ? axisDot.toFixed(3) : 'undefined'}, ` +
+                                    `angle=${conflict.angle} — axesNotCollinear`);
+                                continue;
+                            }
                             if (!disjoint(helices, helixA, helixB, grid))
                                 continue;
                             const keepHelix = Math.min(helixA, helixB);
                             const mergedHelix = Math.max(helixA, helixB);
+                            // Capture summaries BEFORE the merge mutates helices[].
+                            const summaryKeep = summarizeHelix(keepHelix);
+                            const summaryMerged = summarizeHelix(mergedHelix);
                             mergeHelixInto(keepHelix, mergedHelix);
                             mergedPairs.push({
                                 sourceHelix,
@@ -295,8 +418,11 @@ var toscad;
                                 mergedHelix,
                                 angle: conflict.angle
                             });
-                            console.log(`[anglecomb] combined helix ${mergedHelix} into ${keepHelix} in helices[][] and grid ` +
-                                `(source=${sourceHelix}, angle=${conflict.angle})`);
+                            console.log(`[anglecomb] combined helix ${mergedHelix} ${summaryMerged} into ${keepHelix} ${summaryKeep} ` +
+                                `(source=${sourceHelix}, angle=${conflict.angle}, ` +
+                                `count(source→keep)=${sourceCounts?.get(keepHelix) ?? 0}, ` +
+                                `count(source→merged)=${sourceCounts?.get(mergedHelix) ?? 0}, ` +
+                                `directAB=${directAB}, |axisDot|=${axisDot.toFixed(3)})`);
                             mergedInThisPass = true;
                             break outer;
                         }
