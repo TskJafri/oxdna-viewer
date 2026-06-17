@@ -587,14 +587,26 @@ class ScadnanoExportManager {
             const correct = toscad.anglecorr(grid, helices, latticeType, corrected.networkMap);
             networkMap = correct.networkMap;
         }
+        // Initial helix grid positions (still using pre-renumber helix IDs).
+        let helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
+        // Renumber helices so consecutive IDs share crossovers when possible.
+        // Runs after combine (anglecomb), so it operates on the final helix
+        // count. Mutates `grid` in place; produces a renumbered helices
+        // array and a helixPos map keyed by new IDs.
+        const renumber = toscad.renumberHelices(grid, helixPos, latticeType);
+        const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
+        const finalHelices = renumbered.helices;
+        helixPos = renumbered.helixPos;
+        this.currentScadnanoHelices = finalHelices;
+        // Build connections AFTER renumber so they reference the new IDs.
         const { crossovers } = toscad.collectCrossovers(grid);
         this.currentScadnanoConnections = this.buildScadnanoConnections(crossovers);
         this.currentScadnanoLayout = {
             latticeType,
             nucleotideCount,
-            helices,
+            helices: finalHelices,
             grid,
-            helixPos: toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType),
+            helixPos,
             wireframe
         };
         return this.currentScadnanoLayout;

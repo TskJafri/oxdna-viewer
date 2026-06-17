@@ -44,6 +44,7 @@
     "./ts/helix/ssrna.ts",
     "ts/helix/conversion.ts",
     "./ts/helix/gridpos.ts",
+    "./ts/helix/trials.ts",
     "./ts/model/aminoAcid.ts",
     "./ts/model/basicElement.ts",
     "./ts/model/DNA.ts",
