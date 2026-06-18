@@ -1680,7 +1680,7 @@ namespace toscad {
 
         // ── 3. Prim's MST (cost-minimizing) ─────────────────────────────
         const inMST = new Array<boolean>(n).fill(false);
-        const mstChildren: number[][] = Array.from({ length: n }, () => []);
+        const mstChildren: number[][] = Array.from({ length: n }, (): number[] => []);
         const bestEdge = new Array<number>(n).fill(Infinity);
         const bestParent = new Array<number>(n).fill(-1);
 
