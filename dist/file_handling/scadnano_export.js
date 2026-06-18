@@ -532,9 +532,13 @@ class ScadnanoExportManager {
     exportToScadnano(name, gridType, helixPos, wireframe = false) {
         const latticeType = this.normalizeGridType(gridType);
         const { helices, grid } = this.prepareScadnanoLayout(latticeType, false, wireframe);
+        // Switch to toscad.buildScadnano2 here to fall back to the old
+        // topology-driven export. buildScadnano3 reads boundaries from the
+        // grid (helixId / direction / offset step) so post-construction
+        // grid edits propagate to the export.
         const scadnano = helixPos
-            ? toscad.buildScadnano2(grid, helices, gridType, helixPos)
-            : toscad.buildScadnano2(grid, helices, gridType);
+            ? toscad.buildScadnano3(grid, helices, gridType, helixPos)
+            : toscad.buildScadnano3(grid, helices, gridType);
         const fileName = name ? `${name}.sc` : 'output.sc';
         makeTextFile(fileName, JSON.stringify(scadnano, null, 2));
     }

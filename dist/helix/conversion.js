@@ -820,21 +820,25 @@ var toscad;
     }
     toscad.crossoverNts = crossoverNts;
     /**
-     * buildScadnano2 — topology-driven scadnano export.
+     * The intent is for the export to track grid edits (combine, move,
+     * flip) faithfully — every coordinate read goes through grid.get(),
+     * so post-construction edits propagate to the export for free.
+     * Topology pointers (n3) are used only to decide "where does this
+     * strand go next"; everything emitted is read off the grid.
      *
-     * Algorithm:
-     *  1. Discover every strand by walking backbone links (n3/n5).
-     *     - Find 5' ends (degree-1: has n3 but no n5, or n5 not in elements).
-     *     - Walk n3 to build the 5'→3' ordered nucleotide list.
-     *     - Handle circular strands (no degree-1 node).
-     *  2. For each strand, split into domains whenever the helixId changes.
-     *  3. For each domain (contiguous run on one helix):
-     *     - start = min(offsets in run)
-     *     - end   = max(offsets in run) + 1   (scadnano exclusive end)
-     *     - forward = (first 5' offset in run === min offset)
-     *  4. Sequence is built in backbone-walk order (guaranteed 5'→3').
+     *  Domain split rules (close current domain, open a new one) on each
+     *  step from currNt to currNt.n3 = nextNt:
+     *    - nextNt has no grid mark             → close, skip until placed
+     *    - nextNt is on a different helixId    → close + open (crossover)
+     *    - nextNt has a different direction    → close + open (reversal)
+     *    - nextNt offset != prevOffset + step  → close + open (gap)
+     *  Otherwise the open domain extends by one slot.
+     *
+     *  Same gap example (offsets 1..5, _, _, 8..10 on one helix forward,
+     *  then crossover) emits three domains: [1,6), [8,11), and one on
+     *  the destination helix.
      */
-    function buildScadnano2(grid, helices, gridType, helixPositions) {
+    function buildScadnano3(grid, helices, gridType, helixPositions) {
         // ── Scaffold detection ──────────────────────────────────────────
         const scaffoldStrand = getScaffoldStrand();
         const SCAFFOLD_COLOR = '#0066cc';
@@ -851,149 +855,110 @@ var toscad;
             max_offset: (helixMaxOffsets.get(i) ?? 0) + 1,
             grid_position: helixPositions?.get(i) ?? [0, i]
         }));
-        // ── Step 1: Discover all strands via backbone topology ──────────
-        // Build a set of all nucleotide ids that exist in the grid so we
-        // only emit nucleotides that were actually placed.
-        const allNtIds = new Set();
-        for (const [ntId] of grid.entries()) {
-            allNtIds.add(ntId);
-        }
-        // Track which nucleotides have been assigned to a strand already.
-        const visited = new Set();
-        // We'll collect strand data here.
         const scadStrands = [];
-        // Iterate over every nucleotide in the grid and discover strands.
-        for (const [ntId] of grid.entries()) {
-            if (visited.has(ntId))
-                continue;
-            const startNt = elements.get(ntId);
-            if (!startNt || !(startNt instanceof Nucleotide))
-                continue;
-            // ── 1a. Find the 5' end of this strand ──────────────────────
-            // Walk n5 until we can't anymore (the node with no n5, or
-            // whose n5 is not in the grid, is the 5' end).
-            let fivePrime = startNt;
-            const walkBack = new Set();
-            walkBack.add(fivePrime.id);
-            while (true) {
-                const prev = fivePrime.n5;
-                if (!prev || !(prev instanceof Nucleotide))
-                    break;
-                if (!allNtIds.has(prev.id))
-                    break; // not in grid
-                if (walkBack.has(prev.id))
-                    break; // circular — stop
-                walkBack.add(prev.id);
-                fivePrime = prev;
-            }
-            // Detect circular: if fivePrime still has a valid n5 that
-            // we stopped on because of the visited guard, it's circular.
-            const n5OfFive = fivePrime.n5;
-            const isCircular = n5OfFive instanceof Nucleotide &&
-                allNtIds.has(n5OfFive.id) &&
-                walkBack.has(n5OfFive.id);
-            // ── 1b. Walk n3 from 5' end to build ordered nt list ────────
-            const orderedNts = [];
-            let curr = fivePrime;
-            const walkForward = new Set();
-            while (curr && curr instanceof Nucleotide && allNtIds.has(curr.id)) {
-                if (walkForward.has(curr.id))
-                    break; // full circle
-                walkForward.add(curr.id);
-                visited.add(curr.id);
-                orderedNts.push(curr);
-                const n3ref = curr.n3;
-                curr = (n3ref && n3ref instanceof Nucleotide) ? n3ref : null;
-            }
-            if (orderedNts.length === 0)
-                continue;
-            const runs = [];
-            let currentRun = null;
-            for (const nt of orderedNts) {
-                const mark = grid.get(nt.id);
-                if (!mark) {
-                    currentRun = null;
+        const allSystems = [];
+        if (Array.isArray(systems))
+            for (const s of systems)
+                if (s)
+                    allSystems.push(s);
+        if (typeof tmpSystems !== 'undefined' && Array.isArray(tmpSystems)) {
+            for (const s of tmpSystems)
+                if (s)
+                    allSystems.push(s);
+        }
+        for (const sys of allSystems) {
+            const sysStrands = (sys && Array.isArray(sys.strands)) ? sys.strands : [];
+            for (const strand of sysStrands) {
+                if (!strand)
                     continue;
-                }
-                if (currentRun &&
-                    currentRun.helixId === mark.helixId &&
-                    currentRun.direction === mark.direction) {
-                    currentRun.nts.push(nt);
-                }
-                else {
-                    // New helix or new direction → new run
-                    currentRun = { helixId: mark.helixId, direction: mark.direction, nts: [nt] };
-                    runs.push(currentRun);
-                }
-            }
-            // ── Step 3: Convert runs into scadnano domains ──────────────
-            // Within a single run, offsets must be contiguous for a valid
-            // scadnano domain ([start, end) claims every position in that
-            // range). If there are gaps, split into sub-runs so each
-            // sub-run has perfectly contiguous offsets.
-            let sequence = '';
-            const domains = [];
-            for (const run of runs) {
-                // Collect (offset, base, nt) tuples in walk order
-                const entries = [];
-                for (const nt of run.nts) {
-                    const mark = grid.get(nt.id);
-                    entries.push({ offset: mark.offset, base: nt.type || 'N', nt });
-                }
-                // Determine overall walk direction for this run:
-                // forward = 5' end is at the smaller offset
-                const firstOff = entries[0].offset;
-                const lastOff = entries[entries.length - 1].offset;
-                const forward = firstOff <= lastOff; // increasing or single-nt
-                // Split into contiguous sub-runs.
-                // Walk entries in order; a sub-run breaks when the next
-                // offset isn't exactly ±1 from the previous.
-                const step = forward ? 1 : -1;
-                const subRuns = [];
-                let currentSub = [entries[0]];
-                for (let i = 1; i < entries.length; i++) {
-                    const prev = entries[i - 1].offset;
-                    const curr = entries[i].offset;
-                    if (curr === prev + step) {
-                        currentSub.push(entries[i]);
+                const start = strand.end5;
+                if (!(start instanceof Nucleotide))
+                    continue;
+                // ── Walk this strand 5' → 3' via n3 ─────────────────────
+                let sequence = '';
+                const domains = [];
+                let isCircular = false;
+                let openDomain = null;
+                const visited = new Set();
+                const closeDomain = () => {
+                    if (!openDomain)
+                        return;
+                    domains.push({
+                        helix: openDomain.helixId,
+                        forward: openDomain.forward,
+                        start: openDomain.minOffset,
+                        end: openDomain.maxOffset + 1
+                    });
+                    openDomain = null;
+                };
+                const openAt = (nt, mark) => {
+                    openDomain = {
+                        helixId: mark.helixId,
+                        direction: mark.direction,
+                        step: mark.direction === 'forward' ? 1 : -1,
+                        forward: mark.direction === 'forward',
+                        minOffset: mark.offset,
+                        maxOffset: mark.offset,
+                        lastOffset: mark.offset
+                    };
+                    sequence += nt.type || 'N';
+                };
+                let curr = start;
+                while (curr instanceof Nucleotide) {
+                    if (visited.has(curr.id)) {
+                        // Walked back to a node we already emitted — circular.
+                        isCircular = true;
+                        break;
+                    }
+                    visited.add(curr.id);
+                    const mark = grid.get(curr.id);
+                    if (!mark) {
+                        // Unplaced nt — close any open domain, skip until we
+                        // land on a placed nt again.
+                        closeDomain();
+                    }
+                    else if (!openDomain) {
+                        openAt(curr, mark);
                     }
                     else {
-                        subRuns.push(currentSub);
-                        currentSub = [entries[i]];
+                        const continues = openDomain.helixId === mark.helixId &&
+                            openDomain.direction === mark.direction &&
+                            openDomain.lastOffset + openDomain.step === mark.offset;
+                        if (continues) {
+                            openDomain.lastOffset = mark.offset;
+                            if (mark.offset < openDomain.minOffset)
+                                openDomain.minOffset = mark.offset;
+                            if (mark.offset > openDomain.maxOffset)
+                                openDomain.maxOffset = mark.offset;
+                            sequence += curr.type || 'N';
+                        }
+                        else {
+                            closeDomain();
+                            openAt(curr, mark);
+                        }
                     }
-                }
-                subRuns.push(currentSub);
-                // Emit a domain for each contiguous sub-run
-                for (const sub of subRuns) {
-                    const minOff = Math.min(sub[0].offset, sub[sub.length - 1].offset);
-                    const maxOff = Math.max(sub[0].offset, sub[sub.length - 1].offset);
-                    // Sequence in 5'→3' walk order (already correct)
-                    for (const e of sub) {
-                        sequence += e.base;
+                    // Advance via n3. Closed-loop strands have n3 of the 3' end
+                    // pointing back to end5, so detect that before stepping.
+                    const nextRef = curr.n3;
+                    if (nextRef instanceof Nucleotide && nextRef.id === start.id) {
+                        isCircular = true;
+                        break;
                     }
-                    domains.push({
-                        helix: run.helixId,
-                        forward,
-                        start: minOff,
-                        end: maxOff + 1 // exclusive end
-                    });
+                    curr = (nextRef instanceof Nucleotide) ? nextRef : null;
                 }
-            }
-            if (domains.length > 0) {
-                // Determine if this strand is the scaffold
-                const isScaffold = scaffoldStrand !== null &&
-                    fivePrime.strand === scaffoldStrand;
+                closeDomain();
+                if (domains.length === 0)
+                    continue;
+                const isScaffold = scaffoldStrand !== null && strand === scaffoldStrand;
                 const color = isScaffold
                     ? SCAFFOLD_COLOR
                     : STAPLE_COLORS[Math.floor(Math.random() * STAPLE_COLORS.length)];
-                const strandObj = { color, sequence, domains };
-                if (isScaffold) {
-                    strandObj.is_scaffold = true;
-                }
-                if (isCircular) {
-                    strandObj.circular = true;
-                }
-                scadStrands.push(strandObj);
+                const out = { color, sequence, domains };
+                if (isScaffold)
+                    out.is_scaffold = true;
+                if (isCircular)
+                    out.circular = true;
+                scadStrands.push(out);
             }
         }
         return {
@@ -1003,7 +968,7 @@ var toscad;
             strands: scadStrands
         };
     }
-    toscad.buildScadnano2 = buildScadnano2;
+    toscad.buildScadnano3 = buildScadnano3;
     ;
     // Confirms whether every offset -> direction is unique. 
     function validateGrid(grid) {
