@@ -360,6 +360,12 @@ var helix;
                 // strand1 is assigned to the one with the lowest ID at the 3' end (ends3[0])
                 const start1 = ends5.find(n => n.strand === ends3[0].strand);
                 const start2 = ends5.find(n => n.strand === ends3[1].strand);
+                // Skip 1-bp partials: when a strand has length 1 inside the partial,
+                // start1 == end1 (or start2 == end2). There's no linear extent, so the
+                // "two sides" model doesn't apply. These partials are merged by attach-count
+                // cap in generateHelix instead of by side uniqueness.
+                if (start1.id === ends3[0].id || start2.id === ends3[1].id)
+                    return;
                 partialEndsMap.set(index, {
                     start1: start1, end1: ends3[0],
                     start2: start2, end2: ends3[1]
@@ -463,7 +469,9 @@ var helix;
                 return { node: partials.length + stubsId, kind: 'stubs', index: stubsId };
             return null;
         };
-        // Each partial has up to 2 sides (from mapPartialEnds). One side gets at most 1 connection to another partial. 
+        // Each partial has up to 2 sides (from mapPartialEnds). One side gets at most 1 connection to another partial.
+        // 1-bp partials are excluded from partialEndsMap upstream — they get no sides here. Their
+        // per-partial cap is enforced by attachCount (max 2 attachments) in the greedy below.
         // Build (partialIdx, ntId) -> sideIdx (0 or 1) so any exit-nt resolves to its side.
         const partialEndsMap = mapPartialEnds(partials);
         const ntToSide = new Map();
@@ -572,6 +580,25 @@ var helix;
         const consumedKey = (pIdx, side) => `${pIdx}:${side}`;
         const isSideConsumed = (pIdx, side) => consumedSides.has(consumedKey(pIdx, side));
         const consumeSide = (pIdx, side) => consumedSides.add(consumedKey(pIdx, side));
+        // Per-partial attachment count, capped at 2. For multi-bp partials this is already
+        // implicitly enforced by side uniqueness (2 sides, each consumable once = max 2 attachments).
+        // For 1-bp partials (no sides), this is the only cap — they can host up to 2 neighbors,
+        // chosen greedily by highest dot.
+        const PER_PARTIAL_CAP = 2;
+        const attachCount = new Map();
+        const getAttach = (pIdx) => attachCount.get(pIdx) ?? 0;
+        const slotAvailable = (pIdx, side) => {
+            if (getAttach(pIdx) >= PER_PARTIAL_CAP)
+                return false;
+            if (side === undefined)
+                return true;
+            return !isSideConsumed(pIdx, side);
+        };
+        const reserveSlot = (pIdx, side) => {
+            attachCount.set(pIdx, getAttach(pIdx) + 1);
+            if (side !== undefined)
+                consumeSide(pIdx, side);
+        };
         /*
         Mutual-agreement filter:
         For each (partial P, side σ_P), we look at every direct edge incident to that side and
@@ -658,49 +685,58 @@ var helix;
                 }
             }
         });
-        const candidates = [];
-        directEdges.forEach(e => candidates.push({ kind: 'direct', ...e }));
-        stubEdges.forEach(e => candidates.push({ kind: 'stub', ...e }));
-        candidates.sort((x, y) => y.dots - x.dots);
-        // pick the highest-dots edge whose sides are still free and whose endpoints aren't already in the same group. 
-        // For stub bridges, also reject if the two groups already have a direct partial-partial connection (preserves the existing safeguard).
+        // Two-stage greedy merge:
+        //
+        // Stage A — direct partial<->partial edges only, sorted by dots desc.
+        //   Backbone strand continuity (a direct strand-edge between two partials) is the
+        //   strongest signal that those partials belong to the same helix. Run this first
+        //   so a direct edge can claim a partial's side before any stub bridge can.
+        //
+        // Stage B — stub bridges only, on whatever sides remain unconsumed.
+        //   A stub bridge legitimately merges two partials only when their respective sides
+        //   are not already claimed by direct backbone neighbors. If a partial's side was
+        //   consumed in Stage A, any stub bridge targeting that side is rejected here — that
+        //   prevents a stub from yanking a partial out of its real (direct-edge) helix.
         //
         // Why the same-group check matters: as edges are accepted, partials get merged via
         // union-find. A later edge between two partials that are already in the same group
         // would be redundant — connecting them again does nothing structurally, but it would
         // still consume two sides, blocking those sides from a real cross-group merge.
-        for (const c of candidates) {
-            if (c.kind === 'direct') {
-                if (isSideConsumed(c.a, c.sideA))
-                    continue;
-                if (isSideConsumed(c.b, c.sideB))
-                    continue;
-                const rootA = findPartial(c.a);
-                const rootB = findPartial(c.b);
-                if (rootA === rootB)
-                    continue;
-                unite(c.a, c.b);
-                mergePartialGroups(c.a, c.b);
-                consumeSide(c.a, c.sideA);
-                consumeSide(c.b, c.sideB);
-            }
-            else {
-                if (isSideConsumed(c.a, c.sideA))
-                    continue;
-                if (isSideConsumed(c.b, c.sideB))
-                    continue;
-                const rootA = findPartial(c.a);
-                const rootB = findPartial(c.b);
-                if (rootA === rootB)
-                    continue;
-                if (hasDirectConnection(rootA, rootB))
-                    continue;
-                unite(c.stubNode, c.a);
-                unite(c.stubNode, c.b);
-                mergePartialGroups(c.a, c.b);
-                consumeSide(c.a, c.sideA);
-                consumeSide(c.b, c.sideB);
-            }
+        const sortedDirect = directEdges.slice().sort((x, y) => y.dots - x.dots);
+        const sortedStub = stubEdges.slice().sort((x, y) => y.dots - x.dots);
+        // Stage A: direct partial<->partial.
+        for (const c of sortedDirect) {
+            if (!slotAvailable(c.a, c.sideA))
+                continue;
+            if (!slotAvailable(c.b, c.sideB))
+                continue;
+            const rootA = findPartial(c.a);
+            const rootB = findPartial(c.b);
+            if (rootA === rootB)
+                continue;
+            unite(c.a, c.b);
+            mergePartialGroups(c.a, c.b);
+            reserveSlot(c.a, c.sideA);
+            reserveSlot(c.b, c.sideB);
+        }
+        // Stage B: stub bridges. Same checks plus the existing safeguard against bridging
+        // two groups that already have a direct partial-partial connection.
+        for (const c of sortedStub) {
+            if (!slotAvailable(c.a, c.sideA))
+                continue;
+            if (!slotAvailable(c.b, c.sideB))
+                continue;
+            const rootA = findPartial(c.a);
+            const rootB = findPartial(c.b);
+            if (rootA === rootB)
+                continue;
+            if (hasDirectConnection(rootA, rootB))
+                continue;
+            unite(c.stubNode, c.a);
+            unite(c.stubNode, c.b);
+            mergePartialGroups(c.a, c.b);
+            reserveSlot(c.a, c.sideA);
+            reserveSlot(c.b, c.sideB);
         }
         // Stubs join the best-aligned partial through A3 dots.
         stubsLinks.forEach((linksByPartial, stubNode) => {
