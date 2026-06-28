@@ -1852,4 +1852,155 @@ namespace toscad {
 
         return { helices: newHelices, helixPos: newHelixPos };
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  renumberHelicesGNN — Greedy Nearest-Neighbor renumber
+    //
+    //  Same input/output contract as renumberHelices, but the path is built
+    //  by walking from helix 0 and at each step extending to the cheapest
+    //  unvisited helix under the same edgeCost (jump penalty + Euclidean
+    //  grid distance). No MST, no DFS preorder, no 2-Opt — the linearization
+    //  step itself respects locality, so consecutive IDs prefer crossover
+    //  neighbors and otherwise fall back to nearest physical neighbor.
+    //
+    //  Trade-off vs MST+DFS+2Opt: a greedy tour can leave one or two long
+    //  "tail" hops when the last unvisited node sits far from the current
+    //  endpoint. In exchange we avoid the mid-path teleports that come from
+    //  popping out of MST subtrees.
+    // ─────────────────────────────────────────────────────────────────────
+    export function renumberHelicesGNN(
+        grid: GridMap,
+        helixPos: Map<number, [number, number]>,
+        lattice: string = 'honeycomb'
+    ): RenumberResult {
+
+        // ── 1. Adjacency + cost helpers (identical to renumberHelices) ──
+        const { crossovers, helixIds } = collectCrossovers(grid);
+        for (const id of helixPos.keys()) helixIds.add(id);
+        const nodes = Array.from(helixIds).sort((a, b) => a - b);
+        const n = nodes.length;
+        const idx = new Map<number, number>();
+        nodes.forEach((id, i) => idx.set(id, i));
+
+        const isSquare = (lattice ?? '').toLowerCase() === 'square';
+        const world = nodes.map(id => {
+            const pos = helixPos.get(id) ?? [0, 0];
+            const v = isSquare
+                ? scadnano.squareToWorld(pos[0], pos[1])
+                : scadnano.honeycombToWorld(pos[0], pos[1]);
+            return [v.x, v.y] as [number, number];
+        });
+
+        const dist = (a: number, b: number): number => {
+            const [ax, ay] = world[a];
+            const [bx, by] = world[b];
+            return Math.hypot(ax - bx, ay - by);
+        };
+
+        const adj: boolean[][] = Array.from({ length: n }, () => new Array(n).fill(false));
+        for (const [from, inner] of crossovers.entries()) {
+            const i = idx.get(from);
+            if (i === undefined) continue;
+            for (const [to, counts] of inner.entries()) {
+                const j = idx.get(to);
+                if (j === undefined) continue;
+                if ((counts.sameWalk + counts.diffWalk) > 0) {
+                    adj[i][j] = true;
+                    adj[j][i] = true;
+                }
+            }
+        }
+
+        const isJump = (a: number, b: number) => !adj[a][b];
+        const edgeCost = (a: number, b: number) =>
+            (isJump(a, b) ? RENUMBER_JUMP_PENALTY : 0) + dist(a, b);
+
+        if (n <= 1) {
+            const order = nodes.slice();
+            const remap = new Map<number, number>();
+            order.forEach((id, i) => remap.set(id, i));
+            console.log(`[renumberHelicesGNN] n=${n}, nothing to renumber.`);
+            return {
+                order, remap,
+                stats: {
+                    n, components: n, lowerBoundJumps: 0,
+                    initialJumps: 0, initialDistance: 0,
+                    afterPhase1Jumps: 0, finalJumps: 0, finalDistance: 0
+                }
+            };
+        }
+
+        // ── 2. Connected components (lower bound on jumps, log only) ────
+        const compId = new Array<number>(n).fill(-1);
+        let nComps = 0;
+        for (let s = 0; s < n; s++) {
+            if (compId[s] !== -1) continue;
+            const stack = [s];
+            compId[s] = nComps;
+            while (stack.length) {
+                const u = stack.pop()!;
+                for (let v = 0; v < n; v++) {
+                    if (compId[v] !== -1) continue;
+                    if (adj[u][v]) { compId[v] = nComps; stack.push(v); }
+                }
+            }
+            nComps++;
+        }
+        const lowerBoundJumps = Math.max(0, nComps - 1);
+
+        // ── 3. Greedy nearest-neighbor walk from node 0 ─────────────────
+        const visited = new Array<boolean>(n).fill(false);
+        const path: number[] = [0];
+        visited[0] = true;
+        let current = 0;
+
+        for (let step = 1; step < n; step++) {
+            let bestV = -1;
+            let bestCost = Infinity;
+            for (let v = 0; v < n; v++) {
+                if (visited[v]) continue;
+                const c = edgeCost(current, v);
+                if (c < bestCost) { bestCost = c; bestV = v; }
+            }
+            if (bestV === -1) break;  // disconnected universe; shouldn't happen
+            visited[bestV] = true;
+            path.push(bestV);
+            current = bestV;
+        }
+
+        // ── 4. Path stats ───────────────────────────────────────────────
+        const pathStats = (p: number[]): { jumps: number; distance: number } => {
+            let jumps = 0, distance = 0;
+            for (let i = 0; i + 1 < p.length; i++) {
+                if (isJump(p[i], p[i + 1])) jumps++;
+                distance += dist(p[i], p[i + 1]);
+            }
+            return { jumps, distance };
+        };
+        const final = pathStats(path);
+
+        // ── 5. Build remap and report ──────────────────────────────────
+        const order = path.map(i => nodes[i]);
+        const remap = new Map<number, number>();
+        order.forEach((id, i) => remap.set(id, i));
+
+        const stats: RenumberStats = {
+            n,
+            components: nComps,
+            lowerBoundJumps,
+            initialJumps: final.jumps,
+            initialDistance: final.distance,
+            afterPhase1Jumps: final.jumps,
+            finalJumps: final.jumps,
+            finalDistance: final.distance,
+        };
+
+        console.log(
+            `[renumberHelicesGNN] n=${n}, components=${nComps}, ` +
+            `jumps lower bound=${lowerBoundJumps} | ` +
+            `final=[${final.jumps} jumps, dist=${final.distance.toFixed(2)}]`
+        );
+
+        return { order, remap, stats };
+    }
 }

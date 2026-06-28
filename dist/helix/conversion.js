@@ -315,6 +315,22 @@ var toscad;
                 const helixBwdDir = (helixFwdDir === 'n3' ? 'n5' : 'n3');
                 const revFwdDir = helixFwdDir === 'n3' ? 'n5' : 'n3';
                 const revBwdDir = helixBwdDir === 'n3' ? 'n5' : 'n3';
+                // Convention: a 'forward'-labeled nt has offsets that increase
+                // along its own 5'→3'. This is what buildScadnano3 assumes
+                // (step = +1 for forward) and what directionAlign2's trend
+                // criterion needs in order to be equivalent to label
+                // alternation at crossovers.
+                //
+                // We stamp offsets in the helixFwdDir direction. When
+                // helixFwdDir === 'n3' that direction is the walked strand's
+                // own 5'→3', so the walked strand naturally has forward=inc
+                // and gets the 'forward' label. When helixFwdDir === 'n5'
+                // we're stamping along the walked strand's 3'→5', meaning
+                // its offsets decrease along its own 5'→3'; the *pair*
+                // strand is the one whose offsets increase along its 5'→3'.
+                // So we swap the labels in that case.
+                const walkLabel = helixFwdDir === 'n3' ? 'forward' : 'backward';
+                const pairLabel = helixFwdDir === 'n3' ? 'backward' : 'forward';
                 // Find Head
                 let firstAnchor = null;
                 let firstAnchorPair = null;
@@ -339,11 +355,11 @@ var toscad;
                     // remember we won't mark the anchor and it's pair, those will be marked to the grid later.
                     [...headFwd].reverse().forEach((n, i) => {
                         if (i < headFwd.length - 1)
-                            mark(n, helixId, (startOffset - fwdHeadLen) + i, 'forward');
+                            mark(n, helixId, (startOffset - fwdHeadLen) + i, walkLabel);
                     });
                     [...headBwd].reverse().forEach((n, i) => {
                         if (i < headBwd.length - 1)
-                            mark(n, helixId, (startOffset - bwdHeadLen) + i, 'backward');
+                            mark(n, helixId, (startOffset - bwdHeadLen) + i, pairLabel);
                     });
                     offset = startOffset;
                 }
@@ -355,9 +371,9 @@ var toscad;
                 let currFwd = firstAnchor;
                 let currBwd = firstAnchorPair;
                 if (currFwd)
-                    mark(currFwd, helixId, offset, 'forward');
+                    mark(currFwd, helixId, offset, walkLabel);
                 if (currBwd)
-                    mark(currBwd, helixId, offset, 'backward');
+                    mark(currBwd, helixId, offset, pairLabel);
                 while (currFwd) {
                     const nextStep = findNextPaired({ fwd: currFwd, bwd: currBwd }, { fwd: helixFwdDir, bwd: helixBwdDir }, helixSet);
                     if (!nextStep)
@@ -400,27 +416,27 @@ var toscad;
                     }
                     // Fill Grid
                     const gapLength = Math.max(fwdTail.length + fwdHead.length, bwdTail.length + bwdHead.length);
-                    fwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, 'forward'));
+                    fwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, walkLabel));
                     const fwdHeadStart = offset + 1 + (gapLength - fwdHead.length);
-                    fwdHead.forEach((n, i) => mark(n, helixId, fwdHeadStart + i, 'forward'));
-                    bwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, 'backward'));
+                    fwdHead.forEach((n, i) => mark(n, helixId, fwdHeadStart + i, walkLabel));
+                    bwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, pairLabel));
                     const bwdHeadStart = offset + 1 + (gapLength - bwdHead.length);
-                    bwdHead.forEach((n, i) => mark(n, helixId, bwdHeadStart + i, 'backward'));
+                    bwdHead.forEach((n, i) => mark(n, helixId, bwdHeadStart + i, pairLabel));
                     offset += gapLength + 1;
-                    mark(nextAnchor, helixId, offset, 'forward');
+                    mark(nextAnchor, helixId, offset, walkLabel);
                     if (nextPair)
-                        mark(nextPair, helixId, offset, 'backward');
+                        mark(nextPair, helixId, offset, pairLabel);
                     currFwd = nextAnchor;
                     currBwd = nextPair;
                 }
                 // The Tail
                 if (currFwd) {
                     const fwdTail = tracePath(currFwd, helixFwdDir, helixSet).slice(1);
-                    fwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, 'forward'));
+                    fwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, walkLabel));
                 }
                 if (currBwd) {
                     const bwdTail = tracePath(currBwd, helixBwdDir, helixSet).slice(1);
-                    bwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, 'backward'));
+                    bwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, pairLabel));
                 }
             }
             // --- E. THE BINDER SWEEPER (Cleanest Version) ---

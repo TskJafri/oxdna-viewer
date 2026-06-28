@@ -597,7 +597,7 @@ class ScadnanoExportManager {
         // Runs after combine (anglecomb), so it operates on the final helix
         // count. Mutates `grid` in place; produces a renumbered helices
         // array and a helixPos map keyed by new IDs.
-        const renumber = toscad.renumberHelices(grid, helixPos, latticeType);
+        const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType);
         const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
         const finalHelices = renumbered.helices;
         helixPos = renumbered.helixPos;
