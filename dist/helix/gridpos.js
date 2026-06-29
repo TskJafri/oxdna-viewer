@@ -1,4 +1,3 @@
-"use strict";
 /// <reference path="../typescript_definitions/index.d.ts" />
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
@@ -157,6 +156,141 @@ var toscad;
         }
         return result;
     }
+    // Auto-detect whether a structure was built on a honeycomb or square lattice.
+    //
+    // Per-helix, sort crossover-endpoint nucleotides by offset, then for every
+    // consecutive pair compute the gap and test:
+    //     fitsHC = (gap mod 28) ∈ {6, 13, 20, 27}
+    //     fitsSQ = (gap mod 32) ∈ {7, 15, 23, 31}
+    // Exactly one match → +1 vote for that lattice. Matches both → ambiguous
+    // (skip). Matches neither → reject. Whichever lattice has more votes wins;
+    // ties (including zero votes) fall back to honeycomb.
+    //
+    // Binder helices (passed from setGrid) attach outside the main lattice, so
+    // any crossover with either endpoint on a binder helix is excluded.
+    function detectLatticeKind(grid, binderHelices = []) {
+        const binderSet = new Set(binderHelices);
+        // helixId -> ntId -> point. Map-by-ntId dedupes nucleotides that appear
+        // as both the "to" of one crossover and the "from" of another.
+        const pointsByHelix = new Map();
+        const addPoint = (helixId, ntId, offset, direction) => {
+            let inner = pointsByHelix.get(helixId);
+            if (!inner) {
+                inner = new Map();
+                pointsByHelix.set(helixId, inner);
+            }
+            inner.set(ntId, { offset, direction });
+        };
+        let skippedBinderCrossovers = 0;
+        for (const crossover of toscad.crossoverNts(grid)) {
+            // Exclude crossovers that touch a binder helix on either side.
+            if (binderSet.has(crossover.fromHelix) || binderSet.has(crossover.toHelix)) {
+                skippedBinderCrossovers++;
+                continue;
+            }
+            const fromMark = grid.get(crossover.fromNt.id);
+            const toMark = grid.get(crossover.toNt.id);
+            if (fromMark) {
+                addPoint(crossover.fromHelix, crossover.fromNt.id, crossover.fromOffset, fromMark.direction);
+            }
+            if (toMark) {
+                addPoint(crossover.toHelix, crossover.toNt.id, crossover.toOffset, toMark.direction);
+            }
+        }
+        const HC_PERIOD = 28;
+        const HC_OFFSETS = {
+            0: new Set([6, 13, 20, 27]),
+            1: new Set([1, 4, 8])
+        };
+        const SQ_PERIOD = 32;
+        const SQ_OFFSETS = {
+            0: new Set([7, 15, 23, 31]),
+            1: new Set([3, 11, 19, 27])
+        };
+        let honeycombVotes = 0;
+        let squareVotes = 0;
+        let totalGaps = 0;
+        // Per-gap-size breakdown of *accepted* gaps only. Map<gap, {hc, sq}>.
+        const acceptedByGap = new Map();
+        const bumpAccepted = (gap, kind) => {
+            let entry = acceptedByGap.get(gap);
+            if (!entry) {
+                entry = { hc: 0, sq: 0 };
+                acceptedByGap.set(gap, entry);
+            }
+            entry[kind]++;
+        };
+        console.log(`[detectLatticeKind] starting; helices with crossover endpoints=${pointsByHelix.size}, ` +
+            `binder helices=${binderHelices.length} (${binderHelices.join(',') || 'none'}), ` +
+            `binder-touching crossovers skipped=${skippedBinderCrossovers}`);
+        for (const [helixId, inner] of pointsByHelix.entries()) {
+            if (inner.size < 2) {
+                console.log(`[detectLatticeKind]   helix=${helixId} has ${inner.size} crossover endpoint(s) — skipping`);
+                continue;
+            }
+            const sorted = Array.from(inner.values()).sort((a, b) => a.offset - b.offset);
+            const summary = sorted.map(p => `${p.offset}${p.direction === 'forward' ? 'f' : 'b'}`).join(', ');
+            console.log(`[detectLatticeKind]   helix=${helixId} endpoints (offset+dir, sorted): ${summary}`);
+            for (let i = 1; i < sorted.length; i++) {
+                const a = sorted[i - 1];
+                const b = sorted[i];
+                const rawX = b.offset - a.offset;
+                if (rawX === 0)
+                    continue;
+                const parity = a.direction === b.direction ? 0 : 1;
+                // TODO: gap=1 skipped as a proxy for "same crossover junction"; add a real same-crossover grouping fn.
+                // For parity=1 rawX=1 is a valid signal (parity-1 honeycomb list includes 1), so only skip for parity=0.
+                if (parity === 0 && rawX === 1)
+                    continue;
+                totalGaps++;
+                const hcResid = ((rawX % HC_PERIOD) + HC_PERIOD) % HC_PERIOD;
+                const sqResid = ((rawX % SQ_PERIOD) + SQ_PERIOD) % SQ_PERIOD;
+                const fitsHC = HC_OFFSETS[parity].has(hcResid);
+                const fitsSQ = SQ_OFFSETS[parity].has(sqResid);
+                let verdict;
+                if (fitsHC && fitsSQ) {
+                    verdict = 'ambiguous';
+                }
+                else if (fitsHC) {
+                    verdict = 'HC';
+                    honeycombVotes++;
+                    bumpAccepted(rawX, 'hc');
+                }
+                else if (fitsSQ) {
+                    verdict = 'SQ';
+                    squareVotes++;
+                    bumpAccepted(rawX, 'sq');
+                }
+                else {
+                    verdict = 'rejected';
+                }
+                console.log(`[detectLatticeKind]     helix=${helixId} gap=${rawX} (offsets ${a.offset}->${b.offset}) ` +
+                    `parity=${parity} | gap%28=${hcResid} (HC ${fitsHC ? 'yes' : 'no'}) ` +
+                    `gap%32=${sqResid} (SQ ${fitsSQ ? 'yes' : 'no'}) -> ${verdict}`);
+            }
+        }
+        console.log(`[detectLatticeKind] total gaps inspected (post gap=0,1 skip): ${totalGaps}`);
+        const acceptedSizes = Array.from(acceptedByGap.keys()).sort((a, b) => a - b);
+        if (acceptedSizes.length === 0) {
+            console.log(`[detectLatticeKind] accepted gap-size breakdown: none`);
+        }
+        else {
+            console.log(`[detectLatticeKind] accepted gap-size breakdown:`);
+            for (const size of acceptedSizes) {
+                const { hc, sq } = acceptedByGap.get(size);
+                const parts = [];
+                if (hc)
+                    parts.push(`HC=${hc}`);
+                if (sq)
+                    parts.push(`SQ=${sq}`);
+                console.log(`[detectLatticeKind]   gap=${size}: ${parts.join(', ')}`);
+            }
+        }
+        const detected = squareVotes > honeycombVotes ? 'square' : 'honeycomb';
+        console.log(`[detectLatticeKind] totals: HC=${honeycombVotes}, SQ=${squareVotes} -> ${detected}`);
+        return detected;
+    }
+    toscad.detectLatticeKind = detectLatticeKind;
     // Now run getAngleHelix for every helix to get a full network map.
     // Note that every helix is has RELATIVE angles to its neighbors, they are not globally aligned to anything yet.
     // The global alignment is done in calculateGridPositions. 

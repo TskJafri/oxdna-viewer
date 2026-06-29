@@ -1,4 +1,3 @@
-"use strict";
 THREE.ShaderLib.customDepthRGBA = {
     uniforms: THREE.ShaderLib.depth.uniforms,
     vertexShader: `

@@ -108,11 +108,11 @@ async function saveStructure() {
             };
             const newStructure = {
                 id: newStructureId,
-                commits: [newCommit], // Renamed from 'structure' to 'commits'
+                commits: [newCommit],
                 date: Date.now(),
                 structureName: structureName,
                 branches: { main: [newCommitId] },
-                isSynced: false, // NEW: Default to not synced
+                isSynced: false,
                 syncedProjectId: null, // NEW: No synced project ID yet
             };
             await window.DexieDB.structureData.put(newStructure);
@@ -227,11 +227,11 @@ async function saveStructure() {
         newBranches = reconstructBranchesFromParents(newStructureArray);
         await window.DexieDB.structureData.put({
             id: structureId,
-            commits: newStructureArray, // Updated to use 'commits'
-            date: Date.now(), // Update date on commit
+            commits: newStructureArray,
+            date: Date.now(),
             structureName: oldStructure.structureName,
             branches: newBranches,
-            isSynced: oldStructure.isSynced || false, // Preserve sync status
+            isSynced: oldStructure.isSynced || false,
             syncedProjectId: oldStructure.syncedProjectId || null, // Preserve synced project ID
         });
         alert("Structure saved successfully!");
@@ -630,11 +630,11 @@ async function createNewProject() {
                 };
                 const newStructure = {
                     id: newStructureId,
-                    commits: [newCommit], // Renamed from 'structure' to 'commits'
+                    commits: [newCommit],
                     date: Date.now(),
                     structureName: structureName,
                     branches: { main: [newCommitId] },
-                    isSynced: false, // NEW: Default to not synced
+                    isSynced: false,
                     syncedProjectId: null, // NEW: No synced project ID yet
                 };
                 await window.DexieDB.structureData.put(newStructure);
@@ -686,11 +686,11 @@ async function createBlankProject() {
     // Create the new structure object, including the initial commit
     const newStructure = {
         id: newStructureId,
-        commits: [initialCommit], // Renamed from 'structure' to 'commits'
+        commits: [initialCommit],
         date: Date.now(),
         structureName: structureName,
-        branches: { main: [newCommitId] }, // Main branch points to the initial commit
-        isSynced: false, // NEW: Default to not synced
+        branches: { main: [newCommitId] },
+        isSynced: false,
         syncedProjectId: null, // NEW: No synced project ID yet
     };
     await window.DexieDB.structureData.put(newStructure);
@@ -954,7 +954,7 @@ async function cleanupRemoteStructures() {
             const branchesObj = reconstructBranchesFromParents(localCommits);
             // Create new local project using remote project ID as local ID
             const newProject = {
-                id: remoteProject.id, // Use remote ID as local ID for consistency
+                id: remoteProject.id,
                 commits: localCommits,
                 structureName: remoteProject.projectName,
                 date: Date.now(),

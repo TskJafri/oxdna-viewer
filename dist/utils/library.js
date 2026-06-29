@@ -1,4 +1,3 @@
-"use strict";
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../typescript_definitions/index.d.ts" />
 // Fetch remote projects and their metadata

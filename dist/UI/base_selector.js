@@ -1,4 +1,3 @@
-"use strict";
 /// <reference path="../typescript_definitions/index.d.ts" />
 let mouse3D;
 let raycaster = new THREE.Raycaster();

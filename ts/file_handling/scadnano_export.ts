@@ -1,6 +1,9 @@
 /// <reference path="../typescript_definitions/index.d.ts" />
 
 type ScadnanoGridType = 'honeycomb' | 'square';
+// What the dialog/grid-type dropdown can hand us. 'automatic' is resolved to
+// one of the concrete kinds inside prepareScadnanoLayout via toscad.detectLatticeKind.
+type ScadnanoRequestedGridType = ScadnanoGridType | 'automatic';
 type HelixPosMap = Map<number, [number, number]>;
 
 type ScadnanoPreparedLayout = {
@@ -14,7 +17,7 @@ type ScadnanoPreparedLayout = {
 
 type ScadnanoDialogOptions = {
     name: string;
-    gridType: ScadnanoGridType;
+    gridType: ScadnanoRequestedGridType;
     includeHelixPos: boolean;
     wireframe: boolean;
 };
@@ -566,12 +569,15 @@ class ScadnanoExportManager {
         }
 
         let helixPos: HelixPosMap | null = null;
+        let resolvedGridType: ScadnanoGridType = 'honeycomb';
         let failed = false;
 
         this.runScadnanoLongCalculation(
             () => {
                 try {
-                    helixPos = this.calculateScadnanoHelixPos(options.gridType, options.wireframe);
+                    const result = this.calculateScadnanoHelixPos(options.gridType, options.wireframe);
+                    helixPos = result.helixPos;
+                    resolvedGridType = result.latticeType;
                     if (helixPos) {
                         window.currentScadnanoHelixPos = this.cloneHelixPosMap(helixPos);
                     }
@@ -582,7 +588,7 @@ class ScadnanoExportManager {
             },
             () => {
                 if (failed || !helixPos) return;
-                this.showGridFromHelixPos(helixPos, options.gridType);
+                this.showGridFromHelixPos(helixPos, resolvedGridType);
             }
         );
     }
@@ -600,26 +606,29 @@ class ScadnanoExportManager {
 
         return {
             name: nameInput.value.trim() || 'output',
-            gridType: this.normalizeGridType(scadnanoGrid.value),
+            gridType: this.normalizeRequestedGridType(scadnanoGrid.value),
             includeHelixPos: helixPosCheckbox.checked,
             wireframe: wireframeCheckbox.checked,
         };
     }
 
-    private readCurrentExportTarget(): { name: string; gridType: ScadnanoGridType; wireframe: boolean } {
+    private readCurrentExportTarget(): { name: string; gridType: ScadnanoRequestedGridType; wireframe: boolean } {
         const nameInput = document.getElementById('scadnanoFilename') as HTMLInputElement | null;
         const scadnanoGrid = document.getElementById('scadnanoGrid') as HTMLInputElement | null;
         const wireframeCheckbox = document.getElementById('scadnanoWireframe') as HTMLInputElement | null;
 
         return {
             name: nameInput?.value.trim() || 'output',
-            gridType: this.normalizeGridType(scadnanoGrid?.value),
+            gridType: this.normalizeRequestedGridType(scadnanoGrid?.value),
             wireframe: Boolean(wireframeCheckbox?.checked),
         };
     }
 
-    private normalizeGridType(value?: string): ScadnanoGridType {
-        return value === 'honeycomb' ? 'honeycomb' : 'square';
+    // Dialog/dropdown value — accepts 'automatic' for downstream resolution.
+    private normalizeRequestedGridType(value?: string): ScadnanoRequestedGridType {
+        if (value === 'square') return 'square';
+        if (value === 'honeycomb') return 'honeycomb';
+        return 'automatic';
     }
 
     private runScadnanoLongCalculation(calc: () => void, callback?: () => void): void {
@@ -660,20 +669,21 @@ class ScadnanoExportManager {
 
     private exportToScadnano(
         name: string,
-        gridType: ScadnanoGridType,
+        gridType: ScadnanoRequestedGridType,
         helixPos?: HelixPosMap,
         wireframe = false
     ): void {
-        const latticeType: ScadnanoGridType = this.normalizeGridType(gridType);
-        const { helices, grid } = this.prepareScadnanoLayout(latticeType, false, wireframe);
+        const layout = this.prepareScadnanoLayout(gridType, false, wireframe);
+        const resolvedGridType = layout.latticeType;
+        const { helices, grid } = layout;
 
         // Switch to toscad.buildScadnano2 here to fall back to the old
         // topology-driven export. buildScadnano3 reads boundaries from the
         // grid (helixId / direction / offset step) so post-construction
         // grid edits propagate to the export.
         const scadnano = helixPos
-            ? toscad.buildScadnano3(grid, helices, gridType, helixPos)
-            : toscad.buildScadnano3(grid, helices, gridType);
+            ? toscad.buildScadnano3(grid, helices, resolvedGridType, helixPos)
+            : toscad.buildScadnano3(grid, helices, resolvedGridType);
 
         const fileName = name ? `${name}.sc` : 'output.sc';
         makeTextFile(fileName, JSON.stringify(scadnano, null, 2));
@@ -710,17 +720,23 @@ class ScadnanoExportManager {
     }
 
     private prepareScadnanoLayout(
-        latticeType: ScadnanoGridType,
+        requestedLatticeType: ScadnanoRequestedGridType,
         forceRecompute = false,
         wireframe = false
     ): ScadnanoPreparedLayout {
         const nucleotideCount = this.getCurrentNucleotideCount();
+
+        // Cache hit:
+        //   - For concrete kinds: cached latticeType must match.
+        //   - For 'automatic': any cached latticeType is acceptable (it was
+        //     either detected the same way last time or explicitly chosen).
         if (
             !forceRecompute &&
             this.currentScadnanoLayout &&
-            this.currentScadnanoLayout.latticeType === latticeType &&
             this.currentScadnanoLayout.nucleotideCount === nucleotideCount &&
-            this.currentScadnanoLayout.wireframe === wireframe
+            this.currentScadnanoLayout.wireframe === wireframe &&
+            (requestedLatticeType === 'automatic' ||
+                this.currentScadnanoLayout.latticeType === requestedLatticeType)
         ) {
             this.currentScadnanoHelices = this.currentScadnanoLayout.helices;
             return this.currentScadnanoLayout;
@@ -732,6 +748,18 @@ class ScadnanoExportManager {
         const { grid, binderHelices } = toscad.setGrid(helices);
         toscad.directionAlign2(grid);
         toscad.alignGridPrim(grid, binderHelices);
+
+        // Resolve 'automatic' once the grid is built — detection reads helixId,
+        // offset and direction off the grid via crossoverNts. Binder helices are
+        // excluded from the lattice vote because their crossover spacing is
+        // non-standard (attach points to scaffold from outside the lattice).
+        let latticeType: ScadnanoGridType;
+        if (requestedLatticeType === 'automatic') {
+            latticeType = toscad.detectLatticeKind(grid, binderHelices);
+            notify(`Auto-detected lattice: ${latticeType}`, 'success');
+        } else {
+            latticeType = requestedLatticeType;
+        }
 
         const angles = toscad.getAngles(grid, helices, latticeType);
         let networkMap = angles;
@@ -771,9 +799,15 @@ class ScadnanoExportManager {
         return this.currentScadnanoLayout;
     }
 
-    private calculateScadnanoHelixPos(latticeType: ScadnanoGridType = 'square', wireframe = false): HelixPosMap {
-        const { helixPos } = this.prepareScadnanoLayout(latticeType, false, wireframe);
-        return this.cloneHelixPosMap(helixPos);
+    private calculateScadnanoHelixPos(
+        latticeType: ScadnanoRequestedGridType = 'automatic',
+        wireframe = false
+    ): { helixPos: HelixPosMap; latticeType: ScadnanoGridType } {
+        const layout = this.prepareScadnanoLayout(latticeType, false, wireframe);
+        return {
+            helixPos: this.cloneHelixPosMap(layout.helixPos),
+            latticeType: layout.latticeType
+        };
     }
 
     private notifyHelixCoverageMismatch(

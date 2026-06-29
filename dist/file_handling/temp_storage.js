@@ -1,4 +1,3 @@
-"use strict";
 async function generateAndStoreCurrentStructure() {
     try {
         const name = "temp_structure"; // Fixed name for temporary storage
@@ -7,7 +6,7 @@ async function generateAndStoreCurrentStructure() {
         const { file: topFileContent } = window.makeTopFile(name, newElementIDs, newStrandIds, gsSubtypes, counts, true);
         const { file: datFileContent } = window.makeDatFile(name, newElementIDs);
         await window.DexieDB.temporaryStructure.put({
-            id: "currentStructure", // Fixed ID to ensure overwrite
+            id: "currentStructure",
             topFile: topFileContent,
             datFile: datFileContent,
         });

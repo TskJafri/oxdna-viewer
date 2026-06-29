@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Extends Nuculeotide with DNA-specific properties such as base position relative to backbone, and B-form helix creation
  */

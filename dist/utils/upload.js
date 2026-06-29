@@ -1,4 +1,3 @@
-"use strict";
 /// <reference path="../../ts/typescript_definitions/oxView.d.ts" />
 /// <reference path="../../ts/typescript_definitions/index.d.ts" />
 const fileStore = {

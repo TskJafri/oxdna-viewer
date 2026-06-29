@@ -1,4 +1,3 @@
-"use strict";
 /**
  * scadnano.ts  –  Standalone 2D Helix Position Editor
  *

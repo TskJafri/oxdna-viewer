@@ -170,7 +170,7 @@
             <hr>
             
             <label style="display: flex; align-items: center; cursor: pointer;">
-                <input type="checkbox" id="scadnanoIncludeHPos" onchange="toggleGridDropdown(this)"> 
+                <input type="checkbox" id="scadnanoIncludeHPos" checked onchange="toggleGridDropdown(this)"> 
                 <span style="margin-left: 8px;">Calculate Helix Positions</span>
             </label>
 
@@ -181,8 +181,9 @@
             
             <div style="margin-left: 24px; margin-top: 8px;">
                 <label for="scadnanoGrid" style="display:block; margin-bottom:6px;">Grid type</label>
-                <select id="scadnanoGrid" disabled>
-                    <option value="honeycomb" selected>Honeycomb</option>
+                <select id="scadnanoGrid">
+                    <option value="automatic" selected>Automatic</option>
+                    <option value="honeycomb">Honeycomb</option>
                     <option value="square">Square</option>
                 </select>
             </div>

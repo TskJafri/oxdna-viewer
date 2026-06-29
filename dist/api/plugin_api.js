@@ -1,4 +1,3 @@
-"use strict";
 // let's define a storage structure for the plugin API
 // it will sit in local storage and load the code for the individual plugins named as key 
 // and the code as value packed away in a JSON object hidden at the key "plugins" in local storage
