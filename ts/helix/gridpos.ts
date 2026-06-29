@@ -1768,6 +1768,23 @@ namespace toscad {
             return [v.x, v.y] as [number, number];
         });
 
+        // Find the anchor node: lowest row (pos[1] = y), break ties by lowest col (pos[0] = x).
+        // This pins helix 0 to the top-left corner of the layout in both square and honeycomb.
+        let startNode = 0;
+        let startRow = Infinity;
+        let startCol = Infinity;
+        for (let i = 0; i < n; i++) {
+            const pos = helixPos.get(nodes[i]) ?? [0, 0];
+            const row = pos[1];
+            const col = pos[0];
+            if (row < startRow || (row === startRow && col < startCol)) {
+                startRow = row;
+                startCol = col;
+                startNode = i;
+            }
+        }
+        console.log(`[renumberHelices] anchor node idx=${startNode} (helixId=${nodes[startNode]}, col=${startCol}, row=${startRow})`);
+
         const dist = (a: number, b: number): number => {
             const [ax, ay] = world[a];
             const [bx, by] = world[b];
@@ -1833,10 +1850,11 @@ namespace toscad {
         const bestEdge = new Array<number>(n).fill(Infinity);
         const bestParent = new Array<number>(n).fill(-1);
 
-        inMST[0] = true;
-        for (let v = 1; v < n; v++) {
-            bestEdge[v] = edgeCost(0, v);
-            bestParent[v] = 0;
+        inMST[startNode] = true;
+        for (let v = 0; v < n; v++) {
+            if (v === startNode) continue;
+            bestEdge[v] = edgeCost(startNode, v);
+            bestParent[v] = startNode;
         }
         for (let added = 1; added < n; added++) {
             let u = -1, best = Infinity;
@@ -1858,7 +1876,7 @@ namespace toscad {
         // Visit the cheapest child first at each branch — slightly tighter
         // initial tour, gives 2-Opt less to clean up.
         const path: number[] = [];
-        const dfsStack: number[] = [0];
+        const dfsStack: number[] = [startNode];
         const visited = new Array<boolean>(n).fill(false);
         // Iterative pre-order DFS to avoid recursion on very deep trees.
         while (dfsStack.length) {
@@ -2040,6 +2058,23 @@ namespace toscad {
             return [v.x, v.y] as [number, number];
         });
 
+        // Find the anchor node: lowest row (pos[1] = y), break ties by lowest col (pos[0] = x).
+        // This pins helix 0 to the top-left corner of the layout in both square and honeycomb.
+        let startNode = 0;
+        let startRow = Infinity;
+        let startCol = Infinity;
+        for (let i = 0; i < n; i++) {
+            const pos = helixPos.get(nodes[i]) ?? [0, 0];
+            const row = pos[1];
+            const col = pos[0];
+            if (row < startRow || (row === startRow && col < startCol)) {
+                startRow = row;
+                startCol = col;
+                startNode = i;
+            }
+        }
+        console.log(`[renumberHelicesGNN] anchor node idx=${startNode} (helixId=${nodes[startNode]}, col=${startCol}, row=${startRow})`);
+
         const dist = (a: number, b: number): number => {
             const [ax, ay] = world[a];
             const [bx, by] = world[b];
@@ -2097,11 +2132,11 @@ namespace toscad {
         }
         const lowerBoundJumps = Math.max(0, nComps - 1);
 
-        // ── 3. Greedy nearest-neighbor walk from node 0 ─────────────────
+        // ── 3. Greedy nearest-neighbor walk from anchor node ────────────
         const visited = new Array<boolean>(n).fill(false);
-        const path: number[] = [0];
-        visited[0] = true;
-        let current = 0;
+        const path: number[] = [startNode];
+        visited[startNode] = true;
+        let current = startNode;
 
         for (let step = 1; step < n; step++) {
             let bestV = -1;
