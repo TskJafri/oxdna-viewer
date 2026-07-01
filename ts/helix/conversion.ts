@@ -381,6 +381,10 @@ namespace toscad {
                 if (currFwd) mark(currFwd, helixId, offset, walkLabel);
                 if (currBwd) mark(currBwd, helixId, offset, pairLabel);
 
+                // Track visited anchors to break out of circular helices.
+                const visitedAnchors = new Set<number>();
+                if (firstAnchor) visitedAnchors.add(firstAnchor.id);
+
                 while (currFwd) {
                     const nextStep = findNextPaired({ fwd: currFwd, bwd: currBwd }, { fwd: helixFwdDir, bwd: helixBwdDir }, helixSet);
                     if (!nextStep) break;
@@ -388,6 +392,14 @@ namespace toscad {
                     const nextPair = getPair(helixSet, nextAnchor);
                     // probably doesn't need this check but can happen due to cross/double pairing?
                     if (nextAnchor.id === currFwd.id) break;
+                    // Circular helix guard: stop if we've already processed this anchor.
+                    // Only mark circular when the source is 'fwd' — that means the forward
+                    // strand's n3 chain physically looped back. A 'bwd_pair' revisit just
+                    // means the bwd cursor walked past the fwd strand's end, which is normal.
+                    if (visitedAnchors.has(nextAnchor.id)) {
+                        break;
+                    }
+                    visitedAnchors.add(nextAnchor.id);
 
                     // Gap Detect
                     const fwdTrace = tracePathWithStop(currFwd, helixFwdDir, helixSet, nextAnchor);

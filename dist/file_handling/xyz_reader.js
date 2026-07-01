@@ -1,3 +1,4 @@
+"use strict";
 function parseXYZString(s) {
     let sys = new System(systems.length, elements.getNextId());
     let lines = s.split(/[\n]+/g);

@@ -1,3 +1,4 @@
+"use strict";
 function readScriptFile(scriptFile) {
     return parseFileWith(scriptFile, parseScript);
 }

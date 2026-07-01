@@ -1,3 +1,4 @@
+"use strict";
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../typescript_definitions/index.d.ts" />
 /**
@@ -47,7 +48,7 @@ async function refreshToken() {
     try {
         const response = await fetch(`${window.getAPIBaseURL()}/refresh`, {
             method: "POST",
-            credentials: "include",
+            credentials: "include", // Send refresh token cookie
             headers: {
                 "Content-Type": "application/json",
             },
@@ -91,7 +92,7 @@ async function login() {
     try {
         const response = await fetch(`${window.getAPIBaseURL()}/auth/login`, {
             method: "POST",
-            credentials: "include",
+            credentials: "include", // Important for refresh token cookie
             headers: {
                 "Content-Type": "application/json",
             },

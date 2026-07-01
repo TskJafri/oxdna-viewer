@@ -1,3 +1,4 @@
+"use strict";
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../typescript_definitions/index.d.ts" />
 // This script is loaded when the commit history modal is opened.

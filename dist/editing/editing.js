@@ -1,3 +1,4 @@
+"use strict";
 class InstanceCopy {
     type;
     id;

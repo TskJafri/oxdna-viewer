@@ -1,3 +1,4 @@
+"use strict";
 function forcesToString(newElementIDs) {
     return forceHandler.forces.map(f => f.toString(newElementIDs)).join('\n\n');
 }
@@ -449,7 +450,7 @@ class ForceHandler {
             let material = new THREE.MeshBasicMaterial({
                 map: texture,
                 side: THREE.DoubleSide,
-                transparent: true,
+                transparent: true, // Enable transparency
                 opacity: 0.5 // Set the desired opacity (0.0 to 1.0)
             });
             let plane = new THREE.Mesh(geometry, material);

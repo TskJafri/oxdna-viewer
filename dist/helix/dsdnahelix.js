@@ -1,3 +1,4 @@
+"use strict";
 /// <reference path="../typescript_definitions/index.d.ts" />
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
@@ -142,6 +143,11 @@ var helix;
                 const step = terminatingConditions(curr, currPair, 1) || terminatingConditions(curr, currPair, -1);
                 if (!step)
                     break;
+                console.log("Circular strand detected");
+                // Circular helix guard: if the next step loops back into this partial, stop here.
+                if (seen.has(step.nextA.id) || seen.has(step.nextB.id))
+                    break;
+                console.log("Circular strand stopped");
                 // Always consume the immediate neighbors (curr+1 and a-1) even if mismatched.
                 record(partial, seen, step.nextA);
                 record(partial, seen, step.nextB);

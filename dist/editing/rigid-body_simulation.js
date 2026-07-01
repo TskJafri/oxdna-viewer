@@ -1,3 +1,4 @@
+"use strict";
 // Global variable for simulator
 let rigidClusterSimulator;
 /**

@@ -1,3 +1,4 @@
+"use strict";
 // Helper Objects for pdb parsing
 class graphData {
     label;
