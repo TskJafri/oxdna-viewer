@@ -972,6 +972,26 @@ class ScadnanoExportManager {
         selectElements(helix);
     }
 
+    // Called when the grid editor's multi-select set changes (cmd/ctrl+click).
+    // Selects all nucleotides belonging to every currently-selected helix in the 3D scene.
+    private selectHelicesFromMultiSelect(ids: number[]): void {
+        const helices = this.ensureScadnanoHelicesCache();
+        if (!helices) return;
+
+        const selectElements = window.api?.selectElements;
+        if (typeof selectElements !== 'function') return;
+
+        const allNucleos: any[] = [];
+        ids.forEach(id => {
+            const helix = helices[id];
+            if (Array.isArray(helix)) allNucleos.push(...helix);
+        });
+
+        // Pass the full combined set in one call so the scene clears its old
+        // selection and replaces it with exactly the highlighted helices.
+        selectElements(allNucleos);
+    }
+
     private ensureScadnanoGridEditor(gridType: ScadnanoGridType): any | null {
         if (this.scadnanoGridEditor && this.scadnanoGridEditorType === gridType) return this.scadnanoGridEditor;
 
@@ -1005,6 +1025,12 @@ class ScadnanoExportManager {
             const helixId = Number(node?.id);
             if (!Number.isFinite(helixId)) return;
             this.selectHelixFromGridNode(helixId);
+        };
+
+        // Multi-select (cmd/ctrl+click): sync all highlighted grid nodes to the 3D scene.
+        this.scadnanoGridEditor.onSelectionChanged = (ids: number[]) => {
+            if (this.suppressNodeSelectedCallback) return;
+            this.selectHelicesFromMultiSelect(ids);
         };
 
         // Genuine user-initiated drags push a move entry onto the history journal.

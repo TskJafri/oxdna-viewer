@@ -208,6 +208,9 @@ namespace scadnano {
         public onNodesChanged: (() => void) | null = null;
         // Callback fired when the selected node changes
         public onNodeSelected: ((node: HelixNode | null) => void) | null = null;
+        // Callback fired when the multi-select set changes (cmd/ctrl+click). Receives all
+        // currently selected helix IDs (primary + multi-select).
+        public onSelectionChanged: ((ids: number[]) => void) | null = null;
         // Callback fired when a user drag finishes and the node landed on a new cell.
         // Suppressed for programmatic moves so undo/redo don't pollute the history.
         public onNodeMoved: ((info: { id: number; from: [number, number]; to: [number, number] }) => void) | null = null;
@@ -544,11 +547,12 @@ namespace scadnano {
                 if (this.selectedKey !== key) {
                     this._setRecordSelected(rec, false);
                 }
-                return;
+            } else {
+                this.selectedKeys.add(key);
+                this._setRecordSelected(rec, true);
             }
 
-            this.selectedKeys.add(key);
-            this._setRecordSelected(rec, true);
+            this.onSelectionChanged?.(this.getSelectedHelixIds());
         }
 
         private _cellFromMouseEvent(e: MouseEvent): { col: number; row: number } | null {

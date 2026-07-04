@@ -163,6 +163,9 @@ var scadnano;
         onNodesChanged = null;
         // Callback fired when the selected node changes
         onNodeSelected = null;
+        // Callback fired when the multi-select set changes (cmd/ctrl+click). Receives all
+        // currently selected helix IDs (primary + multi-select).
+        onSelectionChanged = null;
         // Callback fired when a user drag finishes and the node landed on a new cell.
         // Suppressed for programmatic moves so undo/redo don't pollute the history.
         onNodeMoved = null;
@@ -469,10 +472,12 @@ var scadnano;
                 if (this.selectedKey !== key) {
                     this._setRecordSelected(rec, false);
                 }
-                return;
             }
-            this.selectedKeys.add(key);
-            this._setRecordSelected(rec, true);
+            else {
+                this.selectedKeys.add(key);
+                this._setRecordSelected(rec, true);
+            }
+            this.onSelectionChanged?.(this.getSelectedHelixIds());
         }
         _cellFromMouseEvent(e) {
             return this._cellFromClientPoint(e.clientX, e.clientY);
