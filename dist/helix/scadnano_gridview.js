@@ -173,6 +173,10 @@ var scadnano;
         dragStartCell = null;
         // When true, _moveNode skips firing onNodeMoved (used by undo/redo paths).
         suppressMoveCallback = false;
+        // Helix ids that are locked — cannot be dragged or combined. Managed externally by
+        // ScadnanoExportManager via lockSelectedHelices(); kept here so the editor's input
+        // handlers can enforce the constraint without a round-trip.
+        lockedHelices = new Set();
         // Crossover connection visualization state
         connections = [];
         connectionLines = null;
@@ -325,6 +329,8 @@ var scadnano;
             for (const [key, record] of this.records.entries()) {
                 if (record.node.id !== helixId)
                     continue;
+                if (this.lockedHelices.has(helixId))
+                    return false;
                 this.suppressMoveCallback = true;
                 try {
                     this._moveNode(key, toCol, toRow);
@@ -355,6 +361,19 @@ var scadnano;
             collect(this.selectedKey);
             this.selectedKeys.forEach(k => collect(k));
             return ids;
+        }
+        /**
+         * Set the fill color of a node dot identified by helix id.
+         * Pass a hex number (e.g. 0x808080 for grey). No-op if the id is not found.
+         */
+        setNodeColor(helixId, color) {
+            for (const rec of this.records.values()) {
+                if (rec.node.id !== helixId)
+                    continue;
+                rec.mesh.material.color.setHex(color);
+                rec.node.color = color;
+                break;
+            }
         }
         /** Clear all selection state (primary + multi). */
         clearSelection() {
@@ -736,6 +755,10 @@ var scadnano;
                 if (e.ctrlKey || e.metaKey)
                     return;
                 if (key === this.selectedKey && this.records.has(key)) {
+                    // Don't start a drag if this helix is locked.
+                    const rec = this.records.get(key);
+                    if (rec && this.lockedHelices.has(rec.node.id))
+                        return;
                     this.draggingNodeKey = key;
                     this.draggingPointer = { x: e.clientX, y: e.clientY };
                     this.hasDragged = false;

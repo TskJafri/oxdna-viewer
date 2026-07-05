@@ -40,7 +40,7 @@ body {
   top: 0;
   left: 0;
   width: 100%;
-  height: calc(100% - 120px);
+  height: calc(100% - 156px);
   z-index: 1;
 }
 
@@ -69,7 +69,9 @@ body {
 #scadnanoGridExportBtn,
 #scadnanoGridCombineBtn,
 #scadnanoGridUndoBtn,
-#scadnanoGridRedoBtn {
+#scadnanoGridRedoBtn,
+#scadnanoGridLockHelicesBtn,
+#scadnanoGridRecalcBtn {
   position: absolute;
   height: 32px;
   border: 1px solid #b7b7b7;
@@ -99,14 +101,27 @@ body {
   bottom: 44px;
 }
 
-/* Undo / Redo share a row above Combine. */
+/* Undo / Redo share a row above the Lock/Recalc row. */
 #scadnanoGridUndoBtn {
-  bottom: 80px;
+  bottom: 116px;
   left: 12px;
   width: calc(50% - 18px);
 }
 
 #scadnanoGridRedoBtn {
+  bottom: 116px;
+  right: 12px;
+  width: calc(50% - 18px);
+}
+
+/* Lock Helices / Recalculate Grid share a row between Undo/Redo and Combine. */
+#scadnanoGridLockHelicesBtn {
+  bottom: 80px;
+  left: 12px;
+  width: calc(50% - 18px);
+}
+
+#scadnanoGridRecalcBtn {
   bottom: 80px;
   right: 12px;
   width: calc(50% - 18px);
@@ -122,6 +137,8 @@ body {
 #scadnanoGridMissingBtn:hover,
 #scadnanoGridExportBtn:hover,
 #scadnanoGridCombineBtn:hover,
+#scadnanoGridLockHelicesBtn:hover,
+#scadnanoGridRecalcBtn:hover,
 #scadnanoGridUndoBtn:not(:disabled):hover,
 #scadnanoGridRedoBtn:not(:disabled):hover {
   background: #f4f4f4;

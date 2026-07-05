@@ -13,6 +13,9 @@ class ScadnanoExportManager {
     createEmptyHistory() {
         return { entries: {}, order: [], cursor: 0, nextMove: 0, nextCombine: 0 };
     }
+    // Helix ids that have been locked by the user. Persists for the lifetime of the grid pane
+    // session; cleared when the pane is closed or the grid is reloaded.
+    lockedHelices = new Set();
     clearHistory() {
         this.history = this.createEmptyHistory();
         this.refreshHistoryButtons();
@@ -73,6 +76,129 @@ class ScadnanoExportManager {
             notify(`Scadnano export failed: ${err}`, 'alert');
         }
     }
+    // Triggered by the "Recalculate Grid" button. Reruns the full layout pipeline on the
+    // Triggered by the "Recalculate Grid" button. Reruns the layout pipeline on the
+    // existing helices and grid (as the user has combined/edited them) — skipping setGrid.
+    // Pipeline: directionAlign2 → alignGridPrim → detectLatticeKind →
+    //           getAngles → anglecomb → anglecorr → calculateGlobalPositions →
+    //           renumberHelicesGNN → applyHelixRenumber → collectCrossovers.
+    // Locked helix positions are tracked by nucleotide membership so they survive renumbering.
+    recalculateGridFromScratch() {
+        if (!this.currentScadnanoLayout) {
+            notify('Open the grid view first before recalculating.', 'warning');
+            return;
+        }
+        // Save one nucleotide id per locked helix as an anchor. Nucleotide ids are stable
+        // across any renumbering, so we can find the new helix index after the pipeline runs.
+        const lockedNtAnchors = [];
+        if (this.lockedHelices.size > 0) {
+            const oldHelices = this.currentScadnanoLayout.helices;
+            this.lockedHelices.forEach(helixId => {
+                const slot = oldHelices[helixId];
+                if (Array.isArray(slot) && slot.length > 0) {
+                    lockedNtAnchors.push(slot[0].id);
+                }
+            });
+        }
+        const { gridType, wireframe } = this.readCurrentExportTarget();
+        let failed = false;
+        this.runScadnanoLongCalculation(() => {
+            try {
+                // Reuse the existing grid — setGrid is skipped entirely.
+                // Shallow-clone helices so anglecomb's in-place splices don't
+                // mutate currentScadnanoLayout.helices, keeping recalculate idempotent.
+                const grid = this.currentScadnanoLayout.grid;
+                const helices = this.currentScadnanoLayout.helices
+                    .map(slot => slot.slice());
+                // binderHelices are not stored on the layout; pass empty so
+                // alignGridPrim and detectLatticeKind treat all helices as lattice members.
+                const binderHelices = [];
+                toscad.directionAlign2(grid);
+                toscad.alignGridPrim(grid, binderHelices);
+                let latticeType;
+                if (gridType === 'automatic') {
+                    latticeType = toscad.detectLatticeKind(grid, binderHelices);
+                    notify(`Auto-detected lattice: ${latticeType}`, 'success');
+                }
+                else {
+                    latticeType = gridType;
+                }
+                const angles = toscad.getAngles(grid, helices, latticeType);
+                let networkMap = angles;
+                if (!wireframe) {
+                    const corrected = toscad.anglecomb(grid, helices, latticeType, angles);
+                    const correct = toscad.anglecorr(grid, helices, latticeType, corrected.networkMap);
+                    networkMap = correct.networkMap;
+                }
+                let helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
+                const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType);
+                const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
+                helixPos = renumbered.helixPos;
+                const { crossovers } = toscad.collectCrossovers(grid);
+                this.currentScadnanoConnections = this.buildScadnanoConnections(crossovers);
+                this.currentScadnanoHelices = renumbered.helices;
+                this.currentScadnanoLayout = {
+                    latticeType,
+                    nucleotideCount: this.currentScadnanoLayout.nucleotideCount,
+                    helices: renumbered.helices,
+                    grid,
+                    helixPos,
+                    wireframe
+                };
+            }
+            catch (err) {
+                failed = true;
+                notify(`Recalculate grid failed: ${err}`, 'alert');
+            }
+        }, () => {
+            if (failed || !this.currentScadnanoLayout)
+                return;
+            const newLayout = this.currentScadnanoLayout;
+            // Remap locked helix ids through the new numbering using nucleotide anchors.
+            const newLocked = new Set();
+            lockedNtAnchors.forEach(ntId => {
+                const newHelixId = toscad.findHelixID(ntId, newLayout.helices);
+                if (newHelixId !== null)
+                    newLocked.add(newHelixId);
+            });
+            const helixPos = this.cloneHelixPosMap(newLayout.helixPos);
+            window.currentScadnanoHelixPos = helixPos;
+            // Reload the editor. showGridFromHelixPos clears history and lockedHelices,
+            // so we restore the remapped set immediately after.
+            this.showGridFromHelixPos(helixPos, newLayout.latticeType);
+            this.lockedHelices = newLocked;
+            this.applyLockedColors();
+            notify('Grid recalculated.', 'success');
+        });
+    }
+    // Triggered by the "Lock/Unlock Helices" button in the grid view.
+    // Toggles the locked state of every currently-selected helix:
+    //   - Unlocked → grey fill, added to lockedHelices.
+    //   - Already locked → yellow fill restored, removed from lockedHelices.
+    lockSelectedHelices() {
+        const editor = this.scadnanoGridEditor;
+        if (!editor || typeof editor.setNodeColor !== 'function')
+            return;
+        const ids = typeof editor.getSelectedHelixIds === 'function'
+            ? editor.getSelectedHelixIds()
+            : [];
+        if (ids.length === 0)
+            return;
+        const LOCKED_COLOR = 0x808080;
+        const UNLOCKED_COLOR = 0xffd400; // DOT_COLOR from scadnano_gridview.ts
+        ids.forEach(id => {
+            if (this.lockedHelices.has(id)) {
+                this.lockedHelices.delete(id);
+                editor.setNodeColor(id, UNLOCKED_COLOR);
+            }
+            else {
+                this.lockedHelices.add(id);
+                editor.setNodeColor(id, LOCKED_COLOR);
+            }
+        });
+        // Keep the editor's own set in sync so its drag/move guards work.
+        editor.lockedHelices = new Set(this.lockedHelices);
+    }
     // Triggered by the "Combine" button in the grid view.
     // Merges the helices currently selected in the grid editor into the lowest-numbered one,
     combineSelectedHelicesFromGridView() {
@@ -86,6 +212,12 @@ class ScadnanoExportManager {
             : [];
         if (!Array.isArray(ids) || ids.length < 2) {
             notify('Select two or more helices (cmd/ctrl+click) before combining.', 'warning');
+            return;
+        }
+        // Refuse to combine if any of the selected helices are locked.
+        const lockedInSelection = ids.filter(id => this.lockedHelices.has(id));
+        if (lockedInSelection.length > 0) {
+            notify(`Cannot combine: helix ${lockedInSelection.join(', ')} ${lockedInSelection.length === 1 ? 'is' : 'are'} locked. Unlock ${lockedInSelection.length === 1 ? 'it' : 'them'} first.`, 'warning');
             return;
         }
         const helices = this.ensureScadnanoHelicesCache();
@@ -361,6 +493,8 @@ class ScadnanoExportManager {
             editor.clearSelection();
         // Refresh the published helix-pos map from the editor (it just lost a few nodes).
         this.publishCurrentHelixPosFromEditor();
+        // Remap lockedHelices through the same id transformation so locks follow their nodes.
+        this.remapLockedHelicesForward(remapId);
     }
     // Inverse of applyCombineCascade. Run after splitHelices has already restored helices + grid
     // back to their pre-merge state. Renumbers existing editor nodes through the inverse remap,
@@ -394,6 +528,55 @@ class ScadnanoExportManager {
         this.publishCurrentHelixPosFromEditor();
         if (typeof editor.clearSelection === 'function')
             editor.clearSelection();
+        // Restore the locked set back to pre-merge ids and reapply colors.
+        this.remapLockedHelicesInverse(inverseRemap, entry);
+    }
+    // Remap lockedHelices forward after a combine: each old id is mapped through remapId to its
+    // new post-merge id. If a merged-away helix was locked, its lock carries over to the kept
+    // helix (keptIdx). Reapplies grey fill to all still-locked nodes.
+    remapLockedHelicesForward(remapId) {
+        if (this.lockedHelices.size === 0)
+            return;
+        const next = new Set();
+        this.lockedHelices.forEach(id => {
+            const newId = remapId(id);
+            if (newId !== null)
+                next.add(newId);
+        });
+        this.lockedHelices = next;
+        this.applyLockedColors();
+    }
+    // Remap lockedHelices back to pre-merge ids after an undo-combine. inverseRemap maps the
+    // current post-merge id → the original pre-merge id. Reapplies grey fill to locked nodes
+    // and restores yellow on the re-split nodes that are no longer locked.
+    remapLockedHelicesInverse(inverseRemap, entry) {
+        if (this.lockedHelices.size === 0 && entry.removed.length === 0)
+            return;
+        const next = new Set();
+        this.lockedHelices.forEach(id => {
+            next.add(inverseRemap(id));
+        });
+        this.lockedHelices = next;
+        this.applyLockedColors();
+    }
+    // Reapply the locked (grey) color to every node currently in lockedHelices, and restore
+    // the default yellow to every other node. Called after any operation that rebuilds the
+    // editor node set (combine, undo, redo).
+    applyLockedColors() {
+        const editor = this.scadnanoGridEditor;
+        if (!editor || typeof editor.setNodeColor !== 'function')
+            return;
+        const LOCKED_COLOR = 0x808080;
+        const UNLOCKED_COLOR = 0xffd400;
+        const nodes = typeof editor.getNodes === 'function'
+            ? editor.getNodes()
+            : [];
+        nodes.forEach(node => {
+            const id = Number(node.id);
+            editor.setNodeColor(id, this.lockedHelices.has(id) ? LOCKED_COLOR : UNLOCKED_COLOR);
+        });
+        // Keep the editor's drag/move guard in sync.
+        editor.lockedHelices = new Set(this.lockedHelices);
     }
     syncLayoutHelixPosFromEditor() {
         if (!this.currentScadnanoLayout)
@@ -434,11 +617,17 @@ class ScadnanoExportManager {
             editor.setConnections(this.currentScadnanoConnections);
         }
         this.publishCurrentHelixPosFromEditor();
-        // Fresh grid view = fresh history.
+        // Fresh grid view = fresh history and no locks.
+        this.lockedHelices.clear();
+        if (this.scadnanoGridEditor)
+            this.scadnanoGridEditor.lockedHelices = new Set();
         this.clearHistory();
     }
     hideScadnanoGridPane() {
         document.body.classList.remove('scadnano-grid-open');
+        this.lockedHelices.clear();
+        if (this.scadnanoGridEditor)
+            this.scadnanoGridEditor.lockedHelices = new Set();
         this.clearHistory();
     }
     toggleGridDropdown(checkboxElement) {
@@ -932,6 +1121,18 @@ class ScadnanoExportManager {
         if (combineBtn) {
             combineBtn.addEventListener('click', () => {
                 this.combineSelectedHelicesFromGridView();
+            });
+        }
+        const lockHelicesBtn = document.getElementById('scadnanoGridLockHelicesBtn');
+        if (lockHelicesBtn) {
+            lockHelicesBtn.addEventListener('click', () => {
+                this.lockSelectedHelices();
+            });
+        }
+        const recalcBtn = document.getElementById('scadnanoGridRecalcBtn');
+        if (recalcBtn) {
+            recalcBtn.addEventListener('click', () => {
+                this.recalculateGridFromScratch();
             });
         }
         const undoBtn = document.getElementById('scadnanoGridUndoBtn');
