@@ -639,7 +639,7 @@ class ScadnanoExportManager {
     getHelices() {
         return this.ensureScadnanoHelicesCache();
     }
-    selectHelixFromNucleotide(nucleotideInput) {
+    selectHelixFromNucleotide(nucleotideInput, additive = false) {
         if (!document.body.classList.contains('scadnano-grid-open'))
             return;
         if (!this.scadnanoGridEditor || typeof this.scadnanoGridEditor.selectNodeById !== 'function')
@@ -657,7 +657,7 @@ class ScadnanoExportManager {
             return;
         this.suppressNodeSelectedCallback = true;
         try {
-            this.scadnanoGridEditor.selectNodeById(helixId);
+            this.scadnanoGridEditor.selectNodeById(helixId, additive);
         }
         finally {
             this.suppressNodeSelectedCallback = false;
@@ -1222,8 +1222,8 @@ function registerScadnanoWindowApi() {
     window.toggleGridDropdown = (checkboxElement) => {
         scadnanoManager.toggleGridDropdown(checkboxElement);
     };
-    window.scadnanoSelectHelixFromNucleotide = (nucleotideInput) => {
-        scadnanoManager.selectHelixFromNucleotide(nucleotideInput);
+    window.scadnanoSelectHelixFromNucleotide = (nucleotideInput, additive) => {
+        scadnanoManager.selectHelixFromNucleotide(nucleotideInput, additive === true);
     };
     window.scadnanoGetHelices = () => scadnanoManager.getHelices();
     window.scadnanoGridUndo = () => scadnanoManager.undoFromGridView();

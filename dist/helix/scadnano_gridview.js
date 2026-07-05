@@ -312,14 +312,40 @@ var scadnano;
             this.connections = normalized;
             this._rebuildConnectionLines();
         }
-        /** Select a node by helix id (no-op if not present). */
-        selectNodeById(helixId) {
+        /**
+         * Select a node by helix id (no-op if not present).
+         *
+         * @param helixId  Helix id to select.
+         * @param additive When true, toggle the helix's membership in the multi-select
+         *                 set (same behavior as ctrl/cmd-click inside the grid). When
+         *                 false (default), replace the current selection: clear the
+         *                 multi-select set and set the primary selection to this helix.
+         */
+        selectNodeById(helixId, additive = false) {
+            let targetKey = null;
             for (const [key, record] of this.records.entries()) {
                 if (record.node.id === helixId) {
-                    this._setSelectedKey(key);
-                    return;
+                    targetKey = key;
+                    break;
                 }
             }
+            if (!targetKey)
+                return;
+            if (additive) {
+                this._toggleMultiSelectKey(targetKey);
+                return;
+            }
+            // Non-additive: mirror a plain canvas click by clearing any stale
+            // multi-selection rings before promoting the target to primary.
+            this.selectedKeys.forEach(k => {
+                if (k === targetKey)
+                    return; // will be re-lit as primary below
+                const rec = this.records.get(k);
+                if (rec)
+                    this._setRecordSelected(rec, false);
+            });
+            this.selectedKeys.clear();
+            this._setSelectedKey(targetKey);
         }
         /**
          * Move a node identified by helix id to a new (col, row). Used by undo/redo.
