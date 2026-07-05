@@ -102,14 +102,30 @@ class ScadnanoExportManager {
         // slot occupied. The kept helix doesn't need a snapshot — only its members from the
         // merged-away helices need to be pulled back out on undo.
         const sortedIds = [...new Set(ids)].sort((a, b) => a - b);
-        // Verify every pair of selected helices is mutually disjoint on the grid. Combining
-        // non-disjoint helices would collide nucleotides into the same offset/direction slot,
-        // so bail out with an error and let the user resolve the overlap first.
+        // If the selection contains overlapping helices, ask the shift-solver to compute an
+        // offset delta per helix that (a) makes the group mutually disjoint on the grid and
+        // (b) minimizes disruption to crossovers with helices outside the reordered subset.
+        // Helices that are already disjoint from everyone selected get no shift and stay put.
+        const grid = this.currentScadnanoLayout.grid;
+        const preCombineShifts = toscad.computeCombineShifts(helices, sortedIds, grid);
+        if (preCombineShifts.size > 0) {
+            toscad.applyCombineShifts(grid, preCombineShifts);
+        }
+        // Verify every pair is now mutually disjoint. If the solver punted (overlap group too
+        // large, or fundamentally unresolvable) some pair will still collide; bail with the same
+        // error message so the user knows the automatic path didn't fix things.
         for (let i = 0; i < sortedIds.length; i++) {
             for (let j = i + 1; j < sortedIds.length; j++) {
                 const h1 = sortedIds[i];
                 const h2 = sortedIds[j];
-                if (!toscad.disjoint(helices, h1, h2, this.currentScadnanoLayout.grid)) {
+                if (!toscad.disjoint(helices, h1, h2, grid)) {
+                    // Roll back any shifts we applied so the grid stays consistent with the
+                    // pre-combine state the user was looking at.
+                    if (preCombineShifts.size > 0) {
+                        const inverse = new Map();
+                        preCombineShifts.forEach((delta, hid) => inverse.set(hid, -delta));
+                        toscad.applyCombineShifts(grid, inverse);
+                    }
                     notify(`Cannot combine: helices ${h1} and ${h2} are not disjoint (overlapping nucleotides on the grid).`, 'alert');
                     return;
                 }
@@ -151,10 +167,19 @@ class ScadnanoExportManager {
             connections: {
                 before: connectionsBefore,
                 after: this.currentScadnanoConnections.map(([a, b]) => [a, b])
-            }
+            },
+            preCombineShifts: Array.from(preCombineShifts.entries())
         };
         this.pushHistoryEntry(entry);
-        notify(`Combined helix ${mergedIdx.join(', ')} into helix ${keptIdx}.`);
+        if (preCombineShifts.size > 0) {
+            const shiftSummary = Array.from(preCombineShifts.entries())
+                .map(([hid, d]) => `${hid}:${d > 0 ? '+' : ''}${d}`)
+                .join(', ');
+            notify(`Combined helix ${mergedIdx.join(', ')} into helix ${keptIdx}. Shifted overlapping helices to make them disjoint: ${shiftSummary}.`);
+        }
+        else {
+            notify(`Combined helix ${mergedIdx.join(', ')} into helix ${keptIdx}.`);
+        }
     }
     // ── Undo / Redo ─────────────────────────────────────────────────────────
     undoFromGridView() {
@@ -218,6 +243,12 @@ class ScadnanoExportManager {
             return;
         if (!this.currentScadnanoLayout)
             return;
+        // Reapply the pre-combine offset shifts BEFORE combining, mirroring the live path.
+        // Keyed by pre-merge helix id, which is what the grid marks still carry at this point.
+        if (Array.isArray(entry.preCombineShifts) && entry.preCombineShifts.length > 0) {
+            const shifts = new Map(entry.preCombineShifts);
+            toscad.applyCombineShifts(this.currentScadnanoLayout.grid, shifts);
+        }
         const result = helix.combineHelices(helices, entry.indices, this.currentScadnanoLayout.grid);
         if (!result)
             return;
@@ -240,6 +271,13 @@ class ScadnanoExportManager {
         const result = helix.splitHelices(helices, this.currentScadnanoLayout.grid, entry);
         if (!result)
             return;
+        // AFTER splitting, grid marks are back in their pre-combine helix ids, but any offset
+        // shifts applied by the shift-solver are still present. Reverse them with negated deltas.
+        if (Array.isArray(entry.preCombineShifts) && entry.preCombineShifts.length > 0) {
+            const inverse = new Map();
+            entry.preCombineShifts.forEach(([hid, delta]) => inverse.set(hid, -delta));
+            toscad.applyCombineShifts(this.currentScadnanoLayout.grid, inverse);
+        }
         this.applyCombineCascadeInverse(entry, result.inverseRemap);
     }
     remapCachedGridIds(remap) {

@@ -471,6 +471,290 @@ namespace toscad {
         return true;
     }
 
+    // Variant of disjoint() that pretends each helix's grid marks have been shifted by shifts.get(id).
+    // Doesn't mutate anything; used to preview whether a proposed reorder would collide with a
+    // still-unshifted helix (so we know whether to expand the reorder set).
+    function disjointWithShifts(
+        helices: Nucleotide[][],
+        h1: number,
+        h2: number,
+        grid: GridMap,
+        shifts: Map<number, number>
+    ): boolean {
+        const build = (helixId: number): Set<number> => {
+            const s = new Set<number>();
+            const delta = shifts.get(helixId) ?? 0;
+            const nts = helices[helixId] ?? [];
+            for (const nt of nts) {
+                const mark = grid.get(nt.id);
+                if (!mark || mark.helixId !== helixId) continue;
+                const x = mark.offset + delta;
+                const y = mark.direction === 'backward' ? 1 : 0;
+                s.add(2 * x + y);
+            }
+            return s;
+        };
+
+        const s1 = build(h1);
+        const s2 = build(h2);
+        if (s1.size === 0 || s2.size === 0) return false;
+
+        const smaller = s1.size <= s2.size ? s1 : s2;
+        const larger = s1.size <= s2.size ? s2 : s1;
+        for (const off of smaller) {
+            if (larger.has(off)) return false;
+        }
+        return true;
+    }
+
+    // Bitmask DP over orderings of the helices we need to reorder. For each subset S of the
+    // reorder set, f[S] is the minimum external-crossover misalignment achievable by placing
+    // exactly the helices in S end-to-end starting at offset 0, in some order. The offset each
+    // helix ends up at is determined by the sum of spans of the helices before it, which is a
+    // set-property (not an ordering property), so 2^N states with N transitions each captures
+    // every permutation without redundancy.
+    //
+    // "External" here means "not currently in the reorder set" — includes helices in the combine
+    // set that we chose to leave fixed AND helices completely outside the combine set. Their
+    // grid offsets are treated as anchors we want to keep alignment with.
+    //
+    // Returns a shift-per-helix map, or null if the DP cannot run (missing footprint info).
+    function runReorderDP(
+        helices: Nucleotide[][],
+        reorderIds: number[],
+        grid: GridMap
+    ): Map<number, number> | null {
+        const N = reorderIds.length;
+        if (N < 2) return new Map();
+
+        // Per-helix footprint on the unsigned offset axis.
+        const minOff: number[] = new Array(N);
+        const span: number[] = new Array(N);
+        for (let i = 0; i < N; i++) {
+            let mn = Infinity;
+            let mx = -Infinity;
+            const nts = helices[reorderIds[i]] ?? [];
+            for (const nt of nts) {
+                const mark = grid.get(nt.id);
+                if (!mark || mark.helixId !== reorderIds[i]) continue;
+                if (mark.offset < mn) mn = mark.offset;
+                if (mark.offset > mx) mx = mark.offset;
+            }
+            if (mn === Infinity) return null;
+            minOff[i] = mn;
+            span[i] = mx - mn + 1;
+        }
+
+        // Collect external crossovers per reorder helix.
+        //   offInternal = offset on the reorder helix at the crossover (pre-shift)
+        //   offExternal = offset on the non-reorder helix at the crossover (fixed)
+        type ExtCX = { offInternal: number; offExternal: number };
+        const externalCX: ExtCX[][] = reorderIds.map(() => []);
+        const idToLocal = new Map<number, number>();
+        reorderIds.forEach((id, idx) => idToLocal.set(id, idx));
+
+        for (const cx of crossoverNts(grid)) {
+            const fromLocal = idToLocal.get(cx.fromHelix);
+            const toLocal = idToLocal.get(cx.toHelix);
+            // Both endpoints inside reorder set → internal, ignore.
+            if (fromLocal !== undefined && toLocal !== undefined) continue;
+            // Neither → irrelevant.
+            if (fromLocal === undefined && toLocal === undefined) continue;
+
+            if (fromLocal !== undefined) {
+                externalCX[fromLocal].push({ offInternal: cx.fromOffset, offExternal: cx.toOffset });
+            }
+            if (toLocal !== undefined) {
+                externalCX[toLocal].push({ offInternal: cx.toOffset, offExternal: cx.fromOffset });
+            }
+        }
+
+        // For helix i placed at position p, an external crossover contributes:
+        //   | offExternal - (offInternal + p - minOff[i]) |
+        // = | (offExternal + minOff[i] - offInternal) - p |
+        // Precompute targetP_k = offExternal + minOff[i] - offInternal per crossover.
+        const targets: number[][] = reorderIds.map((_, i) =>
+            externalCX[i].map(cx => cx.offExternal + minOff[i] - cx.offInternal)
+        );
+
+        const costOf = (i: number, p: number): number => {
+            let total = 0;
+            const arr = targets[i];
+            for (let k = 0; k < arr.length; k++) {
+                total += Math.abs(arr[k] - p);
+            }
+            return total;
+        };
+
+        // Sum of spans per subset. Grows by one bit at a time.
+        const size = 1 << N;
+        const sumSpan = new Int32Array(size);
+        for (let S = 1; S < size; S++) {
+            const low = S & -S;
+            const li = Math.log2(low) | 0;
+            sumSpan[S] = sumSpan[S ^ low] + span[li];
+        }
+
+        // f[S] = best score reaching subset S. parent[S] = the local helix index that was
+        // placed last to achieve f[S]; used to recover the winning ordering.
+        const f = new Float64Array(size);
+        const parent = new Int32Array(size);
+        f[0] = 0;
+        parent[0] = -1;
+
+        for (let S = 1; S < size; S++) {
+            let best = Infinity;
+            let bestBit = -1;
+            let bits = S;
+            while (bits !== 0) {
+                const low = bits & -bits;
+                const i = Math.log2(low) | 0;
+                bits ^= low;
+
+                const pred = S ^ (1 << i);
+                const pos = sumSpan[pred];
+                const c = f[pred] + costOf(i, pos);
+                if (c < best) {
+                    best = c;
+                    bestBit = i;
+                }
+            }
+            f[S] = best;
+            parent[S] = bestBit;
+        }
+
+        // Walk parent[] backwards to reconstruct the ordering (last helix → first helix).
+        const orderRev: number[] = [];
+        let S = size - 1;
+        while (S !== 0) {
+            const i = parent[S];
+            if (i < 0) break;
+            orderRev.push(i);
+            S = S ^ (1 << i);
+        }
+        const order = orderRev.reverse();
+
+        // Assign final positions end-to-end starting at 0.
+        const position: number[] = new Array(N).fill(0);
+        let running = 0;
+        for (const i of order) {
+            position[i] = running;
+            running += span[i];
+        }
+
+        // Global translation T: the whole block can slide along the axis. Given each helix's
+        // shift Δ_i(T) = position[i] + T - minOff[i], each external crossover's misalignment is
+        //   | offExternal - offInternal - (position[i] - minOff[i]) - T |
+        // Set r_k = offExternal - offInternal - (position[i] - minOff[i]). T* = median(r_k)
+        // minimizes Σ |r_k - T|.
+        const residuals: number[] = [];
+        for (let i = 0; i < N; i++) {
+            const base = position[i] - minOff[i];
+            for (const cx of externalCX[i]) {
+                residuals.push(cx.offExternal - cx.offInternal - base);
+            }
+        }
+        let T = 0;
+        if (residuals.length > 0) {
+            residuals.sort((a, b) => a - b);
+            T = residuals[Math.floor(residuals.length / 2)];
+        }
+
+        const shifts = new Map<number, number>();
+        for (let i = 0; i < N; i++) {
+            const delta = position[i] + T - minOff[i];
+            if (delta !== 0) shifts.set(reorderIds[i], delta);
+        }
+        return shifts;
+    }
+
+    // Public entry point. Given the full combine set, decides which subset of helices actually
+    // needs to shift to make the group mutually disjoint on the grid, runs the DP over that
+    // subset, and returns per-helix shift deltas. Helices in the combine set that are already
+    // disjoint from everyone (before AND after the DP) get no shift.
+    //
+    // MAX_REORDER caps the bitmask DP at 2^20 = ~1M states. Larger overlap groups return an
+    // empty map, which lets the caller fall back to its normal disjointness error path.
+    export function computeCombineShifts(
+        helices: Nucleotide[][],
+        combineIds: number[],
+        grid: GridMap
+    ): Map<number, number> {
+        const empty = new Map<number, number>();
+        if (!Array.isArray(combineIds) || combineIds.length < 2) return empty;
+
+        const uniqueIds = [...new Set(combineIds)].filter(
+            id => id >= 0 && id < helices.length && Array.isArray(helices[id]) && helices[id].length > 0
+        ).sort((a, b) => a - b);
+        if (uniqueIds.length < 2) return empty;
+
+        // Seed the reorder set with helices that already collide with someone else in the group.
+        const mustReorder = new Set<number>();
+        for (let i = 0; i < uniqueIds.length; i++) {
+            for (let j = i + 1; j < uniqueIds.length; j++) {
+                if (!disjoint(helices, uniqueIds[i], uniqueIds[j], grid)) {
+                    mustReorder.add(uniqueIds[i]);
+                    mustReorder.add(uniqueIds[j]);
+                }
+            }
+        }
+        if (mustReorder.size < 2) return empty;
+
+        const MAX_REORDER = 20;
+        if (mustReorder.size > MAX_REORDER) {
+            console.warn(`[computeCombineShifts] Overlap group of ${mustReorder.size} helices exceeds cap of ${MAX_REORDER}; skipping auto-shift.`);
+            return empty;
+        }
+
+        // Iterate: run DP, then check if any leave-alone helix now collides with the reordered
+        // block. If yes, pull it into the reorder set and re-run. Terminates in ≤ |uniqueIds|
+        // iterations because mustReorder only grows.
+        let shifts: Map<number, number> = empty;
+        while (true) {
+            const arr = [...mustReorder];
+            const dp = runReorderDP(helices, arr, grid);
+            if (!dp) return empty;
+            shifts = dp;
+
+            let expanded = false;
+            for (const id of uniqueIds) {
+                if (mustReorder.has(id)) continue;
+                for (const oid of mustReorder) {
+                    if (!disjointWithShifts(helices, oid, id, grid, shifts)) {
+                        mustReorder.add(id);
+                        expanded = true;
+                        break;
+                    }
+                }
+                if (expanded) break;
+            }
+            if (!expanded) break;
+
+            if (mustReorder.size > MAX_REORDER) {
+                console.warn(`[computeCombineShifts] Reorder set grew past cap of ${MAX_REORDER}; skipping auto-shift.`);
+                return empty;
+            }
+        }
+
+        return shifts;
+    }
+
+    // Applies a shift map to `grid` in-place. Every GridMark whose helixId is in `shifts` has
+    // its `offset` incremented by the mapped delta. Used both by the combine-time apply and by
+    // undo (with negated deltas). Returns the number of marks touched, for logging.
+    export function applyCombineShifts(grid: GridMap, shifts: Map<number, number>): number {
+        if (!(grid instanceof Map) || shifts.size === 0) return 0;
+        let touched = 0;
+        for (const mark of grid.values()) {
+            const delta = shifts.get(mark.helixId);
+            if (delta !== undefined && delta !== 0) {
+                mark.offset += delta;
+                touched++;
+            }
+        }
+        return touched;
+    }
+
     /* If 2 helices have the same angle as given by getAngleHelix, then check if they are disjoint (big)? If yes, then merge them.
     If they have the same angle and are NOT disjoint, then check anglecorr() function.
     */
