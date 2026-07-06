@@ -549,7 +549,7 @@ class ScadnanoExportManager {
 
     private remapCachedGridIds(remap: (oldId: number) => number | null): void {
         if (!this.currentScadnanoLayout) return;
-        this.currentScadnanoLayout.grid.forEach(mark => {
+        this.currentScadnanoLayout.grid.forEach((mark: { helixId: number; }) => {
             const newId = remap(mark.helixId);
             if (newId === null) return;
             mark.helixId = newId;

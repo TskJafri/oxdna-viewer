@@ -415,7 +415,7 @@ class ScadnanoExportManager {
     remapCachedGridIds(remap) {
         if (!this.currentScadnanoLayout)
             return;
-        this.currentScadnanoLayout.grid.forEach(mark => {
+        this.currentScadnanoLayout.grid.forEach((mark) => {
             const newId = remap(mark.helixId);
             if (newId === null)
                 return;

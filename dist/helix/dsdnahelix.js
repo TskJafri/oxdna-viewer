@@ -1409,4 +1409,177 @@ var helix;
         return { inverseRemap };
     }
     helix_1.splitHelices = splitHelices;
+    // Fits a plane through the given points and returns the plane normal
+    // (the eigenvector of the covariance-like matrix with the smallest eigenvalue).
+    function fitPlane(points) {
+        // centroid
+        const rc = new THREE.Vector3(0, 0, 0);
+        points.forEach(p => rc.add(p));
+        rc.divideScalar(points.length);
+        // 3x3 symmetric accumulator A[i][j] += (p-rc)[i] * (p-rc)[j]
+        const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+        points.forEach(p => {
+            const q = [p.x - rc.x, p.y - rc.y, p.z - rc.z];
+            for (let i = 0; i < 3; i++) {
+                for (let j = 0; j < 3; j++) {
+                    A[i][j] += q[i] * q[j];
+                }
+            }
+        });
+        // Jacobi eigen-decomposition on 3x3 symmetric A (analog of numpy.linalg.eigh).
+        const a = A.map(r => r.slice());
+        const v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+        const maxIter = 100;
+        const eps = 1e-12;
+        for (let iter = 0; iter < maxIter; iter++) {
+            // find largest off-diagonal entry
+            let p = 0, q = 1;
+            let maxOff = Math.abs(a[0][1]);
+            if (Math.abs(a[0][2]) > maxOff) {
+                p = 0;
+                q = 2;
+                maxOff = Math.abs(a[0][2]);
+            }
+            if (Math.abs(a[1][2]) > maxOff) {
+                p = 1;
+                q = 2;
+                maxOff = Math.abs(a[1][2]);
+            }
+            if (maxOff < eps)
+                break;
+            const app = a[p][p], aqq = a[q][q], apq = a[p][q];
+            const theta = (aqq - app) / (2 * apq);
+            const t = theta >= 0
+                ? 1 / (theta + Math.sqrt(theta * theta + 1))
+                : 1 / (theta - Math.sqrt(theta * theta + 1));
+            const c = 1 / Math.sqrt(t * t + 1);
+            const s = t * c;
+            a[p][p] = app - t * apq;
+            a[q][q] = aqq + t * apq;
+            a[p][q] = 0;
+            a[q][p] = 0;
+            for (let i = 0; i < 3; i++) {
+                if (i !== p && i !== q) {
+                    const aip = a[i][p], aiq = a[i][q];
+                    a[i][p] = c * aip - s * aiq;
+                    a[p][i] = a[i][p];
+                    a[i][q] = c * aiq + s * aip;
+                    a[q][i] = a[i][q];
+                }
+                const vip = v[i][p], viq = v[i][q];
+                v[i][p] = c * vip - s * viq;
+                v[i][q] = c * viq + s * vip;
+            }
+        }
+        const vals = [a[0][0], a[1][1], a[2][2]];
+        // numpy.linalg.eigh returns eigenvalues in ascending order; the plane normal
+        // is the eigenvector for the smallest eigenvalue (vecs[:, 0]).
+        let minIdx = 0;
+        if (vals[1] < vals[minIdx])
+            minIdx = 1;
+        if (vals[2] < vals[minIdx])
+            minIdx = 2;
+        return new THREE.Vector3(v[0][minIdx], v[1][minIdx], v[2][minIdx]);
+    }
+    helix_1.fitPlane = fitPlane;
+    // Returns the axis of an RNA/DNA duplex given the four end nucleotides of the two strands.
+    // - start1/end1 are the 5'/3' ends of strand A
+    // - start2/end2 are the 5'/3' ends of strand B (start1 pairs with end2, end1 pairs with start2)
+    function getRNAAxis(d) {
+        const backboneSite = (nt) => nt.getInstanceParameter3('bbOffsets');
+        // initial guess vector from the midpoint of the start1-end2 pair to end1-start2 pair
+        const midA0 = backboneSite(d.start1).add(backboneSite(d.end2)).multiplyScalar(0.5);
+        const midAc0 = backboneSite(d.end1).add(backboneSite(d.start2)).multiplyScalar(0.5);
+        const guess = midAc0.clone().sub(midA0);
+        if (guess.length() > 0)
+            guess.normalize();
+        // Walk pairs (nucA on strand A via n3, nucB on strand B via n5) in lockstep.
+        // nucAc/nucBc are the next pair along the walk.
+        const posAs = [];
+        const posBs = [];
+        const backPoses = [];
+        let nucA = d.start1;
+        let nucB = d.end2;
+        while (nucA && nucB && nucA !== d.end1) {
+            const nucAc = nucA.n3;
+            const nucBc = nucB.n5;
+            if (!nucAc || !nucBc)
+                break;
+            posAs.push(backboneSite(nucA));
+            posBs.push(backboneSite(nucB));
+            // on the last iteration, also push the trailing pair (mirrors Python's `if i == end1-1`)
+            if (nucAc === d.end1) {
+                posAs.push(backboneSite(nucAc));
+                posBs.push(backboneSite(nucBc));
+            }
+            backPoses.push(backboneSite(nucAc).sub(backboneSite(nucA)));
+            backPoses.push(backboneSite(nucBc).sub(backboneSite(nucB)));
+            nucA = nucAc;
+            nucB = nucBc;
+        }
+        const planeVector = fitPlane(backPoses);
+        if (guess.dot(planeVector) < 0)
+            planeVector.multiplyScalar(-1);
+        // Find where the helical axis originates by intersecting per-base-pair perpendiculars
+        // projected onto the plane.
+        const helPos = [];
+        for (let i = 0; i < posAs.length - 1; i++) {
+            // project current base pair to plane
+            let apos = posAs[i].clone();
+            let bpos = posBs[i].clone();
+            apos.sub(planeVector.clone().multiplyScalar(apos.dot(planeVector)));
+            bpos.sub(planeVector.clone().multiplyScalar(bpos.dot(planeVector)));
+            const bpVecA = bpos.clone().sub(apos);
+            if (bpVecA.length() === 0)
+                continue;
+            const midpointA = apos.clone().add(bpos).multiplyScalar(0.5);
+            const perpA = bpVecA.clone().cross(planeVector).normalize();
+            // project next base pair to plane
+            let apos2 = posAs[i + 1].clone();
+            let bpos2 = posBs[i + 1].clone();
+            apos2.sub(planeVector.clone().multiplyScalar(apos2.dot(planeVector)));
+            bpos2.sub(planeVector.clone().multiplyScalar(bpos2.dot(planeVector)));
+            const bpVecB = bpos2.clone().sub(apos2);
+            if (bpVecB.length() === 0)
+                continue;
+            const midpointB = apos2.clone().add(bpos2).multiplyScalar(0.5);
+            const perpB = bpVecB.clone().cross(planeVector).normalize();
+            // Solve the 3x2 least-squares system:
+            //   [perpA, -perpB] [t, c]^T = midpointB - midpointA
+            // via 2x2 normal equations. perpA, perpB are unit vectors so their self-dots are 1.
+            const y = midpointB.clone().sub(midpointA);
+            const m01 = -perpA.dot(perpB); // = m10
+            const b0 = perpA.dot(y);
+            const b1 = -perpB.dot(y);
+            const det = 1 - m01 * m01;
+            if (Math.abs(det) < 1e-12)
+                continue;
+            const t = (b0 - m01 * b1) / det;
+            const c = (b1 - m01 * b0) / det;
+            const pointA = midpointA.clone().add(perpA.clone().multiplyScalar(t));
+            const pointB = midpointB.clone().add(perpB.clone().multiplyScalar(c));
+            if (pointA.distanceTo(pointB) > 1e-6) {
+                console.log('Error in finding common intersection point', pointA, pointB);
+            }
+            helPos.push(pointA);
+        }
+        const finalHelPos = new THREE.Vector3(0, 0, 0);
+        helPos.forEach(p => finalHelPos.add(p));
+        if (helPos.length)
+            finalHelPos.divideScalar(helPos.length);
+        return { planeVector, finalHelPos };
+    }
+    helix_1.getRNAAxis = getRNAAxis;
+    // Draws the duplex axis vector in the scene, anchored at the start1 nucleotide.
+    function addRNAAxisToScene(d) {
+        const { planeVector } = getRNAAxis(d);
+        const origin = d.start1.getInstanceParameter3('bbOffsets')
+            .add(d.end2.getInstanceParameter3('bbOffsets'))
+            .multiplyScalar(0.5);
+        if (typeof THREE !== 'undefined' && typeof scene !== 'undefined' && scene?.add) {
+            const arrow = new THREE.ArrowHelper(planeVector.clone().normalize(), origin, 10);
+            scene.add(arrow);
+        }
+    }
+    helix_1.addRNAAxisToScene = addRNAAxisToScene;
 })(helix || (helix = {}));
