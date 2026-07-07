@@ -2000,6 +2000,38 @@ namespace toscad {
         stats: RenumberStats;
     }
 
+    
+    export function applyHelixRenumber(
+        helices: Nucleotide[][],
+        grid: GridMap,
+        helixPos: Map<number, [number, number]>,
+        remap: Map<number, number>
+    ): {
+        helices: Nucleotide[][];
+        helixPos: Map<number, [number, number]>;
+    } {
+        const n = helices.length;
+        const newHelices: Nucleotide[][] = new Array(n);
+        for (let oldId = 0; oldId < n; oldId++) {
+            const newId = remap.get(oldId);
+            const slot = (newId !== undefined && newId >= 0 && newId < n) ? newId : oldId;
+            newHelices[slot] = helices[oldId];
+        }
+
+        for (const mark of grid.values()) {
+            const newId = remap.get(mark.helixId);
+            if (newId !== undefined) mark.helixId = newId;
+        }
+
+        const newHelixPos = new Map<number, [number, number]>();
+        for (const [oldId, pos] of helixPos.entries()) {
+            const newId = remap.get(oldId);
+            newHelixPos.set(newId !== undefined ? newId : oldId, pos);
+        }
+
+        return { helices: newHelices, helixPos: newHelixPos };
+    }
+    
     // ─────────────────────────────────────────────────────────────────────
     //  renumberHelicesGNN — Greedy Nearest-Neighbor renumber
     //

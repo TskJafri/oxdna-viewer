@@ -476,26 +476,22 @@ var helix;
         };
         // Each partial has up to 2 sides (from mapPartialEnds). One side gets at most 1 connection to another partial.
         // 1-bp partials are excluded from partialEndsMap upstream — they get no sides here. Their
-        // per-partial cap is enforced by attachCount (max 2 attachments) in the greedy below.
+        // per-partial cap is enforced by noSideAttachCount (max 2 attachments) in the greedy below.
         // Build (partialIdx, ntId) -> sideIdx (0 or 1) so any exit-nt resolves to its side.
         const partialEndsMap = mapPartialEnds(partials);
         const ntToSide = new Map();
-        const sideCount = new Map(); // partialIdx -> number of usable sides (0,1,2)
         partials.forEach((_, pIdx) => {
             const ends = partialEndsMap.get(pIdx);
             const inner = new Map();
             ntToSide.set(pIdx, inner);
-            if (!ends) {
-                sideCount.set(pIdx, 0);
+            if (!ends)
                 return;
-            }
             // Side 0: start1 (5' of strand A) paired with end2 (3' of strand B)
             inner.set(ends.start1.id, 0);
             inner.set(ends.end2.id, 0);
             // Side 1: end1 (3' of strand A) paired with start2 (5' of strand B)
             inner.set(ends.end1.id, 1);
             inner.set(ends.start2.id, 1);
-            sideCount.set(pIdx, 2);
         });
         const getSideForNt = (pIdx, ntId) => {
             return ntToSide.get(pIdx)?.get(ntId);
@@ -580,29 +576,37 @@ var helix;
                 });
             });
         });
-        // Track which (partialIdx, sideIdx) slots are already used by a partial-partial connection.
-        const consumedSides = new Set();
-        const consumedKey = (pIdx, side) => `${pIdx}:${side}`;
-        const isSideConsumed = (pIdx, side) => consumedSides.has(consumedKey(pIdx, side));
-        const consumeSide = (pIdx, side) => consumedSides.add(consumedKey(pIdx, side));
-        // Per-partial attachment count, capped at 2. For multi-bp partials this is already
-        // implicitly enforced by side uniqueness (2 sides, each consumable once = max 2 attachments).
-        // For 1-bp partials (no sides), this is the only cap — they can host up to 2 neighbors,
-        // chosen greedily by highest dot.
+        // Per-partial used-side set. For multi-bp partials (side is always defined when
+        // used) this is the source of truth: a side is free iff its key is absent, and
+        // the cap of 2 attachments falls out of set.size >= 2.
+        const usedSides = new Map();
+        // Per-partial attachment count for 0-side partials only. 1-bp partials have no
+        // `partialEndsMap` entry, so `side` is undefined and nothing ever lands in
+        // `usedSides` for them — this counter is the only way to cap them at 2 neighbors.
+        const noSideAttachCount = new Map();
         const PER_PARTIAL_CAP = 2;
-        const attachCount = new Map();
-        const getAttach = (pIdx) => attachCount.get(pIdx) ?? 0;
+        const getNoSideCount = (pIdx) => noSideAttachCount.get(pIdx) ?? 0;
         const slotAvailable = (pIdx, side) => {
-            if (getAttach(pIdx) >= PER_PARTIAL_CAP)
-                return false;
             if (side === undefined)
-                return true;
-            return !isSideConsumed(pIdx, side);
+                return getNoSideCount(pIdx) < PER_PARTIAL_CAP;
+            const used = usedSides.get(pIdx);
+            if (used && used.has(side))
+                return false;
+            if (used && used.size >= PER_PARTIAL_CAP)
+                return false;
+            return true;
         };
         const reserveSlot = (pIdx, side) => {
-            attachCount.set(pIdx, getAttach(pIdx) + 1);
-            if (side !== undefined)
-                consumeSide(pIdx, side);
+            if (side === undefined) {
+                noSideAttachCount.set(pIdx, getNoSideCount(pIdx) + 1);
+                return;
+            }
+            let used = usedSides.get(pIdx);
+            if (!used) {
+                used = new Set();
+                usedSides.set(pIdx, used);
+            }
+            used.add(side);
         };
         /*
         Mutual-agreement filter:
