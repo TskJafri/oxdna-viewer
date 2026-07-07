@@ -1482,10 +1482,10 @@ var helix;
         return new THREE.Vector3(v[0][minIdx], v[1][minIdx], v[2][minIdx]);
     }
     helix_1.fitPlane = fitPlane;
-    // Returns the axis of an RNA/DNA duplex given the four end nucleotides of the two strands.
+    // Returns the axis of an DNA duplex given the four end nucleotides of the two strands.
     // - start1/end1 are the 5'/3' ends of strand A
     // - start2/end2 are the 5'/3' ends of strand B (start1 pairs with end2, end1 pairs with start2)
-    function getRNAAxis(d) {
+    function getPartialAxis(d) {
         const backboneSite = (nt) => nt.getInstanceParameter3('bbOffsets');
         // initial guess vector from the midpoint of the start1-end2 pair to end1-start2 pair
         const midA0 = backboneSite(d.start1).add(backboneSite(d.end2)).multiplyScalar(0.5);
@@ -1569,10 +1569,10 @@ var helix;
             finalHelPos.divideScalar(helPos.length);
         return { planeVector, finalHelPos };
     }
-    helix_1.getRNAAxis = getRNAAxis;
+    helix_1.getPartialAxis = getPartialAxis;
     // Draws the duplex axis vector in the scene, anchored at the start1 nucleotide.
-    function addRNAAxisToScene(d) {
-        const { planeVector } = getRNAAxis(d);
+    function addPartialAxisToScene(d) {
+        const { planeVector } = getPartialAxis(d);
         const origin = d.start1.getInstanceParameter3('bbOffsets')
             .add(d.end2.getInstanceParameter3('bbOffsets'))
             .multiplyScalar(0.5);
@@ -1581,5 +1581,5 @@ var helix;
             scene.add(arrow);
         }
     }
-    helix_1.addRNAAxisToScene = addRNAAxisToScene;
+    helix_1.addPartialAxisToScene = addPartialAxisToScene;
 })(helix || (helix = {}));
