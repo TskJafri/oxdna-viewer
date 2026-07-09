@@ -422,7 +422,7 @@ namespace helix {
 		// guys for context lastScraps[] basically are the dumb nucleotides that couldnt be placed into helices due to fraying and angle conflicts.
 		// Stored as segments so grouped leftovers (e.g. deferred ssScaffold segments) stay together.
 		const lastScraps: Nucleotide[][] = [];
-		if (!partials.length) return { helices, lastScraps }; // surely no helices if no partials.
+		if (!partials.length) return { helices, lastScraps, usedSides: new Map<number, Map<number, number>>() }; // surely no helices if no partials.
 		const dot = 0.5;
 
 		// quick lookup for id to partial index and stubs index.
@@ -626,10 +626,11 @@ namespace helix {
 			});
 		});
 
-		// Per-partial used-side set. For multi-bp partials (side is always defined when
-		// used) this is the source of truth: a side is free iff its key is absent, and
-		// the cap of 2 attachments falls out of set.size >= 2.
-		const usedSides = new Map<number, Set<number>>();
+		// Per-partial used-side amounts. For multi-bp partials (side is always defined when
+		// used) this tracks how much of each side has been consumed. Partial-partial edges and
+		// stub bridges consume a full side (1.0); ssDNA overhangs consume half a side (0.5),
+		// so two ssDNA overhangs may share the same side. A side is free iff its total is < 1.
+		const usedSides = new Map<number, Map<number, number>>();
 
 		// Per-partial attachment count for 0-side partials only. 1-bp partials have no
 		// `partialEndsMap` entry, so `side` is undefined and nothing ever lands in
@@ -637,33 +638,20 @@ namespace helix {
 		const noSideAttachCount = new Map<number, number>();
 		const PER_PARTIAL_CAP = 2;
 		const getNoSideCount = (pIdx: number) => noSideAttachCount.get(pIdx) ?? 0;
-		const slotAvailable = (pIdx: number, side: number | undefined): boolean => {
-			if (side === undefined) return getNoSideCount(pIdx) < PER_PARTIAL_CAP;
-			const used = usedSides.get(pIdx);
-			if (used && used.has(side)) return false;
-			if (used && used.size >= PER_PARTIAL_CAP) return false;
-			return true;
+		const slotAvailable = (pIdx: number, side: number | undefined, amount = 1): boolean => {
+			if (side === undefined) return getNoSideCount(pIdx) + amount <= PER_PARTIAL_CAP;
+			const used = usedSides.get(pIdx)?.get(side) ?? 0;
+			return used + amount <= 1 + 1e-9;
 		};
-		const reserveSlot = (pIdx: number, side: number | undefined) => {
+		const reserveSlot = (pIdx: number, side: number | undefined, amount = 1) => {
 			if (side === undefined) {
-				noSideAttachCount.set(pIdx, getNoSideCount(pIdx) + 1);
+				noSideAttachCount.set(pIdx, getNoSideCount(pIdx) + amount);
 				return;
 			}
-			let used = usedSides.get(pIdx);
-			if (!used) { used = new Set<number>(); usedSides.set(pIdx, used); }
-			used.add(side);
+			let bySide = usedSides.get(pIdx);
+			if (!bySide) { bySide = new Map<number, number>(); usedSides.set(pIdx, bySide); }
+			bySide.set(side, (bySide.get(side) ?? 0) + amount);
 		};
-
-		/* 
-		Mutual-agreement filter:
-		For each (partial P, side σ_P), we look at every direct edge incident to that side and
-		keep only edges (P, σ_P) <-> (Q, σ_Q) where Q's side σ_Q would also rank P among its top
-		candidates. Since we already cap at "1 per side", a side has effectively top-1 candidates,
-		so mutual agreement reduces to: σ_Q's best candidate (by dots) toward this junction is P.
-		We approximate this with a sort+greedy pass below: among all surviving direct edges for a
-		side, only the highest-dot edge can ever win. If the other side's highest-dot edge also
-		names the same counterpart, both will agree naturally during the greedy pass.
-		*/
 
 		// Union-find helpers needed before the greedy pass for partial-group operations.
 		const partialParent = Array.from({ length: partials.length }, (_, i) => i);
@@ -773,8 +761,8 @@ namespace helix {
 			if (rootA === rootB) continue;
 			unite(c.a, c.b);
 			mergePartialGroups(c.a, c.b);
-			reserveSlot(c.a, c.sideA);
-			reserveSlot(c.b, c.sideB);
+			reserveSlot(c.a, c.sideA, 1);
+			reserveSlot(c.b, c.sideB, 1);
 		}
 
 		// Stage B: stub bridges. Same checks plus the existing safeguard against bridging
@@ -789,8 +777,8 @@ namespace helix {
 			unite(c.stubNode, c.a);
 			unite(c.stubNode, c.b);
 			mergePartialGroups(c.a, c.b);
-			reserveSlot(c.a, c.sideA);
-			reserveSlot(c.b, c.sideB);
+			reserveSlot(c.a, c.sideA, 1);
+			reserveSlot(c.b, c.sideB, 1);
 		}
 
 		// Stubs join the best-aligned partial through A3 dots.
@@ -881,6 +869,24 @@ namespace helix {
 				return Array.from(helixIndices.values());
 			};
 
+			// For an ssScaffold segment, find the partial side through which it connects to a
+			// specific helix. If the connection is not through a partial side (e.g. through a
+			// stub or internal partial nucleotide), no side needs to be reserved.
+			const findSsScaffoldConnectionSide = (segment: Nucleotide[], helixIdx: number): { pIdx: number; side: number | undefined } | null => {
+				const segmentIds = new Set<number>(segment.map(nt => nt.id));
+				for (const nt of segment) {
+					for (const dir of ['n5', 'n3'] as const) {
+						const neighbor = nt[dir] as Nucleotide | null;
+						if (!neighbor || segmentIds.has(neighbor.id) || ssScaffoldIds.has(neighbor.id)) continue;
+						if (idToHelix.get(neighbor.id) !== helixIdx) continue;
+						const pIdx = idToPartial.get(neighbor.id);
+						if (pIdx === undefined) continue;
+						return { pIdx, side: getSideForNt(pIdx, neighbor.id) };
+					}
+				}
+				return null;
+			};
+
 			let pending = ssScaffold.filter(segment => segment.length > 0);
 			const maxRounds = Math.max(1, pending.length * 2);
 			let round = 0;
@@ -899,15 +905,29 @@ namespace helix {
 
 					// IN CASE that the ssScaffold segment connects to multiple helices, warn the user.
 					if (targets.length > 1) {
-						console.warn('ssScaffold segment connects to multiple helices; attaching to first.', {
+						console.warn('ssScaffold segment connects to multiple helices; attaching to first available.', {
 							helices: targets,
 							segmentLength: segment.length,
 							round
 						});
 					}
-					const primary = targets[0];
-					addToHelix(primary, segment);
-					attachedThisRound += 1;
+
+					// Try targets in order and attach to the first one whose partial side is available.
+					let attached = false;
+					for (const hIdx of targets) {
+						const conn = findSsScaffoldConnectionSide(segment, hIdx);
+						if (conn && !slotAvailable(conn.pIdx, conn.side, 0.5)) continue;
+						if (conn) reserveSlot(conn.pIdx, conn.side, 0.5);
+						addToHelix(hIdx, segment);
+						attached = true;
+						break;
+					}
+
+					if (attached) {
+						attachedThisRound += 1;
+					} else {
+						nextPending.push(segment);
+					}
 				});
 
 				if (!nextPending.length) break;
@@ -1012,6 +1032,7 @@ namespace helix {
 			side: 'n5' | 'n3';
 			result: 'binder' | 'overhang';
 			firstPartialId?: number;
+			firstPartialSide?: number;
 			oppositePartialId?: number;
 			firstHelixId?: number;
 			oppositeHelixId?: number;
@@ -1031,6 +1052,7 @@ namespace helix {
 				if (!first) return { side: dir, result: 'overhang' };
 
 				const firstHelixId = partialToHelix.get(first.pIdx);
+				const firstPartialSide = getSideForNt(first.pIdx, first.node.id);
 				// note: using more than 1 step might look fine, but it can cause issues in edge cases.
 				// specifically, structure 51 from nanobase (Dumbbell structure) has issues with this.
 				// Sticking to 1 step has NOT shown ANY problems so far.
@@ -1041,6 +1063,7 @@ namespace helix {
 						side: dir,
 						result: 'overhang',
 						firstPartialId: first.pIdx,
+						firstPartialSide,
 						firstHelixId
 					};
 				}
@@ -1051,6 +1074,7 @@ namespace helix {
 						side: dir,
 						result: 'overhang',
 						firstPartialId: first.pIdx,
+						firstPartialSide,
 						firstHelixId
 					};
 				}
@@ -1068,6 +1092,7 @@ namespace helix {
 					side: dir,
 					result: binder ? 'binder' : 'overhang',
 					firstPartialId: first.pIdx,
+					firstPartialSide,
 					oppositePartialId,
 					firstHelixId,
 					oppositeHelixId
@@ -1079,8 +1104,9 @@ namespace helix {
 			return { res5, res3 };
 		};
 
-		const binders: Nucleotide[][] = [];
-		const binder2: Nucleotide[][] = [];
+		type BinderEntry = { segment: Nucleotide[]; res5: SideResult | undefined; res3: SideResult | undefined };
+		const binders: BinderEntry[] = [];
+		const binder2: BinderEntry[] = [];
 		const disconnected: Nucleotide[][] = [];
 		const unhandled: Nucleotide[][] = [];
 
@@ -1088,12 +1114,27 @@ namespace helix {
 		const isOverhang = (res: SideResult | undefined) => res?.result === 'overhang';
 		const hasPartial = (res: SideResult | undefined) => res?.firstPartialId !== undefined;
 
+		// Helper to claim a partial side for an ssDNA overhang. If the side is already
+		// reserved (by a partial-partial edge or a stub bridge), the overhang is reclassified
+		// as a binder so it follows binder routing rules instead.
+		const tryReserveOverhangSide = (res: SideResult | undefined): SideResult | undefined => {
+			if (!res || res.result !== 'overhang') return res;
+			if (res.firstPartialId === undefined) return res;
+			if (!slotAvailable(res.firstPartialId, res.firstPartialSide, 0.5)) {
+				return { ...res, result: 'binder' };
+			}
+			reserveSlot(res.firstPartialId, res.firstPartialSide, 0.5);
+			return res;
+		};
+
 		// The lot of if statements are required (unless you can figure out a better way).
 		// You can read through these, but they mostly comprise of cases where the segment is connected to helices on both ends, and has different types of such connections.
 		// example, if overhang on one end and binder on the other, then it will connect to the helix on overhang side.
 		ssdna.forEach(segment => {
 			if (!segment.length) return;
-			const { res5, res3 } = classifySegment(segment);
+			const raw = classifySegment(segment);
+			const res5 = tryReserveOverhangSide(raw.res5);
+			const res3 = tryReserveOverhangSide(raw.res3);
 			const res5HasPartial = hasPartial(res5);
 			const res3HasPartial = hasPartial(res3);
 
@@ -1141,16 +1182,16 @@ namespace helix {
 			}
 
 			if (isBinder(res5) && isOverhang(res3) && !hasPartial(res3)) {
-				binders.push(segment);
+				binders.push({ segment, res5, res3 });
 				return;
 			}
 			if (isBinder(res3) && isOverhang(res5) && !hasPartial(res5)) {
-				binders.push(segment);
+				binders.push({ segment, res5, res3 });
 				return;
 			}
 
 			if (isBinder(res5) && isBinder(res3)) {
-				binder2.push(segment);
+				binder2.push({ segment, res5, res3 });
 				return;
 			}
 
@@ -1159,16 +1200,16 @@ namespace helix {
 
 		// For any binder/binder2 segments, group them by which helix they connect to.
 		// If multiple binder segments connect to the same helix, they form a new helix.
-		const resolveBinderHelix = (segment: Nucleotide[]) => {
-			const { res5, res3 } = classifySegment(segment);
+		const resolveBinderHelix = (entry: BinderEntry) => {
+			const { res5, res3 } = entry;
 			const helixIds = new Set<number>();
-			const collect = (res: SideResult) => {
-				if (!isBinder(res)) return;
+			const collect = (res: SideResult | undefined) => {
+				if (!res || !isBinder(res)) return;
 				if (res.firstHelixId !== undefined) helixIds.add(res.firstHelixId);
 				if (res.oppositeHelixId !== undefined) helixIds.add(res.oppositeHelixId);
 			};
-			if (res5) collect(res5);
-			if (res3) collect(res3);
+			collect(res5);
+			collect(res3);
 			if (helixIds.size === 1) return Array.from(helixIds.values())[0];
 			return undefined;
 		};
@@ -1194,8 +1235,8 @@ namespace helix {
 
 		// Collect helix ids touched by binder-classified sides of a segment.
 		// For binder2 the result has size 1 (both sides agree) or 2 (sides resolve to different helices).
-		const getBinderHelixIds = (segment: Nucleotide[]): number[] => {
-			const { res5, res3 } = classifySegment(segment);
+		const getBinderHelixIds = (entry: BinderEntry): number[] => {
+			const { res5, res3 } = entry;
 			const ids = new Set<number>();
 			const collect = (res: SideResult | undefined) => {
 				if (!res || !isBinder(res)) return;
@@ -1207,21 +1248,21 @@ namespace helix {
 			return Array.from(ids.values());
 		};
 
-		binders.forEach(segment => {
-			const helixId = resolveBinderHelix(segment);
+		binders.forEach(entry => {
+			const helixId = resolveBinderHelix(entry);
 			if (helixId === undefined) return;
-			addBinderToGroup(helixId, segment);
+			addBinderToGroup(helixId, entry.segment);
 		});
 
-		binder2.forEach(segment => {
-			const ids = getBinderHelixIds(segment);
+		binder2.forEach(entry => {
+			const ids = getBinderHelixIds(entry);
 			if (ids.length === 1) {
 				// Single host helix: same path as a normal binder.
-				addBinderToGroup(ids[0], segment);
+				addBinderToGroup(ids[0], entry.segment);
 			} else if (ids.length === 2) {
 				// Two host helices: group by the unordered pair so all binder2 segments
 				// spanning the same {A, B} pair fuse into one new helix together.
-				addBinderToPairGroup(ids[0], ids[1], segment);
+				addBinderToPairGroup(ids[0], ids[1], entry.segment);
 			}
 			// ids.length === 0 or > 2: should be unreachable for binder2; silently dropped.
 		});
@@ -1341,7 +1382,7 @@ namespace helix {
 		}
 
 		// const finalHelices = helices.filter(h => h.length > 0);
-		return { helices, lastScraps, binders, binder2, disconnected, unhandled };
+		return { helices, lastScraps, binders, binder2, disconnected, unhandled, usedSides };
 	}
 
 	export function findHelices(inputMap: Map<number, Nucleotide>, tolerance = 2) {
