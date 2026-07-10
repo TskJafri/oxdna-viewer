@@ -380,6 +380,226 @@ var helix;
         return partialEndsMap;
     }
     helix_1.mapPartialEnds = mapPartialEnds;
+    //  Returns the indices of partials that have exactly 1 free side.
+    //  Only partials present in `partialEndsMap` (i.e. those with 2 sides) are considered.
+    function partialsWithOneFreeSide(partials, partialEndsMap, usedSides) {
+        const result = [];
+        for (let pIdx = 0; pIdx < partials.length; pIdx++) {
+            if (!partialEndsMap.has(pIdx))
+                continue;
+            const sideUsage = usedSides.get(pIdx);
+            const side0Used = (sideUsage?.get(0) ?? 0) > 1e-9;
+            const side1Used = (sideUsage?.get(1) ?? 0) > 1e-9;
+            if (side0Used !== side1Used) {
+                result.push(pIdx);
+            }
+        }
+        return result;
+    }
+    helix_1.partialsWithOneFreeSide = partialsWithOneFreeSide;
+    // Like partialsWithOneFreeSide, but also computes the helical axis for each such partial
+    // and flips it so it points TOWARDS the free side. Returns pIdx -> { vector }.
+    // planeVector from getPartialAxis points side 0 -> side 1 (guess = midSide1 - midSide0,
+    // and planeVector is aligned to guess), so we negate it when the free side is 0.
+    function partialAxesTowardFreeSide(partials, partialEndsMap, usedSides) {
+        const result = new Map();
+        const oneFreeSide = partialsWithOneFreeSide(partials, partialEndsMap, usedSides);
+        for (const pIdx of oneFreeSide) {
+            const ends = partialEndsMap.get(pIdx);
+            if (!ends)
+                continue;
+            const sideUsage = usedSides.get(pIdx);
+            const side0Free = (sideUsage?.get(0) ?? 0) < 1e-9;
+            const { planeVector } = getPartialAxis(ends);
+            if (side0Free)
+                planeVector.negate();
+            result.set(pIdx, { vector: planeVector });
+        }
+        return result;
+    }
+    helix_1.partialAxesTowardFreeSide = partialAxesTowardFreeSide;
+    // Shortest distance between two 3D line segments (P1->P2) and (P3->P4).
+    // Eberly's algorithm. Inputs in any consistent unit; output in same unit.
+    // Used by hashAxisOverlap for cylinder-vs-cylinder overlap (distance <= 2*radius).
+    function segmentDistance3D(P1, P2, P3, P4) {
+        const d1x = P2.x - P1.x, d1y = P2.y - P1.y, d1z = P2.z - P1.z;
+        const d2x = P4.x - P3.x, d2y = P4.y - P3.y, d2z = P4.z - P3.z;
+        const rx = P1.x - P3.x, ry = P1.y - P3.y, rz = P1.z - P3.z;
+        const a = d1x * d1x + d1y * d1y + d1z * d1z;
+        const e = d2x * d2x + d2y * d2y + d2z * d2z;
+        const f = d2x * rx + d2y * ry + d2z * rz;
+        const eps = 1e-12;
+        let s = 0, t = 0;
+        if (a <= eps && e <= eps) {
+            return Math.sqrt(rx * rx + ry * ry + rz * rz);
+        }
+        if (a <= eps) {
+            s = 0;
+            t = e > eps ? Math.max(0, Math.min(1, f / e)) : 0;
+        }
+        else {
+            const c = d1x * rx + d1y * ry + d1z * rz;
+            if (e <= eps) {
+                t = 0;
+                s = Math.max(0, Math.min(1, -c / a));
+            }
+            else {
+                const b = d1x * d2x + d1y * d2y + d1z * d2z;
+                const denom = a * e - b * b;
+                if (Math.abs(denom) > eps) {
+                    s = Math.max(0, Math.min(1, (b * f - c * e) / denom));
+                }
+                else {
+                    s = 0; // parallel / near-parallel
+                }
+                t = (b * s + f) / e;
+                if (t < 0) {
+                    t = 0;
+                    s = Math.max(0, Math.min(1, -c / a));
+                }
+                else if (t > 1) {
+                    t = 1;
+                    s = Math.max(0, Math.min(1, (b - c) / a));
+                }
+            }
+        }
+        const cax = P1.x + s * d1x - (P3.x + t * d2x);
+        const cay = P1.y + s * d1y - (P3.y + t * d2y);
+        const caz = P1.z + s * d1z - (P3.z + t * d2z);
+        return Math.sqrt(cax * cax + cay * cay + caz * caz);
+    }
+    // Hash-merge using overlapping cylindrical volumes ("hash cells") around each partial's
+    // free-side basepair. Each partial contributes one hash-cylinder:
+    //   origin = midpoint of the free-side basepair (start1+end2)/2 or (end1+start2)/2
+    //   dir    = the partial's helical axis vector pointing TOWARD the free side
+    //            (already produced by the caller via partialAxesTowardFreeSide)
+    //   length = cylinderLengthAng (default 50 Å)
+    //   radius = cylinderRadiusAng (default 12.5 Å)
+    // Brute-force pairwise. Two partials are candidate-mergeable iff BOTH:
+    //   1. Their hash-cylinders overlap: shortest segment-segment distance between the two
+    //      cylinder centerlines <= 2*radius (Eberly's algorithm in segmentDistance3D).
+    //   2. axis_a . axis_b < dotThreshold (default -0.9, i.e. strongly anti-parallel).
+    //      Rationale: both axes point TOWARD their free sides, so a valid end-to-end merge
+    //      (free sides facing each other) makes the axes anti-parallel -> dot close to -1.
+    // `dist` is computed but not used as a filter (the overlap test handles spatial rejection).
+    //
+    // Candidate pairs are greedily resolved in ASCENDING dot order (most negative first = best
+    // anti-parallel alignment wins), with each pIdx exclusive (a partial with one free side
+    // joins at most one merge). This weighting by `dot` is the tie-break rule.
+    //
+    // NOTE: `bbOffsets` from Nucleotide.getInstanceParameter3 returns positions in oxView
+    // internal units, where 1 unit = 8.518 Å. All distance thresholds given in Å are converted
+    // once for internal comparison in oxView units.
+    function hashAxisOverlap(partials, partialEndsMap, usedSides, partialAxes, options) {
+        const OX_TO_ANG = 8.518;
+        const dotThreshold = options?.dotThreshold ?? -0.9;
+        const cylRadiusAng = options?.cylinderRadiusAng ?? 12.5;
+        const cylLengthAng = options?.cylinderLengthAng ?? 50;
+        const cylLengthOx = cylLengthAng / OX_TO_ANG;
+        const overlapOx = (2 * cylRadiusAng) / OX_TO_ANG;
+        const entries = [];
+        partialAxes.forEach(({ vector }, pIdx) => {
+            const ends = partialEndsMap.get(pIdx);
+            if (!ends)
+                return;
+            const sideUsage = usedSides.get(pIdx);
+            const side0Free = (sideUsage?.get(0) ?? 0) < 1e-9;
+            // Side 0 basepair: start1 + end2  ;  Side 1 basepair: end1 + start2
+            const bpA = side0Free ? ends.start1 : ends.end1;
+            const bpB = side0Free ? ends.end2 : ends.start2;
+            const origin = bpA.getInstanceParameter3('bbOffsets')
+                .add(bpB.getInstanceParameter3('bbOffsets'))
+                .multiplyScalar(0.5);
+            const dir = vector.clone().normalize();
+            const segEnd = origin.clone().add(dir.clone().multiplyScalar(cylLengthOx));
+            entries.push({ pIdx, origin, dir, segEnd });
+        });
+        // Brute-force: collect all candidate pairs that pass BOTH gates.
+        const candidates = [];
+        for (let i = 0; i < entries.length; i++) {
+            const A = entries[i];
+            for (let j = i + 1; j < entries.length; j++) {
+                const B = entries[j];
+                // Gate 1: cylinder overlap. Each hash-cylinder is a finite segment from its
+                // origin to segEnd along the partial's axis. Two cylinders overlap iff the
+                // shortest distance between their centerline segments <= 2*radius. This is the
+                // essential spatial filter — without it, anti-parallel partials on opposite
+                // sides of the scene would falsely match.
+                const segDist = segmentDistance3D(A.origin, A.segEnd, B.origin, B.segEnd);
+                if (segDist > overlapOx)
+                    continue;
+                // Gate 2: anti-parallel alignment. Both axes point toward their free sides,
+                // so a valid merge (free sides facing each other) requires dot < dotThreshold.
+                const dot = A.dir.dot(B.dir);
+                if (dot >= dotThreshold)
+                    continue;
+                // Distance computed for reference only; not used as a filter.
+                const distOx = A.origin.distanceTo(B.origin);
+                candidates.push({ a: A.pIdx, b: B.pIdx, dot, dist: distOx * OX_TO_ANG });
+            }
+        }
+        // Resolve greedily: lowest dot (most anti-parallel) wins, each pIdx in at most one pair.
+        candidates.sort((x, y) => x.dot - y.dot);
+        const paired = new Set();
+        const result = [];
+        for (const c of candidates) {
+            if (paired.has(c.a) || paired.has(c.b))
+                continue;
+            result.push(c);
+            paired.add(c.a);
+            paired.add(c.b);
+        }
+        return result;
+    }
+    helix_1.hashAxisOverlap = hashAxisOverlap;
+    // Consume a list of hashAxisOverlap merge pairs and fold any cross-helix pairs
+    // into a single helix via combineHelices. For each pair:
+    //   1. Look up each partial's current helix via grid.get(partials[x][0].id).helixId.
+    //   2. If both partials already belong to the same current helix, skip.
+    //   3. If they're in different helices, use the same path as the scadnano
+    //      "Combine Helices" button to make the pair disjoint on the grid
+    //      (computeCombineShifts + applyCombineShifts) and then combineHelices.
+    // Pairs are processed in input order; each iteration re-reads helixIds from
+    // the grid, so indices returned by combineHelices' idRemap are tracked
+    // correctly for any subsequent pairs.
+    function applyAxisOverlapMerge(helices, grid, partials, mergePairs) {
+        if (!Array.isArray(helices) || !(grid instanceof Map) ||
+            !Array.isArray(partials) || !Array.isArray(mergePairs))
+            return;
+        if (mergePairs.length === 0)
+            return;
+        mergePairs.forEach(({ a, b }) => {
+            const pa = partials[a];
+            const pb = partials[b];
+            if (!Array.isArray(pa) || pa.length === 0)
+                return;
+            if (!Array.isArray(pb) || pb.length === 0)
+                return;
+            const markA = grid.get(pa[0].id);
+            const markB = grid.get(pb[0].id);
+            if (!markA || !markB)
+                return;
+            const helixA = markA.helixId;
+            const helixB = markB.helixId;
+            if (typeof helixA !== 'number' || typeof helixB !== 'number')
+                return;
+            if (helixA === helixB)
+                return; // same current helix — nothing to do
+            if (helixA >= helices.length || helixB >= helices.length)
+                return;
+            if (!Array.isArray(helices[helixA]) || helices[helixA].length === 0)
+                return;
+            if (!Array.isArray(helices[helixB]) || helices[helixB].length === 0)
+                return;
+            // Mirror the Combine Helices button: shift GridMark.offsets so the pair
+            // is disjoint on the grid, then perform the logical merge.
+            const shifts = toscad.computeCombineShifts(helices, [helixA, helixB], grid);
+            if (shifts && shifts.size > 0)
+                toscad.applyCombineShifts(grid, shifts);
+            combineHelices(helices, [helixA, helixB], grid);
+        });
+    }
+    helix_1.applyAxisOverlapMerge = applyAxisOverlapMerge;
     // Perfected!
     // this one uses average a3 vectors of CONNECTED strands, as opposed to average a3 vectors of the entire partial (which cancels out, due to topology).
     function generateHelix(partials, ssdna, ssScaffold, stubs) {
@@ -1300,10 +1520,10 @@ var helix;
         let { partials, unpaired } = findHelixPartials2(inputMap, tolerance);
         let { ssdna, stubs, longssScaffold } = ssdnaPartials(unpaired);
         let ssScaffold = longssScaffoldfunc(longssScaffold, stubs);
-        let { helices, lastScraps, binders, binder2, disconnected, unhandled } = generateHelix(partials, ssdna, ssScaffold, stubs);
+        let { helices, lastScraps, binders, binder2, disconnected, unhandled, usedSides } = generateHelix(partials, ssdna, ssScaffold, stubs);
         console.log("Helices size:", helices.flat().length);
         console.log("Total elements:", inputMap.size);
-        return { helices };
+        return { helices, partials, usedSides };
     }
     helix_1.findHelices = findHelices;
     // Merge two or more helices into the one with the lowest index.

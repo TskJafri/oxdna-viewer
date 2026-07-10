@@ -92,6 +92,12 @@ class ScadnanoExportManager {
     private currentScadnanoConnections: Array<[number, number]> = [];
     private currentScadnanoLayout: ScadnanoPreparedLayout | null = null;
 
+    // Cached findHelices() output. Populated lazily by calculateScadnanoHelices and
+    // reused by the export pipeline so the partials + usedSides ledger computed by
+    // generateHelix is available to applyAxisOverlapMerge without re-walking the strands.
+    private currentScadnanoPartials: Nucleotide[][] | null = null;
+    private currentScadnanoUsedSides: Map<number, Map<number, number>> | null = null;
+
     private scadnanoGridEditor: any = null;
     private scadnanoGridEditorType: ScadnanoGridType | null = null;
     private suppressNodeSelectedCallback = false;
@@ -235,6 +241,13 @@ class ScadnanoExportManager {
                         const corrected = toscad.anglecomb(grid, helices, latticeType, angles);
                         const correct = toscad.anglecorr(grid, helices, latticeType, corrected.networkMap);
                         networkMap = correct.networkMap;
+
+                        // Sweep for any axis-overlapping helices the angle chain missed.
+                        // Reuses the partials + usedSides ledger built by findHelices → generateHelix.
+                        const axisMerges = this.runAxisOverlapMerge(helices, grid, latticeType);
+                        if (axisMerges > 0) {
+                            networkMap = toscad.getAngles(grid, helices, latticeType);
+                        }
                     }
 
                     let helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
@@ -976,10 +989,39 @@ class ScadnanoExportManager {
             }
         });
 
-        const result = helix.findHelices(nucleotideElements, 3) as { helices: Nucleotide[][] };
+        const result = helix.findHelices(nucleotideElements, 3) as {
+            helices: Nucleotide[][];
+            partials: Nucleotide[][];
+            usedSides: Map<number, Map<number, number>>;
+        };
         const helices = result?.helices ?? [];
+        this.currentScadnanoPartials = result?.partials ?? null;
+        this.currentScadnanoUsedSides = result?.usedSides ?? null;
         this.notifyHelixCoverageMismatch(helices, nucleotideElements);
         return helices;
+    }
+
+    // Build the partialEnds + partialAxes inputs for hashAxisOverlap from the
+    // cached findHelices output, run hashAxisOverlap, and feed the resulting
+    // merge pairs into helix.applyAxisOverlapMerge. Returns the number of
+    // merges performed (caller refreshes getAngles only when this is > 0).
+    private runAxisOverlapMerge(helices: Nucleotide[][], grid: any, latticeType: ScadnanoGridType): number {
+        const partials = this.currentScadnanoPartials;
+        const usedSides = this.currentScadnanoUsedSides;
+        if (!Array.isArray(partials) || !usedSides || partials.length === 0) return 0;
+
+        const partialEnds = helix.mapPartialEnds(partials);
+        if (partialEnds.size === 0) return 0;
+
+        const partialAxes = helix.partialAxesTowardFreeSide(partials, partialEnds, usedSides);
+        if (partialAxes.size === 0) return 0;
+
+        const mergePairs = helix.hashAxisOverlap(partials, partialEnds, usedSides, partialAxes);
+        if (!Array.isArray(mergePairs) || mergePairs.length === 0) return 0;
+
+        const before = helices.length;
+        helix.applyAxisOverlapMerge(helices, grid, partials, mergePairs);
+        return before - helices.length;
     }
 
     private prepareScadnanoLayout(
@@ -1031,6 +1073,14 @@ class ScadnanoExportManager {
             const corrected = toscad.anglecomb(grid, helices, latticeType, angles);
             const correct = toscad.anglecorr(grid, helices, latticeType, corrected.networkMap);
             networkMap = correct.networkMap;
+
+            // Sweep for any axis-overlapping helices the angle chain missed and merge them.
+            // Reuses the partials + usedSides ledger built by findHelices → generateHelix.
+            // Refresh getAngles afterwards so networkMap reflects the post-merge state.
+            const axisMerges = this.runAxisOverlapMerge(helices, grid, latticeType);
+            if (axisMerges > 0) {
+                networkMap = toscad.getAngles(grid, helices, latticeType);
+            }
         }
 
         // Initial helix grid positions (still using pre-renumber helix IDs).
