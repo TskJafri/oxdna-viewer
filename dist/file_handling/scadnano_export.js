@@ -21,6 +21,10 @@ class ScadnanoExportManager {
     // Helix ids that have been locked by the user. Persists for the lifetime of the grid pane
     // session; cleared when the pane is closed or the grid is reloaded.
     lockedHelices = new Set();
+    // "Split mode" state. When splitHelicesFromGridView successfully hides everything outside a
+    // single helix, the target helix id is captured here so the follow-up "Split from selected"
+    // button knows which helix to break apart. null while not in split mode.
+    splitTargetHelixId = null;
     clearHistory() {
         this.history = this.createEmptyHistory();
         this.refreshHistoryButtons();
@@ -196,6 +200,178 @@ class ScadnanoExportManager {
         });
         // Keep the editor's own set in sync so its drag/move guards work.
         editor.lockedHelices = new Set(this.lockedHelices);
+    }
+    // Triggered by the "Split helices" button in the grid view.
+    // Hides everything that is NOT currently selected in the 3D scene, while preserving the
+    // visibility state of nucleotides that were already hidden (so previously-hidden bases
+    // don't get flipped back on). The user's original selection is restored afterwards.
+    //
+    // Also captures the target helix id in `splitTargetHelixId` so the "Split from selected"
+    // button knows which helix to break apart, and enables that button. This only succeeds if
+    // (a) the grid pane is open and helix data is cached and (b) every currently-selected
+    // nucleotide belongs to a single helix.
+    splitHelicesFromGridView() {
+        if (selectedBases.size === 0) {
+            notify('Select a helix (or any nucleotides) before splitting.', 'warning');
+            return;
+        }
+        // Try to resolve the target helix id from the current selection. This only works when
+        // the grid pane is open and its layout has been prepared — otherwise we still hide, but
+        // can't enter split mode.
+        let targetHelixId = null;
+        if (this.scadnanoGridEditor && this.currentScadnanoLayout) {
+            const grid = this.currentScadnanoLayout.grid;
+            const helixIds = new Set();
+            selectedBases.forEach(e => {
+                const mark = grid.get(e.id);
+                if (mark)
+                    helixIds.add(mark.helixId);
+            });
+            if (helixIds.size === 1) {
+                targetHelixId = helixIds.values().next().value;
+            }
+            else if (helixIds.size > 1) {
+                notify(`Split mode needs a single helix selected; the current selection spans ${helixIds.size} helices. Hiding non-selected nucleotides, but "Split from selected" is disabled.`, 'warning');
+            }
+        }
+        // Invert the selection so `selectedBases` now holds every element outside the target
+        // helix — those are the ones we want to hide.
+        invertSelection();
+        const affectedSystems = new Set();
+        selectedBases.forEach(e => {
+            // Only hide currently-visible elements. Toggling an already-hidden nucleotide
+            // would make it visible again, which we explicitly want to avoid.
+            if (e.getInstanceParameter3('visibility').x !== 0) {
+                e.toggleVisibility();
+            }
+            affectedSystems.add(e.getSystem());
+        });
+        affectedSystems.forEach(sys => sys.callUpdates(['instanceVisibility']));
+        if (tmpSystems.length > 0) {
+            tmpSystems.forEach(sys => sys.callUpdates(['instanceVisibility']));
+        }
+        // Restore the user's original selection.
+        invertSelection();
+        // Enter split mode iff we resolved a single target helix.
+        this.splitTargetHelixId = targetHelixId;
+        this.setSplitFromSelectedEnabled(targetHelixId !== null);
+        if (targetHelixId !== null) {
+            notify(`Split mode: helix ${targetHelixId}. Select nucleotides, then click "Split from selected".`, 'success');
+        }
+        render();
+    }
+    // Enable/disable the "Split from selected" button by id. Safe to call when the DOM isn't
+    // ready — the lookup just no-ops.
+    setSplitFromSelectedEnabled(enabled) {
+        const btn = document.getElementById('scadnanoGridSplitFromSelectedBtn');
+        if (btn)
+            btn.disabled = !enabled;
+    }
+    // Make every nucleotide across all systems visible. Used after a split completes so the user
+    // sees the full structure again. Iterates like toggleVisArbitrary: only toggle bases whose
+    // visibility.x is currently 0.
+    restoreAllVisibility() {
+        const affected = new Set();
+        systems.forEach(sys => {
+            sys.strands.forEach(strand => {
+                strand.forEach((mono) => {
+                    if (mono.getInstanceParameter3('visibility').x === 0) {
+                        mono.toggleVisibility();
+                        affected.add(sys);
+                    }
+                });
+            });
+        });
+        affected.forEach(sys => sys.callUpdates(['instanceVisibility']));
+        if (tmpSystems.length > 0) {
+            tmpSystems.forEach(sys => sys.callUpdates(['instanceVisibility']));
+        }
+    }
+    // Triggered by the "Split from selected" button. Splits `splitTargetHelixId` into two helices
+    // along the boundary defined by the currently-selected nucleotides: the selected bases move
+    // into a brand-new helix, the rest of the original helix stays put. Cascades the split
+    // through the grid editor, helixPos, connection list, and locked-helix colors, then restores
+    // visibility so the user sees the whole scene again.
+    splitFromSelectedGridView() {
+        if (this.splitTargetHelixId === null) {
+            notify('Click "Split helices" on a selected helix first.', 'warning');
+            return;
+        }
+        const editor = this.scadnanoGridEditor;
+        if (!editor || !this.currentScadnanoLayout) {
+            notify('Open the scadnano grid view before splitting.', 'warning');
+            return;
+        }
+        if (selectedBases.size === 0) {
+            notify('Select the nucleotides to peel off first.', 'warning');
+            return;
+        }
+        if (this.lockedHelices.has(this.splitTargetHelixId)) {
+            notify(`Cannot split: helix ${this.splitTargetHelixId} is locked. Unlock it first.`, 'warning');
+            return;
+        }
+        const helices = this.ensureScadnanoHelicesCache();
+        if (!helices) {
+            notify('Helix data is not yet available.', 'alert');
+            return;
+        }
+        const targetHelixId = this.splitTargetHelixId;
+        const grid = this.currentScadnanoLayout.grid;
+        const helixPos = this.currentScadnanoLayout.helixPos;
+        // Only keep selected bases that (a) are Nucleotides and (b) currently belong to the
+        // target helix. Bases hidden or from other helices are silently ignored.
+        const nucleotidesToMove = [];
+        selectedBases.forEach(e => {
+            if (!(e instanceof Nucleotide))
+                return;
+            const mark = grid.get(e.id);
+            if (!mark || mark.helixId !== targetHelixId)
+                return;
+            nucleotidesToMove.push(e);
+        });
+        if (nucleotidesToMove.length === 0) {
+            notify(`None of the selected nucleotides belong to helix ${targetHelixId}.`, 'warning');
+            return;
+        }
+        const result = toscad.splitHelix(grid, helixPos, targetHelixId, helices, nucleotidesToMove);
+        if (!result) {
+            notify(`Split failed for helix ${targetHelixId} (check console).`, 'alert');
+            return;
+        }
+        const { keptHelixId, newHelixId, helixApos, helixBpos } = result;
+        // Cascade the split into the grid editor. Existing node ids/positions are unchanged;
+        // just add a new node for the freshly-created helix at helixBpos.
+        if (typeof editor.addNode === 'function') {
+            editor.addNode({ id: newHelixId, col: helixBpos[0], row: helixBpos[1], label: String(newHelixId) });
+        }
+        // The two halves used to share physical crossovers, so add a visual connection between
+        // them. Dedupes against the existing list.
+        const connKey = keptHelixId < newHelixId
+            ? `${keptHelixId}:${newHelixId}`
+            : `${newHelixId}:${keptHelixId}`;
+        const existing = new Set(this.currentScadnanoConnections.map(([a, b]) => a < b ? `${a}:${b}` : `${b}:${a}`));
+        if (!existing.has(connKey)) {
+            this.currentScadnanoConnections.push([keptHelixId, newHelixId]);
+        }
+        if (typeof editor.setConnections === 'function') {
+            editor.setConnections(this.currentScadnanoConnections);
+        }
+        // Refresh downstream caches from the editor (adds newHelixId to helixPos).
+        this.syncLayoutHelixPosFromEditor();
+        this.publishCurrentHelixPosFromEditor();
+        // Keep lock colors correct — the new node inherits the default (unlocked) color, but
+        // applyLockedColors is idempotent so this is a cheap way to guarantee consistency.
+        this.applyLockedColors();
+        if (typeof editor.clearSelection === 'function')
+            editor.clearSelection();
+        // Bring every hidden nucleotide back into view so the user sees the whole structure.
+        this.restoreAllVisibility();
+        // Exit split mode.
+        this.splitTargetHelixId = null;
+        this.setSplitFromSelectedEnabled(false);
+        notify(`Split helix ${keptHelixId}: moved ${nucleotidesToMove.length} nt into new helix ${newHelixId} ` +
+            `at [${helixBpos[0]},${helixBpos[1]}] (kept helix ${keptHelixId} at [${helixApos[0]},${helixApos[1]}]).`, 'success');
+        render();
     }
     // Triggered by the "Combine" button in the grid view.
     // Merges the helices currently selected in the grid editor into the lowest-numbered one,
@@ -620,6 +796,8 @@ class ScadnanoExportManager {
         if (this.scadnanoGridEditor)
             this.scadnanoGridEditor.lockedHelices = new Set();
         this.clearHistory();
+        this.splitTargetHelixId = null;
+        this.setSplitFromSelectedEnabled(false);
     }
     hideScadnanoGridPane() {
         document.body.classList.remove('scadnano-grid-open');
@@ -627,6 +805,8 @@ class ScadnanoExportManager {
         if (this.scadnanoGridEditor)
             this.scadnanoGridEditor.lockedHelices = new Set();
         this.clearHistory();
+        this.splitTargetHelixId = null;
+        this.setSplitFromSelectedEnabled(false);
     }
     toggleGridDropdown(checkboxElement) {
         const gridDropdown = document.getElementById('scadnanoGrid');
@@ -1211,6 +1391,18 @@ class ScadnanoExportManager {
         if (combineBtn) {
             combineBtn.addEventListener('click', () => {
                 this.combineSelectedHelicesFromGridView();
+            });
+        }
+        const splitHelicesBtn = document.getElementById('scadnanoGridSplitHelicesBtn');
+        if (splitHelicesBtn) {
+            splitHelicesBtn.addEventListener('click', () => {
+                this.splitHelicesFromGridView();
+            });
+        }
+        const splitFromSelectedBtn = document.getElementById('scadnanoGridSplitFromSelectedBtn');
+        if (splitFromSelectedBtn) {
+            splitFromSelectedBtn.addEventListener('click', () => {
+                this.splitFromSelectedGridView();
             });
         }
         const lockHelicesBtn = document.getElementById('scadnanoGridLockHelicesBtn');

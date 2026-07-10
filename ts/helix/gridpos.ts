@@ -755,6 +755,157 @@ namespace toscad {
         return touched;
     }
 
+    // Chebyshev-ring expanding search for the closest (col,row) cell not present in `occupied`.
+    // Rings d = 1, 2, 3, ... are traversed in a stable (dCol, dRow) order so the result is
+    // deterministic. Lattice-agnostic: the visual scadnano grid places one helix per cell
+    // regardless of honeycomb/square adjacency, so plain Chebyshev distance is sufficient.
+    function findNearestOpenPos(
+        anchor: [number, number],
+        occupied: Set<string>,
+        maxRadius: number = 10000
+    ): [number, number] {
+        const keyOf = (c: number, r: number) => `${c},${r}`;
+        const [ac, ar] = anchor;
+        if (!occupied.has(keyOf(ac, ar))) return [ac, ar];
+
+        for (let d = 1; d <= maxRadius; d++) {
+            for (let dc = -d; dc <= d; dc++) {
+                for (let dr = -d; dr <= d; dr++) {
+                    if (Math.max(Math.abs(dc), Math.abs(dr)) !== d) continue;
+                    const c = ac + dc;
+                    const r = ar + dr;
+                    if (!occupied.has(keyOf(c, r))) return [c, r];
+                }
+            }
+        }
+
+        // Fallback (unreachable in practice): walk along +col until an empty column is found.
+        let c = ac + maxRadius + 1;
+        while (occupied.has(keyOf(c, ar))) c += 1;
+        return [c, ar];
+    }
+
+    // Splits `helixId` into two helices along the boundary defined by `nucleotides`:
+    //   - The nucleotides passed in are moved into a brand-new helix appended to `helices[]`.
+    //   - The remaining nucleotides stay in the original helix (helixApos = original position).
+    //   - GridMap marks for the moved nucleotides get their `helixId` remapped to the new helix,
+    //     while their `offset` and `direction` are left untouched — so the physical layout of
+    //     every base (its column and strand direction) is preserved across the split.
+    //   - The new helix is placed in the visual grid at the closest available empty cell to
+    //     the original helix's position (Chebyshev-ring search via findNearestOpenPos).
+    //
+    // Returns the two positions plus references to the same (now mutated) helices, GridMap, and
+    // helixPos. Caller is expected to trigger downstream refreshes (editor node list, angle
+    // recalc, etc.) themselves.
+    //
+    // Returns null on invalid input:
+    //   - helixId out of range,
+    //   - no nucleotides passed,
+    //   - no helixPos entry for helixId,
+    //   - none of the supplied nucleotides actually belong to helixId,
+    //   - all of helixId's nucleotides are being moved (nothing left to keep).
+    export function splitHelix(
+        grid: GridMap,
+        helixPos: Map<number, [number, number]>,
+        helixId: number,
+        helices: Nucleotide[][],
+        nucleotides: Nucleotide[]
+    ): {
+        keptHelixId: number;
+        newHelixId: number;
+        helixApos: [number, number];
+        helixBpos: [number, number];
+        helices: Nucleotide[][];
+        grid: GridMap;
+        helixPos: Map<number, [number, number]>;
+    } | null {
+        if (helixId < 0 || helixId >= helices.length) {
+            console.warn(`[splitHelix] helixId=${helixId} out of range (helices.length=${helices.length})`);
+            return null;
+        }
+        if (!Array.isArray(nucleotides) || nucleotides.length === 0) {
+            console.warn('[splitHelix] no nucleotides supplied to split off');
+            return null;
+        }
+        const anchor = helixPos.get(helixId);
+        if (!anchor) {
+            console.warn(`[splitHelix] no helixPos entry for helixId=${helixId}`);
+            return null;
+        }
+
+        // Build lookup of ids to move.
+        const moveIds = new Set<number>();
+        for (const nt of nucleotides) {
+            if (nt instanceof Nucleotide) moveIds.add(nt.id);
+        }
+
+        // Partition the current helix's nucleotides. A nucleotide is only moved when both
+        //   (a) it's in the caller's move list, AND
+        //   (b) its GridMark still claims membership in helixId.
+        // (b) protects against stale selections from a previous split/combine.
+        const currentHelixNts = helices[helixId] ?? [];
+        const keepList: Nucleotide[] = [];
+        const moveList: Nucleotide[] = [];
+        for (const nt of currentHelixNts) {
+            if (!moveIds.has(nt.id)) {
+                keepList.push(nt);
+                continue;
+            }
+            const mark = grid.get(nt.id);
+            if (!mark || mark.helixId !== helixId) {
+                keepList.push(nt);
+                continue;
+            }
+            moveList.push(nt);
+        }
+
+        if (moveList.length === 0) {
+            console.warn(`[splitHelix] none of the supplied nucleotides belong to helix ${helixId}`);
+            return null;
+        }
+        if (keepList.length === 0) {
+            console.warn(`[splitHelix] all nucleotides of helix ${helixId} are being moved; nothing to keep`);
+            return null;
+        }
+
+        // Apply the structural split. The new helix takes the next free slot at the end of the
+        // helices[] array.
+        const newHelixId = helices.length;
+        helices[helixId] = keepList;
+        helices.push(moveList);
+
+        // Remap GridMap membership. Offsets and directions stay put per spec.
+        for (const nt of moveList) {
+            const mark = grid.get(nt.id);
+            if (mark) mark.helixId = newHelixId;
+        }
+
+        // Place the new helix in the closest empty visual-grid cell to the original.
+        const helixApos: [number, number] = [anchor[0], anchor[1]];
+        const occupiedKeys = new Set<string>();
+        for (const pos of helixPos.values()) {
+            occupiedKeys.add(`${pos[0]},${pos[1]}`);
+        }
+        const helixBpos = findNearestOpenPos(helixApos, occupiedKeys);
+        helixPos.set(newHelixId, helixBpos);
+
+        console.log(
+            `[splitHelix] split helix ${helixId} (${currentHelixNts.length} nts) -> ` +
+            `kept ${keepList.length} nts at [${helixApos[0]},${helixApos[1]}], ` +
+            `moved ${moveList.length} nts into new helix ${newHelixId} at [${helixBpos[0]},${helixBpos[1]}]`
+        );
+
+        return {
+            keptHelixId: helixId,
+            newHelixId,
+            helixApos,
+            helixBpos,
+            helices,
+            grid,
+            helixPos
+        };
+    }
+
     /* If 2 helices have the same angle as given by getAngleHelix, then check if they are disjoint (big)? If yes, then merge them.
     If they have the same angle and are NOT disjoint, then check anglecorr() function.
     */

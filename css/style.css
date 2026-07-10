@@ -40,7 +40,7 @@ body {
   top: 0;
   left: 0;
   width: 100%;
-  height: calc(100% - 156px);
+  height: calc(100% - 192px);
   z-index: 1;
 }
 
@@ -68,6 +68,8 @@ body {
 #scadnanoGridMissingBtn,
 #scadnanoGridExportBtn,
 #scadnanoGridCombineBtn,
+#scadnanoGridSplitHelicesBtn,
+#scadnanoGridSplitFromSelectedBtn,
 #scadnanoGridUndoBtn,
 #scadnanoGridRedoBtn,
 #scadnanoGridLockHelicesBtn,
@@ -101,34 +103,48 @@ body {
   bottom: 44px;
 }
 
-/* Undo / Redo share a row above the Lock/Recalc row. */
-#scadnanoGridUndoBtn {
-  bottom: 116px;
+/* Split helices / Split from selected share a row above Combine. */
+#scadnanoGridSplitHelicesBtn {
+  bottom: 80px;
   left: 12px;
   width: calc(50% - 18px);
 }
 
-#scadnanoGridRedoBtn {
-  bottom: 116px;
+#scadnanoGridSplitFromSelectedBtn {
+  bottom: 80px;
   right: 12px;
   width: calc(50% - 18px);
 }
 
-/* Lock Helices / Recalculate Grid share a row between Undo/Redo and Combine. */
+/* Lock Helices / Recalculate Grid share a row above the Split row. */
 #scadnanoGridLockHelicesBtn {
-  bottom: 80px;
+  bottom: 116px;
   left: 12px;
   width: calc(50% - 18px);
 }
 
 #scadnanoGridRecalcBtn {
-  bottom: 80px;
+  bottom: 116px;
+  right: 12px;
+  width: calc(50% - 18px);
+}
+
+/* Undo / Redo share the top row. */
+#scadnanoGridUndoBtn {
+  bottom: 152px;
+  left: 12px;
+  width: calc(50% - 18px);
+}
+
+#scadnanoGridRedoBtn {
+  bottom: 152px;
   right: 12px;
   width: calc(50% - 18px);
 }
 
 #scadnanoGridUndoBtn:disabled,
-#scadnanoGridRedoBtn:disabled {
+#scadnanoGridRedoBtn:disabled,
+#scadnanoGridSplitFromSelectedBtn:disabled {
   color: #9a9a9a;
   background: #f4f4f4;
   cursor: not-allowed;
@@ -137,10 +153,12 @@ body {
 #scadnanoGridMissingBtn:hover,
 #scadnanoGridExportBtn:hover,
 #scadnanoGridCombineBtn:hover,
+#scadnanoGridSplitHelicesBtn:hover,
 #scadnanoGridLockHelicesBtn:hover,
 #scadnanoGridRecalcBtn:hover,
 #scadnanoGridUndoBtn:not(:disabled):hover,
-#scadnanoGridRedoBtn:not(:disabled):hover {
+#scadnanoGridRedoBtn:not(:disabled):hover,
+#scadnanoGridSplitFromSelectedBtn:not(:disabled):hover {
   background: #f4f4f4;
 }
 
