@@ -4,9 +4,9 @@
 /// <reference path="../main.ts" />
 /*
 // for ease of use, and to prevent dumb mistakes as I code and test things out, here is exactly the commands to use this in console:
-findBasepairs3(); // use 3 because there are 2 versions of findBasepairs, and 3 is the fastest. Dont ask why i named it that.
+findBasepairs(); // use 3 because there are 2 versions of findBasepairs, and 3 is the fastest. Dont ask why i named it that.
 helix.dropIntraStrandPairs();
-let {partials, unpaired} = helix.findHelixPartials(elements, 2);
+let {partials, unpaired} = helix.findHelixPartials2(elements, 2);
 let {ssdna, stubs, longssScaffold} = helix.ssdnaPartials(unpaired);
 let ssScaffold = helix.longssScaffoldfunc(longssScaffold, stubs);
 let {helices, lastScraps, binders, binder2, disconnected, unhandled} = helix.generateHelix(partials, ssdna, ssScaffold, stubs);
@@ -31,7 +31,7 @@ elements.forEach(nt=>{
 })
 */
 // For even easier use, just run:
-// let helices = await helix.findHelices(elements, 2);
+// let {helices, partials, usedSides} = await helix.findHelices(elements, 2);
 var helix;
 (function (helix_1) {
     // helper function cuz didnt want to type this every time

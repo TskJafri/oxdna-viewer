@@ -840,6 +840,12 @@ var toscad;
         const latticeType = resolveLatticeKind(lattice);
         const correctionStep = latticeType === 'square' ? 90 : 120;
         const maxLatticeAngles = latticeType === 'square' ? 4 : 3;
+        // Crossover-weighted vote ledger. Built ONCE — anglecorr only rotates
+        // helices (it never merges or deletes physical crossovers), so the
+        // grid's crossover topology is stable for the whole pass loop.
+        // getConnectionCounts(grid)[candidate][neighbor] = number of
+        // backbone crossovers between candidate and neighbor.
+        const connectionCounts = getConnectionCounts(grid);
         let pass = 0;
         while (pass++ < 200) {
             const collisionReports = angleCollisions(networkMap);
@@ -875,8 +881,72 @@ var toscad;
                                     `collision at angle=${conflict.angle}; no empty ${latticeType} slots available`);
                                 continue;
                             }
-                            const pairDescending = [helixA, helixB].sort((a, b) => b - a);
-                            let adjustedHelix = pairDescending.find((hId) => hId !== baseHelix) ?? pairDescending[0];
+                            // ── Crossover-Weighted Geometric Consensus ──────
+                            // For each candidate X ∈ {A, B}, compute its
+                            // "consensus mass" = Σ crossover_count(X, N) over
+                            // all neighbors N of X other than the source helix
+                            // (we are arbitrating that relationship) and the
+                            // other candidate (scored in isolation).
+                            //
+                            // Rationale: a massive, true structural body will
+                            // have deep lattice support — many crossovers into
+                            // the surrounding mesh. A frayed "ghost fragment"
+                            // of a couple of nucleotides will have near-zero
+                            // support. The crossover count is the voting
+                            // currency, the networkMap entries are the
+                            // geometric-agreement gate (a neighbor with no
+                            // defined angle relationship cannot cast a vote).
+                            const scoreContested = (candidateId) => {
+                                const neighborMap = networkMap.get(candidateId);
+                                if (!neighborMap)
+                                    return { mass: 0, voterCount: 0 };
+                                const weightRow = connectionCounts.get(candidateId);
+                                let mass = 0;
+                                let voterCount = 0;
+                                for (const neighborId of neighborMap.keys()) {
+                                    if (neighborId === sourceHelix)
+                                        continue;
+                                    if (neighborId === helixA || neighborId === helixB)
+                                        continue;
+                                    const weight = weightRow?.get(neighborId) ?? 0;
+                                    if (weight <= 0)
+                                        continue;
+                                    mass += weight;
+                                    voterCount++;
+                                }
+                                return { mass, voterCount };
+                            };
+                            const baseInPair = (helixA === baseHelix || helixB === baseHelix)
+                                ? baseHelix
+                                : null;
+                            let adjustedHelix;
+                            let decisionLog;
+                            if (baseInPair !== null) {
+                                // The 0° reference for source is inviolate.
+                                adjustedHelix = (helixA === baseInPair) ? helixB : helixA;
+                                decisionLog = `baseHelix=${baseInPair} inviolate`;
+                            }
+                            else {
+                                const { mass: massA, voterCount: votersA } = scoreContested(helixA);
+                                const { mass: massB, voterCount: votersB } = scoreContested(helixB);
+                                if (massA > massB) {
+                                    adjustedHelix = helixB;
+                                    decisionLog = `helixA wins (mass=${massA}/${votersA} voters) over helixB (mass=${massB}/${votersB} voters)`;
+                                }
+                                else if (massB > massA) {
+                                    adjustedHelix = helixA;
+                                    decisionLog = `helixB wins (mass=${massB}/${votersB} voters) over helixA (mass=${massA}/${votersA} voters)`;
+                                }
+                                else {
+                                    // Tied consensus mass. Lower ID wins — a
+                                    // deterministic, structural (not
+                                    // arbitrary) tiebreaker since lower-id
+                                    // helices were placed first in
+                                    // calculateGlobalPositions.
+                                    adjustedHelix = Math.max(helixA, helixB);
+                                    decisionLog = `tied mass=${massA} (${votersA} vs ${votersB} voters); lower ID wins`;
+                                }
+                            }
                             const oldAngleValue = sourceMap.get(adjustedHelix);
                             if (oldAngleValue === undefined)
                                 continue;
@@ -911,7 +981,7 @@ var toscad;
                                 conflictAngle: conflict.angle
                             });
                             console.log(`[anglecorr] corrected source=${sourceHelix}: helix ${adjustedHelix} angle ${oldAngle} -> ${newAngle} ` +
-                                `(conflict angle=${conflict.angle})`);
+                                `(conflict angle=${conflict.angle}; decision: ${decisionLog})`);
                             correctedInThisPass = true;
                             break outer;
                         }
