@@ -180,13 +180,16 @@ class ScadnanoExportManager {
         }
     }
 
-    // Triggered by the "Recalculate Grid" button. Reruns the full layout pipeline on the
-    // Triggered by the "Recalculate Grid" button. Reruns the layout pipeline on the
-    // existing helices and grid (as the user has combined/edited them) — skipping setGrid.
-    // Pipeline: directionAlign2 → alignGridPrim → detectLatticeKind →
-    //           getAngles → anglecomb → anglecorr → calculateGlobalPositions →
-    //           renumberHelicesGNN → applyHelixRenumber → collectCrossovers.
-    // Locked helix positions are tracked by nucleotide membership so they survive renumbering.
+    // Triggered by the "Recalculate Grid" button. Reruns the layout pipeline
+    // on the existing helices and grid (as the user has combined/edited them)
+    // — skipping setGrid. The convergeLayout helper drives the full pipeline
+    // (directionAlign2 → alignGridPrim → getAngles → anglecomb → anglecorr →
+    // runAxisOverlapMerge → calculateGlobalPositions → renumberHelicesGNN →
+    // applyHelixRenumber) to a fingerprint fixed point in this call, so
+    // clicking Recalculate once reaches the same state that multiple manual
+    // clicks used to converge to. collectCrossovers runs once afterwards
+    // against the final grid. Locked helix positions are tracked by
+    // nucleotide membership so they survive renumbering.
     private recalculateGridFromScratch(): void {
         if (!this.currentScadnanoLayout) {
             notify('Open the grid view first before recalculating.', 'warning');
@@ -223,47 +226,30 @@ class ScadnanoExportManager {
                     // alignGridPrim and detectLatticeKind treat all helices as lattice members.
                     const binderHelices: number[] = [];
 
-                    toscad.directionAlign2(grid);
-                    toscad.alignGridPrim(grid, binderHelices);
-
-                    let latticeType: ScadnanoGridType;
-                    if (gridType === 'automatic') {
-                        latticeType = toscad.detectLatticeKind(grid, binderHelices);
-                        notify(`Auto-detected lattice: ${latticeType}`, 'success');
-                    } else {
-                        latticeType = gridType;
-                    }
-
-                    const angles = toscad.getAngles(grid, helices, latticeType);
-                    let networkMap = angles;
-
-                    if (!wireframe) {
-                        const corrected = toscad.anglecomb(grid, helices, latticeType, angles);
-                        const correct = toscad.anglecorr(grid, helices, latticeType, corrected.networkMap);
-                        networkMap = correct.networkMap;
-
-                        // Sweep for any axis-overlapping helices the angle chain missed.
-                        // Reuses the partials + usedSides ledger built by findHelices → generateHelix.
-                        const axisMerges = this.runAxisOverlapMerge(helices, grid, latticeType);
-                        if (axisMerges > 0) {
-                            networkMap = toscad.getAngles(grid, helices, latticeType);
-                        }
-                    }
-
-                    let helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
-
-                    const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType);
-                    const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
-                    helixPos = renumbered.helixPos;
+                    // Fixed-point loop for the entire pipeline, INCLUDING
+                    // renumberHelicesGNN + applyHelixRenumber. Renumber is
+                    // inside the loop because applyHelixRenumber rewrites
+                    // mark.helixId on the grid, which changes the identity of
+                    // helix 0 for the next iteration's directionAlign2 /
+                    // alignGridPrim. Keeping it outside was exactly why the
+                    // button previously needed 3-4 clicks to converge — each
+                    // click renumbered, the next click re-anchored, and the
+                    // state slowly stabilised. Now one click reaches the same
+                    // fixed point. See convergeLayout.
+                    const {
+                        helices: finalHelices,
+                        helixPos,
+                        latticeType
+                    } = this.convergeLayout(helices, grid, binderHelices, gridType, wireframe);
 
                     const { crossovers } = toscad.collectCrossovers(grid);
                     this.currentScadnanoConnections = this.buildScadnanoConnections(crossovers);
 
-                    this.currentScadnanoHelices = renumbered.helices;
+                    this.currentScadnanoHelices = finalHelices;
                     this.currentScadnanoLayout = {
                         latticeType,
                         nucleotideCount: this.currentScadnanoLayout!.nucleotideCount,
-                        helices: renumbered.helices,
+                        helices: finalHelices,
                         grid,
                         helixPos,
                         wireframe
@@ -1001,6 +987,126 @@ class ScadnanoExportManager {
         return helices;
     }
 
+    // Deterministic fingerprint of every mutable field the pipeline touches on
+    // the grid, plus the current helix count. `convergeLayout` compares
+    // fingerprints across iterations to decide when the pipeline has reached a
+    // fixed point — this is more reliable than checking return counts from
+    // individual stages because it catches ALL mutations (directionAlign2 flips,
+    // alignGridPrim offset shifts, anglecomb/anglecorr/axisOverlap changes)
+    // in a single signal.
+    private gridFingerprint(grid: Map<number, any>, helicesLength: number): string {
+        const ntIds = Array.from(grid.keys()).sort((a, b) => a - b);
+        const parts: string[] = [`h=${helicesLength}`];
+        for (const ntId of ntIds) {
+            const m = grid.get(ntId);
+            parts.push(`${ntId}:${m.helixId}:${m.offset}:${m.direction === 'forward' ? 'f' : 'b'}`);
+        }
+        return parts.join('|');
+    }
+
+    private convergeLayout(
+        helicesIn: Nucleotide[][],
+        grid: any,
+        binderHelices: number[],
+        requestedLatticeType: ScadnanoRequestedGridType,
+        wireframe: boolean
+    ): {
+        helices: Nucleotide[][];
+        helixPos: HelixPosMap;
+        latticeType: ScadnanoGridType;
+        networkMap: Map<number, Map<number, number>>;
+    } {
+        let helices = helicesIn;
+        let latticeType: ScadnanoGridType;
+        let networkMap: Map<number, Map<number, number>>;
+        let helixPos: HelixPosMap;
+
+        // ── Wireframe: EXACTLY one pass, no loop ─────────────────────────────
+        if (wireframe) {
+            toscad.directionAlign2(grid);
+            toscad.alignGridPrim(grid, binderHelices);
+
+            if (requestedLatticeType === 'automatic') {
+                latticeType = toscad.detectLatticeKind(grid, binderHelices);
+                notify(`Auto-detected lattice: ${latticeType}`, 'success');
+            } else {
+                latticeType = requestedLatticeType;
+            }
+
+            networkMap = toscad.getAngles(grid, helices, latticeType);
+            helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
+
+            const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType);
+            const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
+            helices = renumbered.helices;
+            helixPos = renumbered.helixPos;
+
+            console.log(`[scadnano] convergeLayout (wireframe) — single pass, no iteration`);
+            return { helices, helixPos, latticeType, networkMap };
+        }
+
+        // ── Non-wireframe: fingerprint fixed-point loop ─────────────────────
+        let latticeTypeSet: ScadnanoGridType | null = null;
+        networkMap = new Map();
+        helixPos = new Map();
+        let prevFp = '';
+        // Iteration cap for the fixed-point loop.
+        const MAX_ITER = 7;
+
+        for (let iter = 1; iter <= MAX_ITER; iter++) {
+            toscad.directionAlign2(grid);
+            toscad.alignGridPrim(grid, iter === 1 ? binderHelices : []);
+
+            // Resolve 'automatic' once, after the first alignment (detection
+            // reads helixId / offset / direction off the aligned grid). Freeze
+            // the choice for the rest of the loop.
+            if (latticeTypeSet === null) {
+                if (requestedLatticeType === 'automatic') {
+                    latticeTypeSet = toscad.detectLatticeKind(grid, binderHelices);
+                    notify(`Auto-detected lattice: ${latticeTypeSet}`, 'success');
+                } else {
+                    latticeTypeSet = requestedLatticeType;
+                }
+            }
+
+            networkMap = toscad.getAngles(grid, helices, latticeTypeSet);
+
+            const combResult = toscad.anglecomb(grid, helices, latticeTypeSet, networkMap);
+            networkMap = combResult.networkMap;
+
+            const corrResult = toscad.anglecorr(grid, helices, latticeTypeSet, networkMap);
+            networkMap = corrResult.networkMap;
+
+            this.runAxisOverlapMerge(helices, grid, latticeTypeSet);
+
+            // Refresh angles so calculateGlobalPositions sees the final
+            // post-mutation state.
+            networkMap = toscad.getAngles(grid, helices, latticeTypeSet);
+
+            helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeTypeSet);
+
+            // Renumber inside the loop. Each pass' renumber rewrites helix ids
+            // on the grid; the next pass' directionAlign2 / alignGridPrim then
+            // anchor on the newly-designated helix 0. Once the numbering
+            // matches the GNN canonical order and mutations have settled, the
+            // remap is identity and the fingerprint stops changing.
+            const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeTypeSet);
+            const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
+            helices = renumbered.helices;
+            helixPos = renumbered.helixPos;
+
+            const fp = this.gridFingerprint(grid, helices.length);
+            if (fp === prevFp) {
+                console.log(`[scadnano] convergeLayout converged in ${iter} pass${iter === 1 ? '' : 'es'}`);
+                return { helices, helixPos, latticeType: latticeTypeSet, networkMap };
+            }
+            prevFp = fp;
+        }
+
+        console.warn(`[scadnano] convergeLayout hit iteration cap ${MAX_ITER}; using last state.`);
+        return { helices, helixPos, latticeType: latticeTypeSet ?? 'honeycomb', networkMap };
+    }
+
     // Build the partialEnds + partialAxes inputs for hashAxisOverlap from the
     // cached findHelices output, run hashAxisOverlap, and feed the resulting
     // merge pairs into helix.applyAxisOverlapMerge. Returns the number of
@@ -1051,52 +1157,19 @@ class ScadnanoExportManager {
         this.currentScadnanoHelices = helices;
 
         const { grid, binderHelices } = toscad.setGrid(helices);
-        toscad.directionAlign2(grid);
-        toscad.alignGridPrim(grid, binderHelices);
 
-        // Resolve 'automatic' once the grid is built — detection reads helixId,
-        // offset and direction off the grid via crossoverNts. Binder helices are
-        // excluded from the lattice vote because their crossover spacing is
-        // non-standard (attach points to scaffold from outside the lattice).
-        let latticeType: ScadnanoGridType;
-        if (requestedLatticeType === 'automatic') {
-            latticeType = toscad.detectLatticeKind(grid, binderHelices);
-            notify(`Auto-detected lattice: ${latticeType}`, 'success');
-        } else {
-            latticeType = requestedLatticeType;
-        }
-
-        const angles = toscad.getAngles(grid, helices, latticeType);
-        let networkMap = angles;
-
-        if (!wireframe) {
-            const corrected = toscad.anglecomb(grid, helices, latticeType, angles);
-            const correct = toscad.anglecorr(grid, helices, latticeType, corrected.networkMap);
-            networkMap = correct.networkMap;
-
-            // Sweep for any axis-overlapping helices the angle chain missed and merge them.
-            // Reuses the partials + usedSides ledger built by findHelices → generateHelix.
-            // Refresh getAngles afterwards so networkMap reflects the post-merge state.
-            const axisMerges = this.runAxisOverlapMerge(helices, grid, latticeType);
-            if (axisMerges > 0) {
-                networkMap = toscad.getAngles(grid, helices, latticeType);
-            }
-        }
-
-        // Initial helix grid positions (still using pre-renumber helix IDs).
-        let helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
-
-        // Renumber helices so consecutive IDs share crossovers when possible.
-        // Runs after combine (anglecomb), so it operates on the final helix
-        // count. Mutates `grid` in place; produces a renumbered helices
-        // array and a helixPos map keyed by new IDs.
-        const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType);
-        const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
-        const finalHelices = renumbered.helices;
-        helixPos = renumbered.helixPos;
+        // Iterate the whole pipeline — directionAlign2 → alignGridPrim →
+        // getAngles → anglecomb → anglecorr → runAxisOverlapMerge →
+        // calculateGlobalPositions → renumberHelicesGNN → applyHelixRenumber
+        // — to a fingerprint fixed point. Renumber is INSIDE the loop because
+        // it rewrites helix ids on the grid, which changes the anchor for the
+        // next iteration's directionAlign2 / alignGridPrim; see convergeLayout.
+        const { helices: finalHelices, helixPos, latticeType } = this.convergeLayout(
+            helices, grid, binderHelices, requestedLatticeType, wireframe
+        );
         this.currentScadnanoHelices = finalHelices;
 
-        // Build connections AFTER renumber so they reference the new IDs.
+        // Build connections AFTER convergence so they reference the final IDs.
         const { crossovers } = toscad.collectCrossovers(grid);
         this.currentScadnanoConnections = this.buildScadnanoConnections(crossovers);
 
