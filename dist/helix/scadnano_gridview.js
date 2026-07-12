@@ -42,7 +42,7 @@ var scadnano;
     // Ghost dot radius (background grid marker)
     const GHOST_RADIUS = 0.14;
     // All dots (grid ghosts + nodes) use one shared blue.
-    const DOT_COLOR = 0x00A8E0;
+    const DOT_COLOR = 0x55C1FF;
     const RING_DEFAULT_COLOR = 0x000000;
     const RING_SELECTED_COLOR = 0xff4da6;
     // ── Coordinate helpers ────────────────────────────────────────────────────
@@ -699,7 +699,7 @@ var scadnano;
                 return new THREE.Sprite(fallbackMat);
             }
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.font = 'bold 30px Arial';
+            ctx.font = 'bold 38px Arial';
             ctx.fillStyle = '#111111';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
@@ -852,14 +852,18 @@ var scadnano;
             e.preventDefault();
             const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
             const cam = this.camera;
-            // Zoom around the mouse cursor
+            // Zoom around the mouse cursor.
+            // The frustum (left/right/top/bottom) lives in the camera's local frame, so we
+            // must compute the cursor's position in that same frame — NOT in world space.
+            // Mixing cam.position.x/y in here (which _ndcToWorld does) makes the zoom drift
+            // toward the camera's world position as soon as the user has panned the view.
             const ndc = this._screenToNDC(e.clientX, e.clientY);
-            const wx = this._ndcToWorld(ndc).x;
-            const wy = this._ndcToWorld(ndc).y;
-            cam.left = (cam.left - wx) * factor + wx;
-            cam.right = (cam.right - wx) * factor + wx;
-            cam.top = (cam.top - wy) * factor + wy;
-            cam.bottom = (cam.bottom - wy) * factor + wy;
+            const lx = ndc.x * (cam.right - cam.left) / 2 + (cam.right + cam.left) / 2;
+            const ly = ndc.y * (cam.top - cam.bottom) / 2 + (cam.top + cam.bottom) / 2;
+            cam.left = (cam.left - lx) * factor + lx;
+            cam.right = (cam.right - lx) * factor + lx;
+            cam.top = (cam.top - ly) * factor + ly;
+            cam.bottom = (cam.bottom - ly) * factor + ly;
             cam.updateProjectionMatrix();
         }
         _onResize() {

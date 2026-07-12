@@ -187,7 +187,7 @@ class ScadnanoExportManager {
         if (ids.length === 0)
             return;
         const LOCKED_COLOR = 0x808080;
-        const UNLOCKED_COLOR = 0x00A8E0; // DOT_COLOR from scadnano_gridview.ts
+        const UNLOCKED_COLOR = 0x55C1FF; // DOT_COLOR from scadnano_gridview.ts
         ids.forEach(id => {
             if (this.lockedHelices.has(id)) {
                 this.lockedHelices.delete(id);
@@ -741,7 +741,7 @@ class ScadnanoExportManager {
         if (!editor || typeof editor.setNodeColor !== 'function')
             return;
         const LOCKED_COLOR = 0x808080;
-        const UNLOCKED_COLOR = 0x00A8E0;
+        const UNLOCKED_COLOR = 0x55C1FF;
         const nodes = typeof editor.getNodes === 'function'
             ? editor.getNodes()
             : [];
