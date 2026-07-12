@@ -1409,17 +1409,76 @@
 
         <!--Scadnano grid pane-->
         <div id="scadnanoGridPane">
-        <button id="scdgridClose" type="button" title="Close grid" aria-label="Close grid">&times;</button>
+        <nav id="scadnanoGridToolbar" class="ribbon-menu" aria-label="Grid view toolbar">
+            <ul class="tabs-holder">
+                <li class="tab-undo-redo">
+                    <div id="scadnanoGridUndoRedoGroup" role="group" aria-label="History">
+                        <button id="scadnanoGridUndoBtn" type="button" title="Undo last edit (cmd/ctrl+z)" aria-label="Undo" disabled>
+                            <span class="mif-undo" aria-hidden="true"></span>
+                        </button>
+                        <button id="scadnanoGridRedoBtn" type="button" title="Redo (cmd/ctrl+shift+z)" aria-label="Redo" disabled>
+                            <span class="mif-redo" aria-hidden="true"></span>
+                        </button>
+                    </div>
+                </li>
+                <li class="tab-section active" data-section="edit">
+                    <button type="button" title="Edit">Edit</button>
+                </li>
+                <li class="tab-section" data-section="export">
+                    <button type="button" title="Export">Export</button>
+                </li>
+                <li class="tab-close">
+                    <button id="scdgridClose" type="button" title="Close grid" aria-label="Close grid">&times;</button>
+                </li>
+            </ul>
+            <div class="content-holder">
+                <div class="section active" id="scadnano-section-edit" data-section="edit">
+                    <div class="group">
+                        <button id="scadnanoGridLockHelicesBtn" class="ribbon-button" type="button" title="Toggle lock/unlock on selected helices">
+                            <span class="mif-lock mif-2x" aria-hidden="true"></span>
+                            <span class="caption">Lock/Unlock</span>
+                        </button>
+                        <span class="title">Lock/Unlock Helices</span>
+                    </div>
+                    <div class="group">
+                        <button id="scadnanoGridSplitHelicesBtn" class="ribbon-button" type="button" title="Split helix">
+                            <span class="mif-split mif-2x" aria-hidden="true"></span>
+                            <span class="caption">Split</span>
+                        </button>
+                        <button id="scadnanoGridSplitFromSelectedBtn" class="ribbon-button" type="button" title="Split from selected" disabled>
+                            <span class="mif-flow-tree mif-2x" aria-hidden="true"></span>
+                            <span class="caption">From sel.</span>
+                        </button>
+                        <span class="title">Split helices</span>
+                    </div>
+                    <div class="group">
+                        <button id="scadnanoGridCombineBtn" class="ribbon-button" type="button" title="Combine the selected helices into the lowest-numbered one">
+                            <span class="mif-merge mif-2x" aria-hidden="true"></span>
+                            <span class="caption">Combine</span>
+                        </button>
+                        <span class="title">Combine</span>
+                    </div>
+                    <div class="group">
+                        <button id="scadnanoGridRecalcBtn" class="ribbon-button" type="button" title="Recalculate grid">
+                            <span class="mif-calc mif-2x" aria-hidden="true"></span>
+                            <span class="caption">Recalculate</span>
+                        </button>
+                        <span class="title">Recalculate Grid</span>
+                    </div>
+                </div>
+                <div class="section" id="scadnano-section-export" data-section="export">
+                    <div class="group">
+                        <button id="scadnanoGridExportBtn" class="ribbon-button" type="button" title="Export the current scadnano layout">
+                            <span class="mif-file-download mif-2x" aria-hidden="true"></span>
+                            <span class="caption">Export</span>
+                        </button>
+                        <span class="title">Export</span>
+                    </div>
+                </div>
+            </div>
+        </nav>
         <canvas id="scadnanoGridCanvas"></canvas>
         <div id="scadnanoGridResizeHandle" title="Drag to resize"></div>
-        <button id="scadnanoGridUndoBtn" type="button" title="Undo last edit (cmd/ctrl+z)" disabled>Undo</button>
-        <button id="scadnanoGridRedoBtn" type="button" title="Redo (cmd/ctrl+shift+z)" disabled>Redo</button>
-        <button id="scadnanoGridLockHelicesBtn" type="button" title="Toggle lock/unlock on selected helices">Lock/Unlock Helices</button>
-        <button id="scadnanoGridRecalcBtn" type="button" title="Recalculate grid">Recalculate Grid</button>
-        <button id="scadnanoGridSplitHelicesBtn" type="button" title="Split helix">Split helix</button>
-        <button id="scadnanoGridSplitFromSelectedBtn" type="button" title="Split from selected" disabled>Split from selected</button>
-        <button id="scadnanoGridCombineBtn" type="button" title="Combine the selected helices into the lowest-numbered one">Combine</button>
-        <button id="scadnanoGridExportBtn" type="button">Export</button>
     </div>
 
     <!--Canvas-->
@@ -1455,9 +1514,9 @@
         <script src="./dist/file_handling/aux_readers.js"></script>
         <script src="./dist/file_handling/script_reader.js"></script>
         <script src="./dist/file_handling/tacoxdna_worker.js"></script>
-        <script src="./dist/file_handling/scadnano_export.js"></script>
         <script src="./dist/helix/dsdnahelix.js"></script>
         <script src="./dist/helix/scadnano_gridview.js"></script>
+        <script src="./dist/file_handling/scadnano_export.js"></script>
         <script src="./dist/helix/conversion.js"></script>
         <script src="./dist/helix/gridpos.js"></script>
         <script src="./dist/helix/trials.js"></script>

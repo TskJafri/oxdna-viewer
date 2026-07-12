@@ -44,8 +44,8 @@ namespace scadnano {
     const NODE_RADIUS  = 0.55;
     // Ghost dot radius (background grid marker)
     const GHOST_RADIUS = 0.14;
-    // All dots (grid ghosts + nodes) use one shared yellow.
-    const DOT_COLOR = 0xffd400;
+    // All dots (grid ghosts + nodes) use one shared blue.
+    const DOT_COLOR = 0x00A8E0;
     const RING_DEFAULT_COLOR = 0x000000;
     const RING_SELECTED_COLOR = 0xff4da6;
 
@@ -1003,5 +1003,47 @@ namespace scadnano {
         constructor(canvas: HTMLCanvasElement, options: Omit<EditorOptions, 'layout'> = {}) {
             super(canvas, { ...options, layout: 'square' });
         }
+    }
+
+    /**
+     * Wire up the grid-view top toolbar (the ribbon-style tab bar that mirrors oxView's
+     * File/Edit/View/… menu). Clicking a section tab toggles the matching `.content-holder
+     * .section` into `.active`, matching the metro ribbon's section-show behavior. Only one
+     * section is visible at a time; clicking an already-active tab collapses it.
+     *
+     * Safe to call multiple times — listeners are attached once per tab.
+     */
+    export function initGridToolbar(root: ParentNode = document): void {
+        const tabs = root.querySelectorAll<HTMLLIElement>('#scadnanoGridToolbar .tabs-holder > li.tab-section');
+        const sections = root.querySelectorAll<HTMLDivElement>('#scadnanoGridToolbar .content-holder .section');
+        if (tabs.length === 0) return;
+
+        type TabWithFlag = HTMLLIElement & { __scadnanoGridToolbarWired?: boolean };
+        type SectionWithFlag = HTMLDivElement & { __scadnanoGridToolbarWired?: boolean };
+
+        const setActive = (sectionName: string | null) => {
+            sections.forEach((s) => {
+                (s as SectionWithFlag).__scadnanoGridToolbarWired = true;
+                s.classList.toggle('active', !!sectionName && s.getAttribute('data-section') === sectionName);
+            });
+            tabs.forEach((t) => {
+                t.classList.toggle('active', !!sectionName && t.getAttribute('data-section') === sectionName);
+            });
+        };
+
+        tabs.forEach((tab) => {
+            const wired = tab as TabWithFlag;
+            if (wired.__scadnanoGridToolbarWired) return;
+            wired.__scadnanoGridToolbarWired = true;
+            tab.addEventListener('click', () => {
+                const name = tab.getAttribute('data-section');
+                if (!name) return;
+                if (tab.classList.contains('active')) {
+                    setActive(null);
+                    return;
+                }
+                setActive(name);
+            });
+        });
     }
 }

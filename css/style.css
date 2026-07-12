@@ -17,6 +17,7 @@ body {
   height: 100vh;
   z-index: 3;
   display: none;
+  flex-direction: column;
   background: #ffffff;
   border-right: 1px solid #d9d9d9;
 }
@@ -36,134 +37,258 @@ body {
 }
 
 #scadnanoGridCanvas {
-  position: absolute;
-  top: 0;
-  left: 0;
+  position: relative;
+  flex: 1 1 auto;
   width: 100%;
-  height: calc(100% - 192px);
+  min-height: 0;
   z-index: 1;
 }
 
-#scdgridClose {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  width: 20px;
-  height: 20px;
-  border: 1px solid #b3b3b3;
+/* ── Grid-view top toolbar (mirrors the File/Edit/View/… ribbon). ── */
+#scadnanoGridToolbar {
+  position: relative;
+  flex: 0 0 auto;
+  width: 100%;
   background: #ffffff;
-  color: #7a7a7a;
-  font-size: 14px;
-  line-height: 1;
-  padding: 0;
-  cursor: pointer;
   z-index: 4;
 }
 
-#scdgridClose:hover {
+#scadnanoGridToolbar .tabs-holder {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  height: 24px;
+  border-bottom: 1px solid #dadbdc;
+}
+
+/* Content bar below the tabs: same shade as oxView's File/Edit/… ribbon content. */
+#scadnanoGridToolbar .content-holder {
+  display: block;
+  position: relative;
+  background-color: #f5f6f7;
+  border-left: none;
+  border-right: none;
+  border-bottom: 1px solid #dadbdc;
+}
+
+/* Collapse the content bar entirely when no ribbon section is active — otherwise the
+   empty holder still paints its background + bottom border as a ~4px gray strip
+   under the tabs. Restores the strip whenever a section becomes active. */
+#scadnanoGridToolbar .content-holder:not(:has(> .section.active)) {
+  display: none;
+}
+
+#scadnanoGridToolbar .content-holder .section {
+  display: none;
+  padding: 0;
+  height: auto; /* override metro's hard-coded height:130px that leaves a gray strip */
+  min-height: 0;
+  border-bottom: 0; /* the content-holder's 1px border is the single divider line */
+  justify-content: flex-start;
+}
+
+#scadnanoGridToolbar .content-holder .section.active {
+  display: flex;
+}
+
+#scadnanoGridToolbar .content-holder .group {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;          /* adaptive: each group grows to fill the full menu width */
+  align-items: center;          /* center the button(s) within the group */
+  justify-content: center;      /* center the button(s) within the group */
+  align-content: center;
+  padding: 4px 4px 20px;
+  background-color: inherit;
+}
+
+#scadnanoGridToolbar .content-holder .group .title {
+  display: block;
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 20px;
+  line-height: 20px;
+  font-size: 11px;
+  text-align: center;
+  border-top: 1px solid #dadbdc;
+  white-space: nowrap;
+  color: #1d1d1d;
+}
+
+#scadnanoGridToolbar .tabs-holder > li {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  line-height: 24px;
+  font-size: 12px;
+  color: #1d1d1d;
+  background: #ffffff;
+  border-left: 1px solid transparent;
+  border-right: 1px solid transparent;
+  border-bottom: 1px solid #dadbdc;
+}
+
+#scadnanoGridToolbar .tabs-holder > li + li {
+  margin-left: 3px;
+}
+
+#scadnanoGridToolbar .tabs-holder > li.tab-undo-redo {
+  padding: 0 0 0 4px;
+}
+
+#scadnanoGridToolbar .tabs-holder > li.tab-section {
+  margin-left: 3px;
+}
+
+#scadnanoGridToolbar .tabs-holder > li.tab-section.active {
+  background-color: #f5f6f7;
+  border: 1px solid #dadbdc;
+  border-bottom-color: transparent;
+}
+
+#scadnanoGridToolbar .tabs-holder > li.tab-section:hover:not(.active) {
+  background-color: rgba(164, 206, 249, 0.2);
+  border-color: #a4cef9;
+}
+
+#scadnanoGridToolbar .tabs-holder > li.tab-section > button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 0 14px;
+  font-size: 12px;
+  line-height: 24px;
+  color: #1d1d1d;
+  background: transparent;
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#scadnanoGridToolbar .tabs-holder > li.tab-close {
+  margin-left: auto;
+  padding: 0;
+  border-right: 0;
+}
+
+#scadnanoGridToolbar .tabs-holder > li.tab-close > button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  height: 100%;
+  font-size: 16px;
+  line-height: 1;
+  color: #1d1d1d;
+  background: transparent;
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#scadnanoGridToolbar .tabs-holder > li:hover {
+  border-left-color: #dadbdc;
+  border-right-color: #dadbdc;
+}
+
+#scadnanoGridToolbar .tabs-holder > li.tab-close:hover {
   background: #f4f4f4;
   color: #5f5f5f;
 }
 
-#scadnanoGridMissingBtn,
-#scadnanoGridExportBtn,
-#scadnanoGridCombineBtn,
+/* Grid-pane action buttons now live inside the Edit/Export toolbar sections as
+   metro `.ribbon-button`s. Disable the absolute-positioned legacy bottom stack and
+   let the global `.ribbon-button` rules (in metro.min.css) style them as tall
+   icon-and-caption buttons with a subtitle row beneath. We still re-assert the
+   `position: static` here in case other selectors try to keep them absolute. */
+#scadnanoGridLockHelicesBtn,
+#scadnanoGridRecalcBtn,
 #scadnanoGridSplitHelicesBtn,
 #scadnanoGridSplitFromSelectedBtn,
-#scadnanoGridUndoBtn,
-#scadnanoGridRedoBtn,
-#scadnanoGridLockHelicesBtn,
-#scadnanoGridRecalcBtn {
-  position: absolute;
-  height: 32px;
-  border: 1px solid #b7b7b7;
-  background: #ffffff;
-  color: #1d1d1d;
-  font-size: 13px;
-  cursor: pointer;
-  z-index: 4;
-}
-
-#scadnanoGridMissingBtn,
-#scadnanoGridExportBtn,
-#scadnanoGridCombineBtn {
-  left: 12px;
-  right: 12px;
-}
-
-#scadnanoGridMissingBtn {
-  bottom: 44px;
-}
-
+#scadnanoGridCombineBtn,
 #scadnanoGridExportBtn {
-  bottom: 8px;
+  position: static;
+  height: auto;
+  width: auto;
+  border: 1px solid transparent;
+  background-color: #f5f6f7;
+  color: #1d1d1d;
+  font-size: 12px;
+  cursor: pointer;
+  z-index: auto;
 }
 
-#scadnanoGridCombineBtn {
-  bottom: 44px;
+/* Metro-style blue hover on the ribbon buttons inside the content bar. */
+#scadnanoGridLockHelicesBtn:not(:disabled):hover,
+#scadnanoGridRecalcBtn:not(:disabled):hover,
+#scadnanoGridSplitHelicesBtn:not(:disabled):hover,
+#scadnanoGridSplitFromSelectedBtn:not(:disabled):hover,
+#scadnanoGridCombineBtn:not(:disabled):hover,
+#scadnanoGridExportBtn:not(:disabled):hover {
+  border-color: #a4cef9;
+  background-color: rgba(164, 206, 249, 0.2);
 }
 
-/* Split helices / Split from selected share a row above Combine. */
-#scadnanoGridSplitHelicesBtn {
-  bottom: 80px;
-  left: 12px;
-  width: calc(50% - 18px);
+/* Undo / Redo are icon-only buttons sharing the toolbar row, separated by a 1px line. */
+#scadnanoGridUndoRedoGroup {
+  display: flex;
+  align-items: stretch;
+  height: 24px;
 }
 
-#scadnanoGridSplitFromSelectedBtn {
-  bottom: 80px;
-  right: 12px;
-  width: calc(50% - 18px);
-}
-
-/* Lock Helices / Recalculate Grid share a row above the Split row. */
-#scadnanoGridLockHelicesBtn {
-  bottom: 116px;
-  left: 12px;
-  width: calc(50% - 18px);
-}
-
-#scadnanoGridRecalcBtn {
-  bottom: 116px;
-  right: 12px;
-  width: calc(50% - 18px);
-}
-
-/* Undo / Redo share the top row. */
-#scadnanoGridUndoBtn {
-  bottom: 152px;
-  left: 12px;
-  width: calc(50% - 18px);
-}
-
+#scadnanoGridUndoBtn,
 #scadnanoGridRedoBtn {
-  bottom: 152px;
-  right: 12px;
-  width: calc(50% - 18px);
+  flex: 0 0 auto;
+  min-width: 28px;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: #1d1d1d;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  transition: background-color 120ms ease;
+}
+
+/* Solid vertical divider to the right of the Undo button (between Undo and Redo). */
+#scadnanoGridUndoBtn {
+  border-right: 1px solid #dadbdc;
+}
+
+#scadnanoGridUndoBtn:hover:not(:disabled),
+#scadnanoGridRedoBtn:hover:not(:disabled) {
+  background: #f4f4f4;
+}
+
+#scadnanoGridUndoBtn:focus-visible,
+#scadnanoGridRedoBtn:focus-visible {
+  outline: 2px solid #5f5f5f;
+  outline-offset: -2px;
 }
 
 #scadnanoGridUndoBtn:disabled,
-#scadnanoGridRedoBtn:disabled,
-#scadnanoGridSplitFromSelectedBtn:disabled {
-  color: #9a9a9a;
-  background: #f4f4f4;
+#scadnanoGridRedoBtn:disabled {
+  color: #b0b0b0;
   cursor: not-allowed;
 }
 
-#scadnanoGridMissingBtn:hover,
-#scadnanoGridExportBtn:hover,
-#scadnanoGridCombineBtn:hover,
-#scadnanoGridSplitHelicesBtn:hover,
-#scadnanoGridLockHelicesBtn:hover,
-#scadnanoGridRecalcBtn:hover,
-#scadnanoGridUndoBtn:not(:disabled):hover,
-#scadnanoGridRedoBtn:not(:disabled):hover,
-#scadnanoGridSplitFromSelectedBtn:not(:disabled):hover {
-  background: #f4f4f4;
+#scadnanoGridSplitFromSelectedBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 body.scadnano-grid-open #scadnanoGridPane {
-  display: block;
+  display: flex;
 }
 
 /* Show gridview-only floating-menu items only while the scadnano grid is open. */

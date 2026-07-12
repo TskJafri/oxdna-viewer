@@ -305,7 +305,7 @@ class ScadnanoExportManager {
         if (ids.length === 0) return;
 
         const LOCKED_COLOR   = 0x808080;
-        const UNLOCKED_COLOR = 0xffd400; // DOT_COLOR from scadnano_gridview.ts
+        const UNLOCKED_COLOR = 0x00A8E0; // DOT_COLOR from scadnano_gridview.ts
 
         ids.forEach(id => {
             if (this.lockedHelices.has(id)) {
@@ -910,14 +910,14 @@ class ScadnanoExportManager {
     }
 
     // Reapply the locked (grey) color to every node currently in lockedHelices, and restore
-    // the default yellow to every other node. Called after any operation that rebuilds the
+    // the default blue to every other node. Called after any operation that rebuilds the
     // editor node set (combine, undo, redo).
     private applyLockedColors(): void {
         const editor = this.scadnanoGridEditor;
         if (!editor || typeof editor.setNodeColor !== 'function') return;
 
         const LOCKED_COLOR   = 0x808080;
-        const UNLOCKED_COLOR = 0xffd400;
+        const UNLOCKED_COLOR = 0x00A8E0;
 
         const nodes: Array<{ id: number }> = typeof editor.getNodes === 'function'
             ? editor.getNodes()
@@ -1655,6 +1655,20 @@ class ScadnanoExportManager {
     }
 
     private initScadnanoGridPaneControls(): void {
+        // Wire the top toolbar (Edit/Export tabs → content sections). The wiring lives in
+        // scadnano_gridview so it can be exported/imported cleanly. Safe to call multiple
+        // times — listeners are deduped inside.
+        // Guard against `scadnano` being undeclared: this constructor runs at script load
+        // time, before scadnano_gridview.js has declared its namespace. Without the
+        // `typeof scadnano !== 'undefined'` check, dereferencing `scadnano.initGridToolbar`
+        // throws a ReferenceError, which aborts the top-level `const scadnanoManager = ...`
+        // initialization and leaves it in permanent TDZ. Every subsequent inline onclick
+        // (e.g. scadnanoDialogExport) then fails with "Cannot access 'scadnanoManager'
+        // before initialization".
+        if (typeof scadnano !== 'undefined' && typeof (scadnano as any).initGridToolbar === 'function') {
+            (scadnano as any).initGridToolbar();
+        }
+
         const closeBtn = document.getElementById('scdgridClose');
         if (closeBtn) {
             closeBtn.addEventListener('click', () => {

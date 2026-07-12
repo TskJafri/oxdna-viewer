@@ -41,8 +41,8 @@ var scadnano;
     const NODE_RADIUS = 0.55;
     // Ghost dot radius (background grid marker)
     const GHOST_RADIUS = 0.14;
-    // All dots (grid ghosts + nodes) use one shared yellow.
-    const DOT_COLOR = 0xffd400;
+    // All dots (grid ghosts + nodes) use one shared blue.
+    const DOT_COLOR = 0x00A8E0;
     const RING_DEFAULT_COLOR = 0x000000;
     const RING_SELECTED_COLOR = 0xff4da6;
     // ── Coordinate helpers ────────────────────────────────────────────────────
@@ -893,4 +893,44 @@ var scadnano;
         }
     }
     scadnano.SquareEditor = SquareEditor;
+    /**
+     * Wire up the grid-view top toolbar (the ribbon-style tab bar that mirrors oxView's
+     * File/Edit/View/… menu). Clicking a section tab toggles the matching `.content-holder
+     * .section` into `.active`, matching the metro ribbon's section-show behavior. Only one
+     * section is visible at a time; clicking an already-active tab collapses it.
+     *
+     * Safe to call multiple times — listeners are attached once per tab.
+     */
+    function initGridToolbar(root = document) {
+        const tabs = root.querySelectorAll('#scadnanoGridToolbar .tabs-holder > li.tab-section');
+        const sections = root.querySelectorAll('#scadnanoGridToolbar .content-holder .section');
+        if (tabs.length === 0)
+            return;
+        const setActive = (sectionName) => {
+            sections.forEach((s) => {
+                s.__scadnanoGridToolbarWired = true;
+                s.classList.toggle('active', !!sectionName && s.getAttribute('data-section') === sectionName);
+            });
+            tabs.forEach((t) => {
+                t.classList.toggle('active', !!sectionName && t.getAttribute('data-section') === sectionName);
+            });
+        };
+        tabs.forEach((tab) => {
+            const wired = tab;
+            if (wired.__scadnanoGridToolbarWired)
+                return;
+            wired.__scadnanoGridToolbarWired = true;
+            tab.addEventListener('click', () => {
+                const name = tab.getAttribute('data-section');
+                if (!name)
+                    return;
+                if (tab.classList.contains('active')) {
+                    setActive(null);
+                    return;
+                }
+                setActive(name);
+            });
+        });
+    }
+    scadnano.initGridToolbar = initGridToolbar;
 })(scadnano || (scadnano = {}));
