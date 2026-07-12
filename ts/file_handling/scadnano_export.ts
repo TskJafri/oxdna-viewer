@@ -39,6 +39,7 @@ interface Window {
     toggleGridDropdown?: (checkboxElement: HTMLInputElement) => void;
     scadnanoSelectHelixFromNucleotide?: (nucleotideInput?: unknown, additive?: boolean) => void;
     scadnanoGetHelices?: () => Nucleotide[][] | null;
+    scadnanoExportHelices?: (name?: string) => void;
     scadnanoGridUndo?: () => void;
     scadnanoGridRedo?: () => void;
     scadnanoGridGetHistory?: () => any;
@@ -1005,6 +1006,34 @@ class ScadnanoExportManager {
         return this.ensureScadnanoHelicesCache();
     }
 
+    // Exports the helices[][] as a JSON file containing just the nucleotide
+    // ids grouped by helix (e.g. [[1, 2, 3], [4, 5], ...]). Intentionally does
+    // NOT include any grid positions, lattice info, or the grid map — only
+    // the helix grouping. Reuses the existing cache when possible; otherwise
+    // runs the cheap helix-detection path only (no full layout pipeline,
+    // since grid positions are deliberately excluded from the output).
+    public exportHelicesAsJson(name?: string): void {
+        let helices = this.ensureScadnanoHelicesCache();
+        if (!helices || helices.length === 0) {
+            try {
+                helices = this.calculateScadnanoHelices();
+                this.currentScadnanoHelices = helices;
+            } catch (err) {
+                notify(`Helices export failed: ${err}`, 'alert');
+                return;
+            }
+        }
+
+        if (!helices || helices.length === 0) {
+            notify('No helices available to export.', 'warning');
+            return;
+        }
+
+        const idsOnly: number[][] = helices.map(helix => helix.map(n => n.id));
+        const fileName = name && name.trim() ? `${name.trim()}.json` : 'helices.json';
+        makeTextFile(fileName, JSON.stringify(idsOnly, null, 2));
+    }
+
     public selectHelixFromNucleotide(nucleotideInput?: unknown, additive: boolean = false): void {
         if (!document.body.classList.contains('scadnano-grid-open')) return;
         if (!this.scadnanoGridEditor || typeof this.scadnanoGridEditor.selectNodeById !== 'function') return;
@@ -1686,6 +1715,13 @@ class ScadnanoExportManager {
             });
         }
 
+        const exportHelicesBtn = document.getElementById('scadnanoGridExportHelicesBtn');
+        if (exportHelicesBtn) {
+            exportHelicesBtn.addEventListener('click', () => {
+                this.exportHelicesAsJson();
+            });
+        }
+
         const combineBtn = document.getElementById('scadnanoGridCombineBtn');
         if (combineBtn) {
             combineBtn.addEventListener('click', () => {
@@ -1822,6 +1858,10 @@ function registerScadnanoWindowApi(): void {
     };
 
     window.scadnanoGetHelices = () => scadnanoManager.getHelices();
+
+    window.scadnanoExportHelices = (name?: string) => {
+        scadnanoManager.exportHelicesAsJson(name);
+    };
 
     window.scadnanoGridUndo = () => scadnanoManager.undoFromGridView();
     window.scadnanoGridRedo = () => scadnanoManager.redoFromGridView();

@@ -817,6 +817,32 @@ class ScadnanoExportManager {
     getHelices() {
         return this.ensureScadnanoHelicesCache();
     }
+    // Exports the helices[][] as a JSON file containing just the nucleotide
+    // ids grouped by helix (e.g. [[1, 2, 3], [4, 5], ...]). Intentionally does
+    // NOT include any grid positions, lattice info, or the grid map — only
+    // the helix grouping. Reuses the existing cache when possible; otherwise
+    // runs the cheap helix-detection path only (no full layout pipeline,
+    // since grid positions are deliberately excluded from the output).
+    exportHelicesAsJson(name) {
+        let helices = this.ensureScadnanoHelicesCache();
+        if (!helices || helices.length === 0) {
+            try {
+                helices = this.calculateScadnanoHelices();
+                this.currentScadnanoHelices = helices;
+            }
+            catch (err) {
+                notify(`Helices export failed: ${err}`, 'alert');
+                return;
+            }
+        }
+        if (!helices || helices.length === 0) {
+            notify('No helices available to export.', 'warning');
+            return;
+        }
+        const idsOnly = helices.map(helix => helix.map(n => n.id));
+        const fileName = name && name.trim() ? `${name.trim()}.json` : 'helices.json';
+        makeTextFile(fileName, JSON.stringify(idsOnly, null, 2));
+    }
     selectHelixFromNucleotide(nucleotideInput, additive = false) {
         if (!document.body.classList.contains('scadnano-grid-open'))
             return;
@@ -1521,6 +1547,9 @@ function registerScadnanoWindowApi() {
         scadnanoManager.selectHelixFromNucleotide(nucleotideInput, additive === true);
     };
     window.scadnanoGetHelices = () => scadnanoManager.getHelices();
+    window.scadnanoExportHelices = (name) => {
+        scadnanoManager.exportHelicesAsJson(name);
+    };
     window.scadnanoGridUndo = () => scadnanoManager.undoFromGridView();
     window.scadnanoGridRedo = () => scadnanoManager.redoFromGridView();
     window.scadnanoGridGetHistory = () => scadnanoManager.getHistorySnapshot();

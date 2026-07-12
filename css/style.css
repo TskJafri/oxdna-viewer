@@ -93,6 +93,22 @@ body {
   display: flex;
 }
 
+/* Export section: fit-to-content (with a cap) and left-aligned.
+   Overrides the default `.group { flex: 1 1 0; justify-content: center }` so the
+   export group is only as wide as its buttons need (capped at 320px to avoid
+   weird stretching on very wide panes) and sits at the left edge of the
+   content bar instead of being centered. The Edit section is unaffected
+   because its selector is scoped to #scadnano-section-export. */
+#scadnanoGridToolbar .content-holder #scadnano-section-export.active {
+  justify-content: flex-start;
+}
+
+#scadnanoGridToolbar .content-holder #scadnano-section-export .group {
+  flex: 0 1 auto;
+  justify-content: flex-start;
+  max-width: 320px;
+}
+
 #scadnanoGridToolbar .content-holder .group {
   position: relative;
   display: flex;
@@ -224,6 +240,34 @@ body {
   z-index: auto;
 }
 
+/* Widen the icon-only buttons (Recalculate, Combine, Lock/Unlock) so their
+   hover hit area is more comfortable to click. The icons themselves stay the
+   same size — only the button's hit box grows. Split-helices buttons are NOT
+   included because they have captions that already widen them. */
+#scadnanoGridLockHelicesBtn,
+#scadnanoGridRecalcBtn,
+#scadnanoGridCombineBtn {
+  min-width: 60px;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+/* Edit-section column widths: Lock/Unlock : Split helices : Combine : Recalculate
+   = 1 : 2 : 1 : 1. The Split-helices group is the wide one (it has 2 buttons);
+   the other three share the rest. flex shorthand: <grow> <shrink> <basis>. */
+#scadnanoGridToolbar .content-holder #scadnano-section-edit .group:nth-child(1) {
+  flex: 1 1 0;
+}
+#scadnanoGridToolbar .content-holder #scadnano-section-edit .group:nth-child(2) {
+  flex: 2 1 0;
+}
+#scadnanoGridToolbar .content-holder #scadnano-section-edit .group:nth-child(3) {
+  flex: 1 1 0;
+}
+#scadnanoGridToolbar .content-holder #scadnano-section-edit .group:nth-child(4) {
+  flex: 1 1 0;
+}
+
 /* Metro-style blue hover on the ribbon buttons inside the content bar. */
 #scadnanoGridLockHelicesBtn:not(:disabled):hover,
 #scadnanoGridRecalcBtn:not(:disabled):hover,
@@ -285,6 +329,22 @@ body {
 #scadnanoGridSplitFromSelectedBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* The Combine button uses an inline <img> (img/ico/combine.svg) in place of a
+   missing `mif-link-add` glyph. Size it like a mif-2x icon (≈28px) and let it
+   pick up the button's currentColor via CSS `filter` so it matches hover state. */
+#scadnanoGridCombineBtn .ribbon-icon {
+  width: 28px;
+  height: 28px;
+  display: block;
+  margin: 4px auto 2px;
+  -webkit-filter: grayscale(1) brightness(0) opacity(0.85);
+          filter: grayscale(1) brightness(0) opacity(0.85);
+}
+#scadnanoGridCombineBtn:not(:disabled):hover .ribbon-icon {
+  -webkit-filter: grayscale(1) brightness(0) opacity(1);
+          filter: grayscale(1) brightness(0) opacity(1);
 }
 
 body.scadnano-grid-open #scadnanoGridPane {

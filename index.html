@@ -1436,32 +1436,29 @@
                     <div class="group">
                         <button id="scadnanoGridLockHelicesBtn" class="ribbon-button" type="button" title="Toggle lock/unlock on selected helices">
                             <span class="mif-lock mif-2x" aria-hidden="true"></span>
-                            <span class="caption">Lock/Unlock</span>
                         </button>
                         <span class="title">Lock/Unlock Helices</span>
                     </div>
                     <div class="group">
-                        <button id="scadnanoGridSplitHelicesBtn" class="ribbon-button" type="button" title="Split helix">
-                            <span class="mif-split mif-2x" aria-hidden="true"></span>
-                            <span class="caption">Split</span>
+                        <button id="scadnanoGridSplitHelicesBtn" class="ribbon-button" type="button" title="View">
+                            <span class="mif-eye mif-2x" aria-hidden="true"></span>
+                            <span class="caption">Focus on helix</span>
                         </button>
                         <button id="scadnanoGridSplitFromSelectedBtn" class="ribbon-button" type="button" title="Split from selected" disabled>
                             <span class="mif-flow-tree mif-2x" aria-hidden="true"></span>
-                            <span class="caption">From sel.</span>
+                            <span class="caption">Split from selected</span>
                         </button>
                         <span class="title">Split helices</span>
                     </div>
                     <div class="group">
                         <button id="scadnanoGridCombineBtn" class="ribbon-button" type="button" title="Combine the selected helices into the lowest-numbered one">
-                            <span class="mif-merge mif-2x" aria-hidden="true"></span>
-                            <span class="caption">Combine</span>
+                            <img src="img/ico/combine.svg" class="ribbon-icon" alt="" aria-hidden="true">
                         </button>
                         <span class="title">Combine</span>
                     </div>
                     <div class="group">
                         <button id="scadnanoGridRecalcBtn" class="ribbon-button" type="button" title="Recalculate grid">
-                            <span class="mif-calc mif-2x" aria-hidden="true"></span>
-                            <span class="caption">Recalculate</span>
+                            <span class="mif-calculator mif-2x" aria-hidden="true"></span>
                         </button>
                         <span class="title">Recalculate Grid</span>
                     </div>
@@ -1470,7 +1467,11 @@
                     <div class="group">
                         <button id="scadnanoGridExportBtn" class="ribbon-button" type="button" title="Export the current scadnano layout">
                             <span class="mif-file-download mif-2x" aria-hidden="true"></span>
-                            <span class="caption">Export</span>
+                            <span class="caption">Export as scadnano</span>
+                        </button>
+                        <button id="scadnanoGridExportHelicesBtn" class="ribbon-button" type="button" title="Export the current helices as a JSON file (no grid positions)">
+                            <img src="img/ico/brackets.svg" height="30px" alt="" aria-hidden="true">
+                            <span class="caption">Export helices as JSON</span>
                         </button>
                         <span class="title">Export</span>
                     </div>
