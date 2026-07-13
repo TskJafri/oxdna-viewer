@@ -35,6 +35,8 @@ class ScadnanoExportManager {
     // knows what was hidden. splitTargetHelixId, however, is only populated
     // when N === 1 — that's the only case "Split from selected" can act on.
     focusedHelixIds = null;
+    static LOCKED_COLOR = 0x808080;
+    static UNLOCKED_COLOR = 0x55C1FF;
     clearHistory() {
         this.history = this.createEmptyHistory();
         this.refreshHistoryButtons();
@@ -186,7 +188,7 @@ class ScadnanoExportManager {
     // Triggered by the "Lock/Unlock Helices" button in the grid view.
     // Toggles the locked state of every currently-selected helix:
     //   - Unlocked → grey fill, added to lockedHelices.
-    //   - Already locked → yellow fill restored, removed from lockedHelices.
+    //   - Already locked → blue (unlocked) fill restored, removed from lockedHelices.
     lockSelectedHelices() {
         const editor = this.scadnanoGridEditor;
         if (!editor || typeof editor.setNodeColor !== 'function')
@@ -196,16 +198,14 @@ class ScadnanoExportManager {
             : [];
         if (ids.length === 0)
             return;
-        const LOCKED_COLOR = 0x808080;
-        const UNLOCKED_COLOR = 0x55C1FF; // DOT_COLOR from scadnano_gridview.ts
         ids.forEach(id => {
             if (this.lockedHelices.has(id)) {
                 this.lockedHelices.delete(id);
-                editor.setNodeColor(id, UNLOCKED_COLOR);
+                editor.setNodeColor(id, ScadnanoExportManager.UNLOCKED_COLOR);
             }
             else {
                 this.lockedHelices.add(id);
-                editor.setNodeColor(id, LOCKED_COLOR);
+                editor.setNodeColor(id, ScadnanoExportManager.LOCKED_COLOR);
             }
         });
         // Keep the editor's own set in sync so its drag/move guards work.
@@ -778,7 +778,7 @@ class ScadnanoExportManager {
     }
     // Remap lockedHelices back to pre-merge ids after an undo-combine. inverseRemap maps the
     // current post-merge id → the original pre-merge id. Reapplies grey fill to locked nodes
-    // and restores yellow on the re-split nodes that are no longer locked.
+    // and restores the default blue on the re-split nodes that are no longer locked.
     remapLockedHelicesInverse(inverseRemap, entry) {
         if (this.lockedHelices.size === 0 && entry.removed.length === 0)
             return;
@@ -796,14 +796,14 @@ class ScadnanoExportManager {
         const editor = this.scadnanoGridEditor;
         if (!editor || typeof editor.setNodeColor !== 'function')
             return;
-        const LOCKED_COLOR = 0x808080;
-        const UNLOCKED_COLOR = 0x55C1FF;
         const nodes = typeof editor.getNodes === 'function'
             ? editor.getNodes()
             : [];
         nodes.forEach(node => {
             const id = Number(node.id);
-            editor.setNodeColor(id, this.lockedHelices.has(id) ? LOCKED_COLOR : UNLOCKED_COLOR);
+            editor.setNodeColor(id, this.lockedHelices.has(id)
+                ? ScadnanoExportManager.LOCKED_COLOR
+                : ScadnanoExportManager.UNLOCKED_COLOR);
         });
         // Keep the editor's drag/move guard in sync.
         editor.lockedHelices = new Set(this.lockedHelices);
