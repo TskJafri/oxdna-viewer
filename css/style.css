@@ -225,7 +225,6 @@ body {
    `position: static` here in case other selectors try to keep them absolute. */
 #scadnanoGridLockHelicesBtn,
 #scadnanoGridRecalcBtn,
-#scadnanoGridSplitHelicesBtn,
 #scadnanoGridSplitFromSelectedBtn,
 #scadnanoGridCombineBtn,
 #scadnanoGridExportBtn {
@@ -268,10 +267,33 @@ body {
   flex: 1 1 0;
 }
 
+/* "Focus on helix" is a Metro 4 switch (data-role="switch"). Metro lays out
+   the wrapper <label class="switch"> with `flex-flow: row nowrap` so the
+   toggle pill and the caption sit side-by-side. We want the caption BELOW
+   the pill instead, so override the wrapper to a column flex. Target via
+   :has() on the input id, which is preserved through Metro's wrap() call.
+   Also: pin the caption to the same 12px font-size as the surrounding
+   `.ribbon-button .caption` siblings so the toolbar looks consistent, and
+   let it wrap to multiple lines if the group is too narrow — when that
+   happens the menubar grows in height to accommodate the extra rows. */
+label.switch:has(> input#scadnanoGridSplitHelicesToggle) {
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;          /* matches the .ribbon-button .caption font-size */
+}
+
+label.switch:has(> input#scadnanoGridSplitHelicesToggle) > .caption {
+  font-size: 12px;
+  max-width: 100%;
+  white-space: normal;      /* allow wrapping; menubar will grow in height */
+  text-align: center;
+  line-height: 1.2;
+}
+
 /* Metro-style blue hover on the ribbon buttons inside the content bar. */
 #scadnanoGridLockHelicesBtn:not(:disabled):hover,
 #scadnanoGridRecalcBtn:not(:disabled):hover,
-#scadnanoGridSplitHelicesBtn:not(:disabled):hover,
 #scadnanoGridSplitFromSelectedBtn:not(:disabled):hover,
 #scadnanoGridCombineBtn:not(:disabled):hover,
 #scadnanoGridExportBtn:not(:disabled):hover {

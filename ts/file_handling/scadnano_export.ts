@@ -40,6 +40,7 @@ interface Window {
     scadnanoSelectHelixFromNucleotide?: (nucleotideInput?: unknown, additive?: boolean) => void;
     scadnanoGetHelices?: () => Nucleotide[][] | null;
     scadnanoExportHelices?: (name?: string) => void;
+    scadnanoFocusOnHelixToggle?: (chkBox: HTMLInputElement) => void;
     scadnanoGridUndo?: () => void;
     scadnanoGridRedo?: () => void;
     scadnanoGridGetHistory?: () => any;
@@ -119,6 +120,17 @@ class ScadnanoExportManager {
     // single helix, the target helix id is captured here so the follow-up "Split from selected"
     // button knows which helix to break apart. null while not in split mode.
     private splitTargetHelixId: number | null = null;
+
+    // Toggle state for the "Focus on helix" button. Set when focus mode is on
+    // (hides everything outside the selected nucleotides), null when off. Lets
+    // the button behave as a toggle: first click focuses, second click restores
+    // the full view.
+    //
+    // Multi-helix support: when the user selects nucleotides spanning N helices
+    // and toggles focus on, this set holds all N ids so the toggle-off path
+    // knows what was hidden. splitTargetHelixId, however, is only populated
+    // when N === 1 — that's the only case "Split from selected" can act on.
+    private focusedHelixIds: Set<number> | null = null;
 
     private clearHistory(): void {
         this.history = this.createEmptyHistory();
@@ -327,39 +339,54 @@ class ScadnanoExportManager {
     // visibility state of nucleotides that were already hidden (so previously-hidden bases
     // don't get flipped back on). The user's original selection is restored afterwards.
     //
-    // Also captures the target helix id in `splitTargetHelixId` so the "Split from selected"
-    // button knows which helix to break apart, and enables that button. This only succeeds if
-    // (a) the grid pane is open and helix data is cached and (b) every currently-selected
-    // nucleotide belongs to a single helix.
-    public splitHelicesFromGridView(): void {
-        if (selectedBases.size === 0) {
-            notify('Select a helix (or any nucleotides) before splitting.', 'warning');
+    // Toggles the "Focus on helix" mode based on a Metro 4 switch checkbox's
+    // checked state. Wired to onchange="scadnanoFocusOnHelixToggle(this)" in
+    // index.html, exactly like the Arrows/Box/Fog/3' markers switches in the
+    // View toolbar. When `checked === true`, focuses on the selected nucleotides
+    // (hiding everything else — works for 1 OR multiple helices). When
+    // `checked === false`, restores the full view. If focus fails (e.g.
+    // nothing selected), flips the switch back off so the UI doesn't lie.
+    public focusOnHelixToggleFromGridView(checked: boolean): void {
+        const chk = document.getElementById('scadnanoGridSplitHelicesToggle') as HTMLInputElement | null;
+
+        if (!checked) {
+            // Unfocus path: restore everything, exit split mode, leave the
+            // switch in its off state.
+            if (this.focusedHelixIds !== null) {
+                this.clearFocusMode();
+                this.splitTargetHelixId = null;
+                this.setSplitFromSelectedEnabled(false);
+                notify('Restored full view.', 'success');
+                render();
+            }
             return;
         }
 
-        // Try to resolve the target helix id from the current selection. This only works when
-        // the grid pane is open and its layout has been prepared — otherwise we still hide, but
-        // can't enter split mode.
-        let targetHelixId: number | null = null;
+        // Focus path: bail if nothing's selected. Revert the switch so the UI
+        // doesn't show "focus mode on" when nothing happened.
+        if (selectedBases.size === 0) {
+            notify('Select a helix (or any nucleotides) before focusing.', 'warning');
+            if (chk) chk.checked = false;
+            return;
+        }
+
+        // Collect every helix id represented in the current selection. This
+        // only works when the grid pane is open and its layout has been
+        // prepared — otherwise we still hide, but can't track which helices
+        // are focused.
+        const helixIds = new Set<number>();
         if (this.scadnanoGridEditor && this.currentScadnanoLayout) {
             const grid = this.currentScadnanoLayout.grid;
-            const helixIds = new Set<number>();
             selectedBases.forEach(e => {
                 const mark = grid.get(e.id);
                 if (mark) helixIds.add(mark.helixId);
             });
-            if (helixIds.size === 1) {
-                targetHelixId = helixIds.values().next().value;
-            } else if (helixIds.size > 1) {
-                notify(
-                    `Split mode needs a single helix selected; the current selection spans ${helixIds.size} helices. Hiding non-selected nucleotides, but "Split from selected" is disabled.`,
-                    'warning'
-                );
-            }
         }
 
-        // Invert the selection so `selectedBases` now holds every element outside the target
-        // helix — those are the ones we want to hide.
+        // Invert the selection so `selectedBases` now holds every element outside
+        // the focused set — those are the ones we want to hide. This works
+        // whether the user picked 1 helix or N: any non-selected nucleotide
+        // is hidden, regardless of which helix it belongs to.
         invertSelection();
 
         const affectedSystems = new Set<System>();
@@ -380,11 +407,27 @@ class ScadnanoExportManager {
         // Restore the user's original selection.
         invertSelection();
 
-        // Enter split mode iff we resolved a single target helix.
-        this.splitTargetHelixId = targetHelixId;
-        this.setSplitFromSelectedEnabled(targetHelixId !== null);
-        if (targetHelixId !== null) {
-            notify(`Split mode: helix ${targetHelixId}. Select nucleotides, then click "Split from selected".`, 'success');
+        // "Split from selected" only works on a single helix — gate the button
+        // and the splitTargetHelixId pointer on `helixIds.size === 1`. With 0
+        // (e.g. selection had no grid marks) or 2+ helices, the button stays
+        // disabled and the user gets a warning when they try to click it.
+        const singleHelix = helixIds.size === 1;
+        this.splitTargetHelixId = singleHelix ? helixIds.values().next().value : null;
+        this.setSplitFromSelectedEnabled(singleHelix);
+        this.focusedHelixIds = helixIds.size > 0 ? helixIds : null;
+
+        if (this.focusedHelixIds !== null) {
+            if (singleHelix) {
+                notify(
+                    `Focus mode: helix ${this.splitTargetHelixId}. Toggle off "Focus on helix" to restore the view.`,
+                    'success'
+                );
+            } else {
+                notify(
+                    `Focus mode: ${this.focusedHelixIds.size} helices visible. Toggle off "Focus on helix" to restore the view.`,
+                    'success'
+                );
+            }
         }
 
         render();
@@ -395,6 +438,18 @@ class ScadnanoExportManager {
     private setSplitFromSelectedEnabled(enabled: boolean): void {
         const btn = document.getElementById('scadnanoGridSplitFromSelectedBtn') as HTMLButtonElement | null;
         if (btn) btn.disabled = !enabled;
+    }
+
+    // Clear focus-mode state: restore visibility, reset the focused-helix set,
+    // and flip the Metro switch back to off. Used by any code path that exits
+    // the focus session (unfocus, close pane, after a split, etc.).
+    private clearFocusMode(): void {
+        if (this.focusedHelixIds !== null) {
+            this.restoreAllVisibility();
+            this.focusedHelixIds = null;
+        }
+        const chk = document.getElementById('scadnanoGridSplitHelicesToggle') as HTMLInputElement | null;
+        if (chk) chk.checked = false;
     }
 
     // Make every nucleotide across all systems visible. Used after a split completes so the user
@@ -426,6 +481,17 @@ class ScadnanoExportManager {
     public splitFromSelectedGridView(): void {
         if (this.splitTargetHelixId === null) {
             notify('Click "Split helices" on a selected helix first.', 'warning');
+            return;
+        }
+        // Defensive guard: the button should be disabled when more than one
+        // helix is focused, but if the user manages to invoke this with a
+        // multi-helix focus set, refuse and warn rather than silently picking
+        // a wrong target helix.
+        if (this.focusedHelixIds !== null && this.focusedHelixIds.size !== 1) {
+            notify(
+                `"Split from selected" requires exactly one focused helix — you have ${this.focusedHelixIds.size}. Focus on a single helix to enable splitting.`,
+                'warning'
+            );
             return;
         }
         const editor = this.scadnanoGridEditor;
@@ -993,6 +1059,7 @@ class ScadnanoExportManager {
         this.clearHistory();
         this.splitTargetHelixId = null;
         this.setSplitFromSelectedEnabled(false);
+        this.clearFocusMode();
     }
 
     public toggleGridDropdown(checkboxElement: HTMLInputElement): void {
@@ -1729,12 +1796,9 @@ class ScadnanoExportManager {
             });
         }
 
-        const splitHelicesBtn = document.getElementById('scadnanoGridSplitHelicesBtn');
-        if (splitHelicesBtn) {
-            splitHelicesBtn.addEventListener('click', () => {
-                this.splitHelicesFromGridView();
-            });
-        }
+        // The "Focus on helix" toggle is a Metro 4 data-role="switch" checkbox
+        // (see index.html). It binds directly via inline onchange in the HTML,
+        // so no addEventListener wiring is needed here.
 
         const splitFromSelectedBtn = document.getElementById('scadnanoGridSplitFromSelectedBtn');
         if (splitFromSelectedBtn) {
@@ -1861,6 +1925,10 @@ function registerScadnanoWindowApi(): void {
 
     window.scadnanoExportHelices = (name?: string) => {
         scadnanoManager.exportHelicesAsJson(name);
+    };
+
+    window.scadnanoFocusOnHelixToggle = (chkBox: HTMLInputElement) => {
+        scadnanoManager.focusOnHelixToggleFromGridView(Boolean(chkBox?.checked));
     };
 
     window.scadnanoGridUndo = () => scadnanoManager.undoFromGridView();

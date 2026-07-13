@@ -1440,10 +1440,7 @@
                         <span class="title">Lock/Unlock Helices</span>
                     </div>
                     <div class="group">
-                        <button id="scadnanoGridSplitHelicesBtn" class="ribbon-button" type="button" title="View">
-                            <span class="mif-eye mif-2x" aria-hidden="true"></span>
-                            <span class="caption">Focus on helix</span>
-                        </button>
+                        <input type="checkbox" id="scadnanoGridSplitHelicesToggle" onchange="scadnanoFocusOnHelixToggle(this)" data-role="switch" data-caption="Focus on helix" title="Focus on selected helix (toggle to restore view)">
                         <button id="scadnanoGridSplitFromSelectedBtn" class="ribbon-button" type="button" title="Split from selected" disabled>
                             <span class="mif-flow-tree mif-2x" aria-hidden="true"></span>
                             <span class="caption">Split from selected</span>
