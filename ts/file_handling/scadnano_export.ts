@@ -1347,11 +1347,6 @@ class ScadnanoExportManager {
             helices = renumbered.helices;
             helixPos = renumbered.helixPos;
 
-            // Now that renumberHelicesGNN has done its work on the
-            // spread-out layout, pack disconnected components tight against
-            // the main tree for the final rendered output.
-            toscad.compactDisconnected(helixPos, grid);
-
             console.log(`[scadnano] convergeLayout (wireframe) — single pass, no iteration`);
             return { helices, helixPos, latticeType, networkMap };
         }
@@ -1405,13 +1400,6 @@ class ScadnanoExportManager {
             const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
             helices = renumbered.helices;
             helixPos = renumbered.helixPos;
-
-            // Now that renumberHelicesGNN has done its work on the
-            // spread-out layout, pack disconnected components tight against
-            // the main tree for the final rendered output. Doesn't affect
-            // the fingerprint (which is grid-only), so convergence is
-            // unchanged.
-            toscad.compactDisconnected(helixPos, grid);
 
             const fp = this.gridFingerprint(grid, helices.length);
             if (fp === prevFp) {
