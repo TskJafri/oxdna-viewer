@@ -100,8 +100,8 @@ class ScadnanoExportManager {
     // Triggered by the "Recalculate Grid" button. Reruns the layout pipeline
     // on the existing helices and grid (as the user has combined/edited them)
     // — skipping setGrid. The convergeLayout helper drives the full pipeline
-    // (directionAlign2 → alignGridPrim → getAngles → anglecomb → anglecorr →
-    // runAxisOverlapMerge → calculateGlobalPositions → renumberHelicesGNN →
+    // (directionAlign2 → alignGridPrim → getAngles → anglecomb2 → anglecorr2 →
+    // runAxisOverlapMerge → helixPositions → renumberHelicesGNN →
     // applyHelixRenumber) to a fingerprint fixed point in this call, so
     // clicking Recalculate once reaches the same state that multiple manual
     // clicks used to converge to. collectCrossovers runs once afterwards
@@ -129,7 +129,7 @@ class ScadnanoExportManager {
         this.runScadnanoLongCalculation(() => {
             try {
                 // Reuse the existing grid — setGrid is skipped entirely.
-                // Shallow-clone helices so anglecomb's in-place splices don't
+                // Shallow-clone helices so anglecomb2's in-place splices don't
                 // mutate currentScadnanoLayout.helices, keeping recalculate idempotent.
                 const grid = this.currentScadnanoLayout.grid;
                 const helices = this.currentScadnanoLayout.helices
@@ -1073,7 +1073,7 @@ class ScadnanoExportManager {
     // fingerprints across iterations to decide when the pipeline has reached a
     // fixed point — this is more reliable than checking return counts from
     // individual stages because it catches ALL mutations (directionAlign2 flips,
-    // alignGridPrim offset shifts, anglecomb/anglecorr/axisOverlap changes)
+    // alignGridPrim offset shifts, anglecomb2/anglecorr2/axisOverlap changes)
     // in a single signal.
     gridFingerprint(grid, helicesLength) {
         const ntIds = Array.from(grid.keys()).sort((a, b) => a - b);
@@ -1101,11 +1101,15 @@ class ScadnanoExportManager {
                 latticeType = requestedLatticeType;
             }
             networkMap = toscad.getAngles(grid, helices, latticeType);
-            helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
+            helixPos = toscad.helixPositions(networkMap, grid, latticeType);
             const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType);
             const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
             helices = renumbered.helices;
             helixPos = renumbered.helixPos;
+            // Now that renumberHelicesGNN has done its work on the
+            // spread-out layout, pack disconnected components tight against
+            // the main tree for the final rendered output.
+            toscad.compactDisconnected(helixPos, grid);
             console.log(`[scadnano] convergeLayout (wireframe) — single pass, no iteration`);
             return { helices, helixPos, latticeType, networkMap };
         }
@@ -1137,10 +1141,10 @@ class ScadnanoExportManager {
             const corrResult = toscad.anglecorr2(grid, helices, latticeTypeSet, networkMap);
             networkMap = corrResult.networkMap;
             this.runAxisOverlapMerge(helices, grid, latticeTypeSet);
-            // Refresh angles so calculateGlobalPositions sees the final
+            // Refresh angles so the position calc sees the final
             // post-mutation state.
             networkMap = toscad.getAngles(grid, helices, latticeTypeSet);
-            helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeTypeSet);
+            helixPos = toscad.helixPositions(networkMap, grid, latticeTypeSet);
             // Renumber inside the loop. Each pass' renumber rewrites helix ids
             // on the grid; the next pass' directionAlign2 / alignGridPrim then
             // anchor on the newly-designated helix 0. Once the numbering
@@ -1150,6 +1154,12 @@ class ScadnanoExportManager {
             const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
             helices = renumbered.helices;
             helixPos = renumbered.helixPos;
+            // Now that renumberHelicesGNN has done its work on the
+            // spread-out layout, pack disconnected components tight against
+            // the main tree for the final rendered output. Doesn't affect
+            // the fingerprint (which is grid-only), so convergence is
+            // unchanged.
+            toscad.compactDisconnected(helixPos, grid);
             const fp = this.gridFingerprint(grid, helices.length);
             if (fp === prevFp) {
                 console.log(`[scadnano] convergeLayout converged in ${iter} pass${iter === 1 ? '' : 'es'}`);
@@ -1201,8 +1211,8 @@ class ScadnanoExportManager {
         this.currentScadnanoHelices = helices;
         const { grid, binderHelices } = toscad.setGrid(helices);
         // Iterate the whole pipeline — directionAlign2 → alignGridPrim →
-        // getAngles → anglecomb → anglecorr → runAxisOverlapMerge →
-        // calculateGlobalPositions → renumberHelicesGNN → applyHelixRenumber
+        // getAngles → anglecomb2 → anglecorr2 → runAxisOverlapMerge →
+        // helixPositions → renumberHelicesGNN → applyHelixRenumber
         // — to a fingerprint fixed point. Renumber is INSIDE the loop because
         // it rewrites helix ids on the grid, which changes the anchor for the
         // next iteration's directionAlign2 / alignGridPrim; see convergeLayout.

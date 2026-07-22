@@ -12,8 +12,8 @@ Here's an easy way to use this code:
     toscad.alignGridPrim(grid, binderHelices);
 
     const angles = toscad.getAngles(grid, helices, 'honeycomb');
-    const corrected = toscad.anglecomb(grid, helices, 'honeycomb', angles);
-    const correct = toscad.anglecorr(grid, helices, 'honeycomb', corrected.networkMap);
+    const corrected = toscad.anglecomb2(grid, helices, 'honeycomb', angles);
+    const correct = toscad.anglecorr2(grid, helices, 'honeycomb', corrected.networkMap);
 */
 var toscad;
 (function (toscad) {
