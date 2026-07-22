@@ -624,10 +624,11 @@ namespace helix {
 		grid: toscad.GridMap,
 		partials: Nucleotide[][],
 		mergePairs: HashMergePair[]
-	): void {
+	): Array<{ keepHelix: number; mergedHelix: number; partialA: number; partialB: number }> {
+		const log: Array<{ keepHelix: number; mergedHelix: number; partialA: number; partialB: number }> = [];
 		if (!Array.isArray(helices) || !(grid instanceof Map) ||
-			!Array.isArray(partials) || !Array.isArray(mergePairs)) return;
-		if (mergePairs.length === 0) return;
+			!Array.isArray(partials) || !Array.isArray(mergePairs)) return log;
+		if (mergePairs.length === 0) return log;
 
 		mergePairs.forEach(({ a, b }) => {
 			const pa = partials[a];
@@ -651,8 +652,84 @@ namespace helix {
 			// is disjoint on the grid, then perform the logical merge.
 			const shifts = toscad.computeCombineShifts(helices, [helixA, helixB], grid);
 			if (shifts && shifts.size > 0) toscad.applyCombineShifts(grid, shifts);
+			const keep = Math.min(helixA, helixB);
+			const merged = Math.max(helixA, helixB);
 			combineHelices(helices, [helixA, helixB], grid);
+			log.push({ keepHelix: keep, mergedHelix: merged, partialA: a, partialB: b });
 		});
+		return log;
+	}
+
+	// Rejects "side-by-side" helix merges by measuring how much of each helix's
+	// axis segment is covered by the other's shadow. Endpoints of each helix are
+	// picked as the two farthest-apart nucleotides (2-pass diameter approximation),
+	// using the basepair midpoint if the pair is in the same helix and the
+	// nucleotide's own position otherwise. Each endpoint of one helix is projected
+	// onto the other's axis, the resulting interval is clipped to the segment
+	// [0, L], and the clipped fraction of L is the coverage. Returns true when
+	// max(covA, covB) >= threshold — i.e., the helices lie on top of each other
+	// rather than meeting end-to-end, and the merge should be rejected.
+	export function axisShadowOverlap(
+		helixA: Nucleotide[],
+		helixB: Nucleotide[],
+		threshold: number = 0.5
+	): boolean {
+		if (!Array.isArray(helixA) || !Array.isArray(helixB)) return false;
+		if (helixA.length < 2 || helixB.length < 2) return false;
+
+		const endpointsOf = (helix: Nucleotide[]): [THREE.Vector3, THREE.Vector3] | null => {
+			const ids = new Set<number>();
+			for (const nt of helix) ids.add(nt.id);
+			const pointOf = (nt: Nucleotide): THREE.Vector3 => {
+				const own = nt.getPos();
+				if (nt.pair && ids.has(nt.pair.id)) {
+					return own.clone().add(nt.pair.getPos()).multiplyScalar(0.5);
+				}
+				return own.clone();
+			};
+			// Farthest from seed, then farthest from that — approximate diameter in O(n).
+			const seedPos = helix[0].getPos();
+			let farA = helix[0];
+			let farADist = -1;
+			for (const nt of helix) {
+				const d = seedPos.distanceToSquared(nt.getPos());
+				if (d > farADist) { farADist = d; farA = nt; }
+			}
+			const farAPos = farA.getPos();
+			let farB = farA;
+			let farBDist = -1;
+			for (const nt of helix) {
+				const d = farAPos.distanceToSquared(nt.getPos());
+				if (d > farBDist) { farBDist = d; farB = nt; }
+			}
+			if (farA === farB) return null;
+			return [pointOf(farA), pointOf(farB)];
+		};
+
+		const epA = endpointsOf(helixA);
+		const epB = endpointsOf(helixB);
+		if (!epA || !epB) return false;
+
+		const [P0, P1] = epA;
+		const [Q0, Q1] = epB;
+
+		// Coverage of segment S0→S1 by the shadow of X0/X1 on its axis, clipped to [0, L].
+		const coverage = (S0: THREE.Vector3, S1: THREE.Vector3, X0: THREE.Vector3, X1: THREE.Vector3): number => {
+			const axis = S1.clone().sub(S0);
+			const L = axis.length();
+			if (L < 1e-9) return 0;
+			axis.divideScalar(L);
+			const t0 = X0.clone().sub(S0).dot(axis);
+			const t1 = X1.clone().sub(S0).dot(axis);
+			const lo = Math.max(0, Math.min(t0, t1));
+			const hi = Math.min(L, Math.max(t0, t1));
+			return Math.max(0, hi - lo) / L;
+		};
+
+		const covA = coverage(P0, P1, Q0, Q1);
+		const covB = coverage(Q0, Q1, P0, P1);
+		console.log(`[axisShadowOverlap] covA=${covA.toFixed(3)} covB=${covB.toFixed(3)}`);
+		return Math.max(covA, covB) >= threshold;
 	}
 
 	// Perfected!

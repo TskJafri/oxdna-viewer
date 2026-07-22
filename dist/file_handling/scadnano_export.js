@@ -1132,9 +1132,9 @@ class ScadnanoExportManager {
                 }
             }
             networkMap = toscad.getAngles(grid, helices, latticeTypeSet);
-            const combResult = toscad.anglecomb(grid, helices, latticeTypeSet, networkMap);
+            const combResult = toscad.anglecomb2(grid, helices, latticeTypeSet, networkMap);
             networkMap = combResult.networkMap;
-            const corrResult = toscad.anglecorr(grid, helices, latticeTypeSet, networkMap);
+            const corrResult = toscad.anglecorr2(grid, helices, latticeTypeSet, networkMap);
             networkMap = corrResult.networkMap;
             this.runAxisOverlapMerge(helices, grid, latticeTypeSet);
             // Refresh angles so calculateGlobalPositions sees the final

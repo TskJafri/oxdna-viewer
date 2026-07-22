@@ -313,6 +313,203 @@ var toscad;
         return networkMap;
     }
     toscad.getAngles = getAngles;
+    function tempGlobalPos(networkMap, grid, lattice = 'honeycomb') {
+        const latticeType = resolveLatticeKind(lattice);
+        const ANGLES = latticeType === 'square' ? [0, 90, 180, 270] : [0, 120, 240];
+        const HONEYCOMB_STEP_BY_PARITY = {
+            even: {
+                0: { dCol: 1, dRow: 0 },
+                120: { dCol: -1, dRow: 0 },
+                240: { dCol: 0, dRow: -1 }
+            },
+            odd: {
+                0: { dCol: 1, dRow: 0 },
+                120: { dCol: 0, dRow: 1 },
+                240: { dCol: -1, dRow: 0 }
+            }
+        };
+        const SQUARE_STEPS = {
+            0: { dCol: 1, dRow: 0 },
+            90: { dCol: 0, dRow: 1 },
+            180: { dCol: -1, dRow: 0 },
+            270: { dCol: 0, dRow: -1 }
+        };
+        // Helper functions
+        const normalizeAngle = (angle) => ((angle % 360) + 360) % 360;
+        // Returns the smallest angular distance between two angles (in degrees)
+        const angleDistance = (a, b) => {
+            const diff = Math.abs(normalizeAngle(a) - normalizeAngle(b));
+            return Math.min(diff, 360 - diff);
+        };
+        // checks the parity, based on row
+        const parityAt = (col, row) => (((col + row) & 1) === 0 ? 'even' : 'odd');
+        const getStep = (col, row, angle) => {
+            if (latticeType === 'square')
+                return SQUARE_STEPS[angle];
+            return HONEYCOMB_STEP_BY_PARITY[parityAt(col, row)][angle];
+        };
+        const snapToLatticeAngle = (angle) => {
+            let best = ANGLES[0];
+            let bestDist = Number.POSITIVE_INFINITY;
+            for (const cand of ANGLES) {
+                const d = angleDistance(angle, cand);
+                if (d < bestDist || (d === bestDist && cand < best)) {
+                    best = cand;
+                    bestDist = d;
+                }
+            }
+            return best;
+        };
+        const latticeAngleFromDelta = (col, row, dCol, dRow) => {
+            for (const a of ANGLES) {
+                const s = getStep(col, row, a);
+                if (s.dCol === dCol && s.dRow === dRow)
+                    return a;
+            }
+            return null;
+        };
+        // Get number of crossovers
+        const connectionCounts = getConnectionCounts(grid);
+        const getWeight = (a, b) => connectionCounts.get(a)?.get(b) ?? 1;
+        // Collect every helix referenced by the network map
+        const allHelixIds = new Set();
+        allHelixIds.add(0);
+        for (const [from, row] of networkMap.entries()) {
+            allHelixIds.add(from);
+            for (const to of row.keys())
+                allHelixIds.add(to);
+        }
+        // Derive a helix's global orientation from its parent's.
+        const deriveChildOrientation = (parentId, childId, parentCol, parentRow, childCol, childRow, parentLocalAngle, snappedForwardAngle) => {
+            const dColBack = parentCol - childCol;
+            const dRowBack = parentRow - childRow;
+            const backGlobal = latticeAngleFromDelta(childCol, childRow, dColBack, dRowBack);
+            const desiredBack = backGlobal !== null
+                ? backGlobal
+                : normalizeAngle(snappedForwardAngle + 180);
+            const childLocalBack = networkMap.get(childId)?.get(parentId);
+            if (typeof childLocalBack === 'number') {
+                return normalizeAngle(desiredBack - childLocalBack);
+            }
+            const inferredBackLocal = normalizeAngle(parentLocalAngle + 180);
+            return normalizeAngle(desiredBack - inferredBackLocal);
+        };
+        // Initialize these. In this case, "canonical" means BFS-derived. Thus, non-canonical mean that the helix is not where the MST placed it.
+        const canonicalCoord = new Map();
+        const canonicalOrient = new Map();
+        // if there are 2 totally disconnected structures, they will be placed at (ROOT_SEPARATION,0). It is just a safegaurd.
+        // The first root is always placed at (0,0)
+        const ROOT_SEPARATION = 1000;
+        const sortedHelixIds = [...allHelixIds].sort((a, b) => a - b);
+        let nextRootCol = ROOT_SEPARATION;
+        // BFS from every root
+        for (const rootId of sortedHelixIds) {
+            if (canonicalCoord.has(rootId))
+                continue;
+            const rootCol = rootId === 0 ? 0 : nextRootCol;
+            canonicalCoord.set(rootId, [rootCol, 0]);
+            canonicalOrient.set(rootId, 0);
+            if (rootId !== 0)
+                nextRootCol += ROOT_SEPARATION;
+            const queue = [rootId];
+            // BFS manual instead of Array.shift() for performance
+            let qi = 0;
+            while (qi < queue.length) {
+                const parentId = queue[qi++];
+                const parentCoord = canonicalCoord.get(parentId);
+                const parentOrient = canonicalOrient.get(parentId);
+                const [pCol, pRow] = parentCoord;
+                const edges = networkMap.get(parentId);
+                if (!edges || edges.size === 0)
+                    continue;
+                // Sort candidates by crossover weight, then by ascending id.
+                const candidates = [...edges.entries()]
+                    .filter(([nid]) => nid !== parentId && !canonicalCoord.has(nid))
+                    .map(([nid, localAngle]) => ({
+                    nid,
+                    localAngle: normalizeAngle(localAngle),
+                    weight: getWeight(parentId, nid)
+                }))
+                    .sort((a, b) => b.weight - a.weight || a.nid - b.nid);
+                for (const c of candidates) {
+                    if (canonicalCoord.has(c.nid))
+                        continue;
+                    const predictedGlobal = normalizeAngle(c.localAngle + parentOrient);
+                    const snapped = snapToLatticeAngle(predictedGlobal);
+                    const step = getStep(pCol, pRow, snapped);
+                    const childCol = pCol + step.dCol;
+                    const childRow = pRow + step.dRow;
+                    canonicalCoord.set(c.nid, [childCol, childRow]);
+                    canonicalOrient.set(c.nid, deriveChildOrientation(parentId, c.nid, pCol, pRow, childCol, childRow, c.localAngle, snapped));
+                    queue.push(c.nid);
+                }
+            }
+        }
+        // record every edge's prediction for the far endpoint
+        // So far, we only have the tree edges (i.e., canonical edges). But sometimes, there are non-tree edges, caused by 2 helices giving different angles for the same helix.
+        const predictions = new Map();
+        const push = (childId, pred) => {
+            let arr = predictions.get(childId);
+            if (!arr) {
+                arr = [];
+                predictions.set(childId, arr);
+            }
+            arr.push(pred);
+        };
+        for (const [parentId, edges] of networkMap.entries()) {
+            const pCoord = canonicalCoord.get(parentId);
+            const pOrient = canonicalOrient.get(parentId);
+            if (!pCoord || pOrient === undefined)
+                continue;
+            const [pCol, pRow] = pCoord;
+            for (const [childId, localAngle] of edges.entries()) {
+                if (childId === parentId)
+                    continue;
+                const cCoord = canonicalCoord.get(childId);
+                const cOrient = canonicalOrient.get(childId);
+                if (!cCoord || cOrient === undefined)
+                    continue;
+                const localAngleN = normalizeAngle(localAngle);
+                const predictedGlobal = normalizeAngle(localAngleN + pOrient);
+                const snapped = snapToLatticeAngle(predictedGlobal);
+                const step = getStep(pCol, pRow, snapped);
+                const predCol = pCol + step.dCol;
+                const predRow = pRow + step.dRow;
+                const [cCol, cRow] = cCoord;
+                push(childId, {
+                    coord: [predCol, predRow],
+                    globalOrientation: cOrient,
+                    viaParent: parentId,
+                    parentCoord: [pCol, pRow],
+                    parentOrientation: pOrient,
+                    edgeLocalAngle: localAngleN,
+                    edgeWeight: getWeight(parentId, childId),
+                    isCanonical: predCol === cCol && predRow === cRow
+                });
+            }
+        }
+        // Synthetic root predictions for helices with no incoming edge (backup)
+        for (const helixId of allHelixIds) {
+            if (predictions.has(helixId))
+                continue;
+            const coord = canonicalCoord.get(helixId);
+            const orient = canonicalOrient.get(helixId);
+            if (!coord || orient === undefined)
+                continue;
+            push(helixId, {
+                coord: [coord[0], coord[1]],
+                globalOrientation: orient,
+                viaParent: -1,
+                parentCoord: [coord[0], coord[1]],
+                parentOrientation: 0,
+                edgeLocalAngle: 0,
+                edgeWeight: 0,
+                isCanonical: true
+            });
+        }
+        return predictions;
+    }
+    toscad.tempGlobalPos = tempGlobalPos;
     // For every helix, count how many backbone crossovers it shares with each neighbor. Useful to remove bad combinations (such as end-only, which happens when a helix is broken in 2 pieces)
     function getConnectionCounts(grid) {
         const counts = new Map();
@@ -958,6 +1155,227 @@ var toscad;
         return { networkMap, mergedPairs };
     }
     toscad.anglecomb = anglecomb;
+    // anglecomb2 — global-position variant of anglecomb.
+    //
+    // Reads the multimap from tempGlobalPos and merges helices whose
+    // CANONICAL predictions land on the same cell. Same physical gates as
+    // anglecomb (disjoint offsets, axis collinearity, ≥2 crossovers on the
+    // witness edges), but the witness is now any mutual neighbor rather
+    // than a single arbitrary source, and the collision signal is global
+    // geometry rather than a local-frame angle proxy.
+    //
+    // Two-round structure. Strict round requires every strong-witness
+    // mutual neighbor to also predict A and B at the colocation cell —
+    // dissent defers the merge to the relaxed round (once anglecorr2
+    // lands, dissent will get rotated away between rounds; for now the
+    // relaxed round just fires whatever strict deferred). Relaxed round
+    // keeps the same gates minus the unanimity check.
+    //
+    // Returns the refreshed networkMap and a merged-pair log.
+    function anglecomb2(grid, helices, lattice = 'honeycomb', angleMap = getAngles(grid, helices, lattice)) {
+        const AXIS_DOT_THRESHOLD = 0.935;
+        const MAX_PASSES = 200;
+        let networkMap = angleMap;
+        const mergedPairs = [];
+        // Merge mechanics: identical to anglecomb. Remap grid helix ids
+        // (mergedHelix → keepHelix, ids above mergedHelix shift down by 1),
+        // splice helices[mergedHelix] into helices[keepHelix].
+        const mergeHelixInto = (keepHelix, mergedHelix) => {
+            const remapHelixId = (helixId) => {
+                if (helixId === mergedHelix)
+                    return keepHelix;
+                if (helixId > mergedHelix)
+                    return helixId - 1;
+                return helixId;
+            };
+            for (const [, mark] of grid.entries()) {
+                mark.helixId = remapHelixId(mark.helixId);
+            }
+            const keepNts = helices[keepHelix] ?? [];
+            const mergedNts = helices[mergedHelix] ?? [];
+            helices[keepHelix] = keepNts.concat(mergedNts);
+            helices.splice(mergedHelix, 1);
+        };
+        // Helix axis (normalised) between the min- and max-offset nts on
+        // the helix. Same logic as anglecomb's local helper.
+        const helixAxis = (helixId) => {
+            const nts = helices[helixId] ?? [];
+            let minOffset = Number.POSITIVE_INFINITY;
+            let maxOffset = Number.NEGATIVE_INFINITY;
+            let minNt = null;
+            let maxNt = null;
+            for (const nt of nts) {
+                if (!(nt instanceof Nucleotide))
+                    continue;
+                const mark = grid.get(nt.id);
+                if (!mark || mark.helixId !== helixId)
+                    continue;
+                if (mark.offset < minOffset) {
+                    minOffset = mark.offset;
+                    minNt = nt;
+                }
+                if (mark.offset > maxOffset) {
+                    maxOffset = mark.offset;
+                    maxNt = nt;
+                }
+            }
+            if (!minNt || !maxNt || minNt === maxNt)
+                return null;
+            const dir = minNt.getPos().clone().sub(maxNt.getPos());
+            const len = dir.length();
+            if (!isFinite(len) || len === 0)
+                return null;
+            return dir.divideScalar(len);
+        };
+        for (const round of ['strict', 'relaxed']) {
+            let pass = 0;
+            while (pass++ < MAX_PASSES) {
+                const preds = tempGlobalPos(networkMap, grid, lattice);
+                // Group predictions by (viaParent, EXACT local angle). A
+                // single parent P asserting that 2+ helices sit at the same
+                // local angle from itself is exactly old anglecomb's
+                // signal, preserved bit-for-bit.
+                //
+                // We deliberately don't bucket by predicted cell, because
+                // snapToLatticeAngle would conflate distinct local angles
+                // that happen to snap to the same lattice direction — e.g.
+                // 60° and 65° both snap to 60° in a honeycomb. Those are
+                // different geometric relationships and shouldn't share a
+                // merge candidate bucket.
+                const bucket = new Map();
+                for (const [hid, plist] of preds.entries()) {
+                    for (const p of plist) {
+                        if (p.viaParent < 0)
+                            continue; // synthetic roots don't source claims
+                        const key = `${p.viaParent}|${p.edgeLocalAngle}`;
+                        let b = bucket.get(key);
+                        if (!b) {
+                            b = {
+                                parent: p.viaParent,
+                                localAngle: p.edgeLocalAngle,
+                                coord: p.coord,
+                                hids: new Set()
+                            };
+                            bucket.set(key, b);
+                        }
+                        b.hids.add(hid);
+                    }
+                }
+                const candidates = [...bucket.values()].filter(b => b.hids.size >= 2);
+                if (candidates.length === 0) {
+                    console.log(`[anglecomb2] round=${round} pass=${pass} no colocations`);
+                    break;
+                }
+                const connectionCounts = getConnectionCounts(grid);
+                let mergedThisPass = false;
+                outer: for (const { parent: source, coord: cell, hids } of candidates) {
+                    const sorted = [...hids].sort((a, b) => a - b);
+                    for (let i = 0; i < sorted.length; i++) {
+                        const A = sorted[i];
+                        for (let j = i + 1; j < sorted.length; j++) {
+                            const B = sorted[j];
+                            // Gate 1: offset-axis disjointness (unchanged).
+                            if (!disjoint(helices, A, B, grid))
+                                continue;
+                            // Gate 2: 3D axis collinearity (unchanged).
+                            const axisA = helixAxis(A);
+                            const axisB = helixAxis(B);
+                            if (!axisA || !axisB)
+                                continue;
+                            const axisDot = Math.abs(axisA.dot(axisB));
+                            if (axisDot < AXIS_DOT_THRESHOLD)
+                                continue;
+                            // Gate 3: axis-shadow side-by-side rejection. Collinear helices
+                            // that lie on top of each other (bundle neighbors) rather than
+                            // meeting end-to-end will project heavily onto each other's axis
+                            // and get filtered here.
+                            if (helix.axisShadowOverlap(helices[A], helices[B])) {
+                                console.log(`[anglecomb2] round=${round} pass=${pass} rejected pair (${A},${B}) — side-by-side shadow overlap`);
+                                continue;
+                            }
+                            // Compute strong mutual witnesses (helices that
+                            // are viaParent for both A and B with ≥2
+                            // crossovers to each). Used as relaxed round's
+                            // gate; also logged for post-mortem regardless
+                            // of which round fires.
+                            const parentsA = new Set();
+                            for (const p of preds.get(A) ?? [])
+                                if (p.viaParent >= 0)
+                                    parentsA.add(p.viaParent);
+                            const strongMutuals = [];
+                            for (const n of parentsA) {
+                                if (n === A || n === B)
+                                    continue;
+                                let isBParent = false;
+                                for (const p of preds.get(B) ?? []) {
+                                    if (p.viaParent === n) {
+                                        isBParent = true;
+                                        break;
+                                    }
+                                }
+                                if (!isBParent)
+                                    continue;
+                                const nToA = connectionCounts.get(n)?.get(A) ?? 0;
+                                const nToB = connectionCounts.get(n)?.get(B) ?? 0;
+                                if (nToA >= 2 && nToB >= 2)
+                                    strongMutuals.push(n);
+                            }
+                            // ── Round-specific gate ─────────────────────────
+                            if (round === 'strict') {
+                                // Per-candidate strong-parent consensus. For
+                                // each of A and B, every parent with ≥2
+                                // crossovers to it must predict it at the
+                                // bucket cell. Weak (single-crossover) parents
+                                // are ignored — their evidence is too thin to
+                                // veto. Require at least one strong parent
+                                // per candidate to avoid vacuous truth on
+                                // helices with only weak edges.
+                                const strongParentsAgree = (childHid) => {
+                                    let sawStrong = false;
+                                    for (const p of preds.get(childHid) ?? []) {
+                                        if (p.viaParent < 0)
+                                            continue;
+                                        const w = connectionCounts.get(p.viaParent)?.get(childHid) ?? 0;
+                                        if (w < 2)
+                                            continue;
+                                        sawStrong = true;
+                                        if (p.coord[0] !== cell[0] || p.coord[1] !== cell[1])
+                                            return false;
+                                    }
+                                    return sawStrong;
+                                };
+                                if (!strongParentsAgree(A) || !strongParentsAgree(B))
+                                    continue;
+                            }
+                            else {
+                                // Relaxed: at least one strong mutual witness.
+                                if (strongMutuals.length === 0)
+                                    continue;
+                            }
+                            const keep = Math.min(A, B);
+                            const merged = Math.max(A, B);
+                            mergeHelixInto(keep, merged);
+                            strongMutuals.sort((a, b) => a - b);
+                            mergedPairs.push({ keepHelix: keep, mergedHelix: merged, source, cell, round, witnesses: strongMutuals });
+                            console.log(`[anglecomb2] round=${round} merged ${merged} into ${keep} at cell (${cell[0]},${cell[1]}) ` +
+                                `source=${source} witnesses=[${strongMutuals.join(',')}] |axisDot|=${axisDot.toFixed(3)}`);
+                            mergedThisPass = true;
+                            break outer;
+                        }
+                    }
+                }
+                if (!mergedThisPass) {
+                    console.log(`[anglecomb2] round=${round} pass=${pass} ${candidates.length} colocation(s) but none passed gates`);
+                    break;
+                }
+                // Grid changed → networkMap must be re-derived before next
+                // tempGlobalPos, or Phase 1's BFS will trip on stale ids.
+                networkMap = getAngles(grid, helices, lattice);
+            }
+        }
+        return { networkMap, mergedPairs };
+    }
+    toscad.anglecomb2 = anglecomb2;
     // If 2 helices have the same angle as given by getAngleHelix, and they are NOT disjoint, then MOVE one of the helices to an empty spot. For them to physically exist, one of these 2 checks must be true.
     function anglecorr(grid, helices, lattice = 'honeycomb', angleMap = getAngles(grid, helices, lattice)) {
         let networkMap = angleMap;
@@ -1122,6 +1540,209 @@ var toscad;
         return { networkMap, correctedPairs };
     }
     toscad.anglecorr = anglecorr;
+    // anglecorr2 — global-position variant of anglecorr.
+    //
+    // Consumes the multimap from tempGlobalPos. Detection is identical to
+    // anglecomb2 (bucket by (viaParent, exact local angle)), but this
+    // function handles the OTHER branch of the shared signal: when the
+    // colliding pair is NOT disjoint on the offset axis, they physically
+    // overlap and can't coexist at the same lattice slot. One must move.
+    //
+    // Loser identification is unchanged from current anglecorr: source's
+    // baseHelix (0° neighbor) is inviolate; otherwise, consensus mass
+    // (Σ crossover counts to other neighbors) picks the winner. Rotation
+    // steps 120° (honeycomb) or 90° (square) through source's row until an
+    // unused slot is found.
+    //
+    // Two rounds:
+    //   Strict: skip ties in the mass tiebreak. Only clear winners rotate.
+    //   Relaxed: on tie, higher-id loses (matches current anglecorr).
+    //
+    // Mutates networkMap in place and returns it. Does NOT re-run getAngles
+    // between passes — that would wipe the rotations, since getAngles
+    // derives from the grid and rotations don't touch the grid.
+    function anglecorr2(grid, helices, lattice = 'honeycomb', angleMap = getAngles(grid, helices, lattice)) {
+        const MAX_PASSES = 200;
+        const latticeType = resolveLatticeKind(lattice);
+        const correctionStep = latticeType === 'square' ? 90 : 120;
+        const maxLatticeAngles = latticeType === 'square' ? 4 : 3;
+        const normalizeAngle = (a) => ((a % 360) + 360) % 360;
+        let networkMap = angleMap;
+        const correctedPairs = [];
+        for (const round of ['strict', 'relaxed']) {
+            let pass = 0;
+            while (pass++ < MAX_PASSES) {
+                const preds = tempGlobalPos(networkMap, grid, lattice);
+                const connectionCounts = getConnectionCounts(grid);
+                // Same bucket detection as anglecomb2: (viaParent, exact
+                // local angle). All predictions with the same source and
+                // same local angle land in one bucket.
+                const bucket = new Map();
+                for (const [hid, plist] of preds.entries()) {
+                    for (const p of plist) {
+                        if (p.viaParent < 0)
+                            continue;
+                        const key = `${p.viaParent}|${p.edgeLocalAngle}`;
+                        let b = bucket.get(key);
+                        if (!b) {
+                            b = { parent: p.viaParent, localAngle: p.edgeLocalAngle, hids: new Set() };
+                            bucket.set(key, b);
+                        }
+                        b.hids.add(hid);
+                    }
+                }
+                const candidates = [...bucket.values()].filter(b => b.hids.size >= 2);
+                if (candidates.length === 0) {
+                    console.log(`[anglecorr2] round=${round} pass=${pass} no conflicts`);
+                    break;
+                }
+                let correctedThisPass = false;
+                outer: for (const { parent: source, localAngle: conflictAngle, hids } of candidates) {
+                    const sourceMap = networkMap.get(source);
+                    if (!sourceMap)
+                        continue;
+                    // baseHelix = source's neighbor at local angle 0. If a
+                    // conflict pair contains it, it stays put (its 0° is
+                    // the anchor of source's local frame).
+                    const baseCandidates = [];
+                    for (const [nid, ang] of sourceMap.entries()) {
+                        if (normalizeAngle(ang) === 0)
+                            baseCandidates.push(nid);
+                    }
+                    const baseHelix = baseCandidates.length > 0 ? Math.min(...baseCandidates) : null;
+                    const sorted = [...hids].sort((a, b) => a - b);
+                    for (let i = 0; i < sorted.length; i++) {
+                        const A = sorted[i];
+                        for (let j = i + 1; j < sorted.length; j++) {
+                            const B = sorted[j];
+                            // Disjoint → anglecomb2's territory, not ours.
+                            if (disjoint(helices, A, B, grid))
+                                continue;
+                            // Source can hold at most maxLatticeAngles
+                            // distinct-angle neighbors. If it's already
+                            // full, there's no slot to rotate into.
+                            if (sourceMap.size > maxLatticeAngles) {
+                                console.warn(`[anglecorr2] source=${source} has ${sourceMap.size} connections ` +
+                                    `and non-disjoint conflict at angle=${conflictAngle}°; no free ` +
+                                    `${latticeType} slots available`);
+                                continue;
+                            }
+                            // ── Identify the loser (the helix to rotate) ──
+                            let adjustedHelix;
+                            let decisionLog;
+                            if (A === baseHelix) {
+                                adjustedHelix = B;
+                                decisionLog = `baseHelix=${A} inviolate`;
+                            }
+                            else if (B === baseHelix) {
+                                adjustedHelix = A;
+                                decisionLog = `baseHelix=${B} inviolate`;
+                            }
+                            else {
+                                // Consensus mass: sum of crossover counts to each
+                                // helix's OTHER neighbors (excluding source and
+                                // the competing candidate). A frayed fragment
+                                // scores near-zero; a well-supported structural
+                                // body scores high.
+                                const massOf = (candidateId) => {
+                                    const nMap = networkMap.get(candidateId);
+                                    if (!nMap)
+                                        return { mass: 0, voters: 0 };
+                                    const wRow = connectionCounts.get(candidateId);
+                                    let mass = 0;
+                                    let voters = 0;
+                                    for (const nid of nMap.keys()) {
+                                        if (nid === source)
+                                            continue;
+                                        if (nid === A || nid === B)
+                                            continue;
+                                        const w = wRow?.get(nid) ?? 0;
+                                        if (w > 0) {
+                                            mass += w;
+                                            voters++;
+                                        }
+                                    }
+                                    return { mass, voters };
+                                };
+                                const { mass: massA, voters: votersA } = massOf(A);
+                                const { mass: massB, voters: votersB } = massOf(B);
+                                if (massA === massB) {
+                                    if (round === 'strict')
+                                        continue; // strict: no tiebreak
+                                    // Relaxed tiebreak: structural weight =
+                                    // (num helices) × (total crossovers) =
+                                    // voters × mass. When mass ties, this
+                                    // rewards the more-distributed candidate
+                                    // over the more-concentrated one.
+                                    const swA = massA * votersA;
+                                    const swB = massB * votersB;
+                                    if (swA !== swB) {
+                                        adjustedHelix = swA > swB ? B : A;
+                                        decisionLog = `tied mass=${massA}; structural weight A=${swA} vs B=${swB}`;
+                                    }
+                                    else {
+                                        adjustedHelix = Math.max(A, B);
+                                        decisionLog = `tied mass=${massA} and structural weight=${swA}; higher id loses`;
+                                    }
+                                }
+                                else if (massA > massB) {
+                                    adjustedHelix = B;
+                                    decisionLog = `A wins mass=${massA}/${votersA} over B mass=${massB}/${votersB}`;
+                                }
+                                else {
+                                    adjustedHelix = A;
+                                    decisionLog = `B wins mass=${massB}/${votersB} over A mass=${massA}/${votersA}`;
+                                }
+                            }
+                            // ── Rotate loser's angle into an unused slot ──
+                            const oldAngle = normalizeAngle(sourceMap.get(adjustedHelix) ?? 0);
+                            const usedAngles = new Set();
+                            for (const [nid, ang] of sourceMap.entries()) {
+                                if (nid === adjustedHelix)
+                                    continue;
+                                usedAngles.add(normalizeAngle(ang));
+                            }
+                            let newAngle = oldAngle;
+                            let foundOpen = false;
+                            for (let attempt = 1; attempt < maxLatticeAngles; attempt++) {
+                                const cand = normalizeAngle(oldAngle + attempt * correctionStep);
+                                if (!usedAngles.has(cand)) {
+                                    newAngle = cand;
+                                    foundOpen = true;
+                                    break;
+                                }
+                            }
+                            if (!foundOpen) {
+                                console.warn(`[anglecorr2] source=${source} could not place corrected ` +
+                                    `angle for helix=${adjustedHelix}; all ${correctionStep}° ` +
+                                    `slots occupied`);
+                                continue;
+                            }
+                            sourceMap.set(adjustedHelix, newAngle);
+                            correctedPairs.push({
+                                source, adjustedHelix, oldAngle, newAngle,
+                                conflictLocalAngle: conflictAngle, round, decision: decisionLog
+                            });
+                            console.log(`[anglecorr2] round=${round} source=${source} rotated helix ${adjustedHelix}: ` +
+                                `${oldAngle}° → ${newAngle}° (conflict=${conflictAngle}°, ${decisionLog})`);
+                            correctedThisPass = true;
+                            break outer;
+                        }
+                    }
+                }
+                if (!correctedThisPass) {
+                    console.log(`[anglecorr2] round=${round} pass=${pass} ${candidates.length} conflict(s) ` +
+                        `but none passable`);
+                    break;
+                }
+                // Deliberately no getAngles refresh here. Rotations mutate
+                // networkMap in place; getAngles would rebuild it from the
+                // grid and erase our work.
+            }
+        }
+        return { networkMap, correctedPairs };
+    }
+    toscad.anglecorr2 = anglecorr2;
     // ── Shared helper: collect all crossover shift observations ──────
     // For each pair of helices connected by backbone crossovers, returns
     // the list of observed shifts (offsetA - offsetB for each crossover
