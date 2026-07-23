@@ -10,7 +10,7 @@ Usage (paste into the browser dev console):
     trials.crossovers();             // log + download crossovers.csv
     trials.crossovers({ download: false });   // just return the CSV string
 
-    trials.crossoversCombined();     // same, but after anglecomb2 merges same-axis helices
+    trials.crossoversCombined();     // same, but after anglecomb merges same-axis helices
     trials.crossoversCombined({ filename: 'merged_crossovers.csv' });
 
 The crossover counts are directional in the sense that we walk every strand
@@ -100,7 +100,7 @@ var trials;
     trials.crossovers = crossovers;
     /**
      * Same as `crossovers`, but first runs the canonical conversion pipeline
-     * up through `anglecomb2`, which merges same-axis disjoint helices into a
+     * up through `anglecomb`, which merges same-axis disjoint helices into a
      * single helix. Crossovers are then counted on the post-merge grid, so
      * pieces that findHelices over-segmented don't show up as crossovers
      * between themselves.
@@ -118,7 +118,7 @@ var trials;
         toscad.directionAlign2(grid);
         toscad.alignGridPrim(grid, binderHelices);
         const angles = toscad.getAngles(grid, helices, lattice);
-        const merged = toscad.anglecomb2(grid, helices, lattice, angles);
+        const merged = toscad.anglecomb(grid, helices, lattice, angles);
         if (log) {
             console.log(`[trials.crossoversCombined] ${merged.mergedPairs.length} pairs merged ` +
                 `(${helices.length} helices remaining)`);

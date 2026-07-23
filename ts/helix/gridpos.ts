@@ -397,13 +397,7 @@ namespace toscad {
     export function tempGlobalPos(
         networkMap: Map<number, Map<number, number>>,
         grid: GridMap,
-        lattice: string = 'honeycomb',
-        options?: {
-            uniformWeights?: boolean;
-            capChildren?: boolean;
-            trackOccupancy?: boolean;
-            placeDeferredNearest?: boolean;
-        }
+        lattice: string = 'honeycomb'
     ): Map<number, HelixPrediction[]> {
         type Parity = 'even' | 'odd';
         type HoneycombAngle = 0 | 120 | 240;
@@ -465,12 +459,10 @@ namespace toscad {
             return null;
         };
 
-        // Get number of crossovers (or uniform 1s, if the caller asked for a
-        // legacy-compatible flat traversal).
-        const uniformWeights = options?.uniformWeights === true;
-        const connectionCounts = uniformWeights ? null : getConnectionCounts(grid);
+        // Get number of crossovers
+        const connectionCounts = getConnectionCounts(grid);
         const getWeight = (a: number, b: number): number =>
-            uniformWeights ? 1 : (connectionCounts!.get(a)?.get(b) ?? 1);
+            connectionCounts.get(a)?.get(b) ?? 1;
 
         // Collect every helix referenced by the network map
         const allHelixIds = new Set<number>();
@@ -513,90 +505,14 @@ namespace toscad {
         const sortedHelixIds = [...allHelixIds].sort((a, b) => a - b);
         let nextRootCol = ROOT_SEPARATION;
 
-        // Occupancy tracking (legacy-layout mode): opt-in map cellKey ->
-        // helixId. When trackOccupancy is on, BFS skips
-        // any child whose target cell is already claimed by another helix
-        // and pushes it to the deferred queue for later nearest-open
-        // placement (matching legacy's Phase 2).
-        const trackOccupancy = options?.trackOccupancy === true;
-        const placeDeferredNearest = options?.placeDeferredNearest === true;
-        const occupied = new Map<string, number>();
-        const keyOf = (col: number, row: number) => `${col},${row}`;
-        const deferred: Array<{ parentId: number; helixId: number }> = [];
-        const deferredSeen = new Set<string>();
-        const enqueueDeferred = (parentId: number, helixId: number) => {
-            const k = `${parentId}|${helixId}`;
-            if (deferredSeen.has(k) || canonicalCoord.has(helixId)) return;
-            deferredSeen.add(k);
-            deferred.push({ parentId, helixId });
-        };
-
-        // Chebyshev-ring search for the closest unoccupied (col, row) cell.
-        // Used by Phase 2 (deferred helices), where staying near the parent
-        // is desirable.
-        const MAX_SEARCH_RADIUS = 10000;
-        const findNearestOpen = (anchorCol: number, anchorRow: number): [number, number] => {
-            if (!occupied.has(keyOf(anchorCol, anchorRow))) return [anchorCol, anchorRow];
-
-            for (let d = 1; d <= MAX_SEARCH_RADIUS; d++) {
-                for (let dc = -d; dc <= d; dc++) {
-                    for (let dr = -d; dr <= d; dr++) {
-                        if (Math.max(Math.abs(dc), Math.abs(dr)) !== d) continue;
-                        const c = anchorCol + dc;
-                        const r = anchorRow + dr;
-                        if (!occupied.has(keyOf(c, r))) return [c, r];
-                    }
-                }
-            }
-
-            // Fallback (unreachable in practice): walk along +col.
-            let fc = anchorCol + MAX_SEARCH_RADIUS + 1;
-            while (occupied.has(keyOf(fc, anchorRow))) fc += 1;
-            return [fc, anchorRow];
-        };
-
-        // For disconnected roots: place at (maxOccupiedCol + buffer, 0)
-        // so the disconnected subtree grows in its own column band clear
-        // of the main tree. Same "clean separation" ROOT_SEPARATION=1000
-        // gave us, but adaptive to the tree's real width so the viewport
-        // doesn't blow up. Buffer keeps a visible gap between components.
-        const DISCONNECTED_ROOT_BUFFER = 3;
-        const findFarPlacement = (): [number, number] => {
-            let maxCol = -Infinity;
-            for (const key of occupied.keys()) {
-                const c = parseInt(key.split(',')[0], 10);
-                if (c > maxCol) maxCol = c;
-            }
-            if (!isFinite(maxCol)) maxCol = 0;
-            let col = maxCol + DISCONNECTED_ROOT_BUFFER;
-            while (occupied.has(keyOf(col, 0))) col += 1;
-            return [col, 0];
-        };
-
         // BFS from every root
         for (const rootId of sortedHelixIds) {
             if (canonicalCoord.has(rootId)) continue;
 
-            // Non-zero disconnected roots: when trackOccupancy is on, pack
-            // them next to the main tree via findNearestOpen(origin) so the
-            // final layout stays compact. Otherwise fall back to the
-            // ROOT_SEPARATION safeguard used by anglecomb2 / anglecorr2 to
-            // keep separate components from spuriously colocating during
-            // signal detection.
-            let rootCol: number, rootRow: number;
-            if (rootId === 0) {
-                rootCol = 0;
-                rootRow = 0;
-            } else if (trackOccupancy) {
-                [rootCol, rootRow] = findFarPlacement();
-            } else {
-                rootCol = nextRootCol;
-                rootRow = 0;
-                nextRootCol += ROOT_SEPARATION;
-            }
-            canonicalCoord.set(rootId, [rootCol, rootRow]);
+            const rootCol = rootId === 0 ? 0 : nextRootCol;
+            canonicalCoord.set(rootId, [rootCol, 0]);
             canonicalOrient.set(rootId, 0);
-            if (trackOccupancy) occupied.set(keyOf(rootCol, rootRow), rootId);
+            if (rootId !== 0) nextRootCol += ROOT_SEPARATION;
 
             const queue: number[] = [rootId];
             // BFS manual instead of Array.shift() for performance
@@ -611,7 +527,7 @@ namespace toscad {
                 if (!edges || edges.size === 0) continue;
 
                 // Sort candidates by crossover weight, then by ascending id.
-                const candidatesAll = [...edges.entries()]
+                const candidates = [...edges.entries()]
                     .filter(([nid]) => nid !== parentId && !canonicalCoord.has(nid))
                     .map(([nid, localAngle]) => ({
                         nid,
@@ -619,16 +535,6 @@ namespace toscad {
                         weight: getWeight(parentId, nid)
                     }))
                     .sort((a, b) => b.weight - a.weight || a.nid - b.nid);
-
-                // Optionally cap children per node at maxLatticeAngles.
-                // Overflow helices go straight to the deferred queue.
-                let candidates = candidatesAll;
-                if (options?.capChildren) {
-                    candidates = candidatesAll.slice(0, ANGLES.length);
-                    for (const overflow of candidatesAll.slice(ANGLES.length)) {
-                        enqueueDeferred(parentId, overflow.nid);
-                    }
-                }
 
                 for (const c of candidates) {
                     if (canonicalCoord.has(c.nid)) continue;
@@ -639,18 +545,6 @@ namespace toscad {
                     const childCol = pCol + step.dCol;
                     const childRow = pRow + step.dRow;
 
-                    // Cell-occupancy check (matches legacy's occupied map).
-                    // If the target cell is already claimed by a different
-                    // helix, this child is deferred rather than colliding.
-                    if (trackOccupancy) {
-                        const k = keyOf(childCol, childRow);
-                        const occupant = occupied.get(k);
-                        if (occupant !== undefined && occupant !== c.nid) {
-                            enqueueDeferred(parentId, c.nid);
-                            continue;
-                        }
-                    }
-
                     canonicalCoord.set(c.nid, [childCol, childRow]);
                     canonicalOrient.set(
                         c.nid,
@@ -660,24 +554,8 @@ namespace toscad {
                             c.localAngle, snapped
                         )
                     );
-                    if (trackOccupancy) occupied.set(keyOf(childCol, childRow), c.nid);
                     queue.push(c.nid);
                 }
-            }
-        }
-
-        // Legacy Phase 2: place deferred helices (cap overflow + occupancy
-        // collisions) at the nearest open lattice cell around their parent.
-        if (placeDeferredNearest && deferred.length > 0) {
-            for (const { parentId, helixId } of deferred) {
-                if (canonicalCoord.has(helixId)) continue;
-                const parentCoord = canonicalCoord.get(parentId) ?? canonicalCoord.get(0) ?? [0, 0];
-                const [openCol, openRow] = findNearestOpen(parentCoord[0], parentCoord[1]);
-                canonicalCoord.set(helixId, [openCol, openRow]);
-                // Inherit parent's orientation (legacy does the same).
-                const parentOrient = canonicalOrient.get(parentId) ?? 0;
-                canonicalOrient.set(helixId, parentOrient);
-                occupied.set(keyOf(openCol, openRow), helixId);
             }
         }
 
@@ -743,29 +621,6 @@ namespace toscad {
         }
 
         return predictions;
-    }
-
-    // Harvests canonical (col, row) coordinates from tempGlobalPos. Uses
-    // legacy-layout mode (uniform weights + cap + occupancy + deferred
-    // nearest-open placement) so its spanning tree produces the clean,
-    // collision-free layout scadnano rendering expects.
-    export function helixPositions(
-        networkMap: Map<number, Map<number, number>>,
-        grid: GridMap,
-        lattice: string = 'honeycomb'
-    ): Map<number, [number, number]> {
-        const preds = tempGlobalPos(networkMap, grid, lattice, {
-            uniformWeights: true,
-            capChildren: true,
-            trackOccupancy: true,
-            placeDeferredNearest: true,
-        });
-        const result = new Map<number, [number, number]>();
-        for (const [hid, plist] of preds.entries()) {
-            const canonical = plist.find(p => p.isCanonical) ?? plist[0];
-            if (canonical) result.set(hid, canonical.coord);
-        }
-        return result;
     }
 
     // For every helix, count how many backbone crossovers it shares with each neighbor. Useful to remove bad combinations (such as end-only, which happens when a helix is broken in 2 pieces)
@@ -1527,7 +1382,7 @@ namespace toscad {
 
         return { networkMap, mergedPairs };
     }
-
+    
     // anglecorr2 — global-position variant of anglecorr.
     //
     // Consumes the multimap from tempGlobalPos. Detection is identical to
@@ -2279,6 +2134,365 @@ namespace toscad {
         }
 
         return { shifts: cumulativeShift };
+    }
+
+    type CrossoverWeightMap = Map<number, Map<number, number>>;
+    type CrossoverWeightEdge =
+        | { from: number; to: number; weight: number }
+        | { fromHelix: number; toHelix: number; weight: number };
+
+    /**
+     * Calculates absolute grid coordinates from local helix-to-helix angles.
+     *
+     * Phase 1: Build a strict lattice spanning tree from helix 0 using
+     * weighted BFS (top-3 children only at each node).
+     *
+     * Phase 2: Place deferred/artefact helices in nearest open coordinates
+     * around their parent once the phase-1 core is locked.
+     */
+    export function calculateGlobalPositions(
+        networkMap: Map<number, Map<number, number>>,
+        crossoverWeights?: CrossoverWeightMap | CrossoverWeightEdge[],
+        options?: {
+            runDeferredSubBfs?: boolean;
+            maxSearchRadius?: number;
+        },
+        lattice: string = 'honeycomb'
+    ): Map<number, [number, number]> {
+        type GridCoord = { col: number; row: number };
+        type QueueNode = { helixId: number; offset: number };
+        type DeferredItem = { parentId: number; helixId: number; inheritedOffset: number };
+        type Parity = 'even' | 'odd';
+        type HoneycombAngle = 0 | 120 | 240;
+        type SquareAngle = 0 | 90 | 180 | 270;
+        type LatticeAngle = HoneycombAngle | SquareAngle;
+
+        const latticeType = resolveLatticeKind(lattice);
+
+        const HONEYCOMB_ANGLES: HoneycombAngle[] = [0, 120, 240];
+        const SQUARE_ANGLES: SquareAngle[] = [0, 90, 180, 270];
+        const ANGLES: LatticeAngle[] = latticeType === 'square'
+            ? SQUARE_ANGLES.slice()
+            : HONEYCOMB_ANGLES.slice();
+        const maxChildrenPerNode = ANGLES.length;
+
+        const HONEYCOMB_STEP_BY_PARITY: Record<Parity, Record<HoneycombAngle, { dCol: number; dRow: number }>> = {
+            even: {
+                0: { dCol: 1, dRow: 0 },
+                120: { dCol: -1, dRow: 0 },
+                240: { dCol: 0, dRow: -1 }
+            },
+            odd: {
+                0: { dCol: 1, dRow: 0 },
+                120: { dCol: 0, dRow: 1 },
+                240: { dCol: -1, dRow: 0 }
+            }
+        };
+
+        const SQUARE_STEPS: Record<SquareAngle, { dCol: number; dRow: number }> = {
+            0: { dCol: 1, dRow: 0 },
+            90: { dCol: 0, dRow: 1 },
+            180: { dCol: -1, dRow: 0 },
+            270: { dCol: 0, dRow: -1 }
+        };
+
+        const normalizeAngle = (angle: number) => ((angle % 360) + 360) % 360;
+        const angleDistance = (a: number, b: number) => {
+            const diff = Math.abs(normalizeAngle(a) - normalizeAngle(b));
+            return Math.min(diff, 360 - diff);
+        };
+
+        const parityAt = (coord: GridCoord): Parity =>
+            (((coord.col + coord.row) & 1) === 0 ? 'even' : 'odd');
+
+        const getStep = (coord: GridCoord, angle: LatticeAngle): { dCol: number; dRow: number } => {
+            if (latticeType === 'square') {
+                return SQUARE_STEPS[angle as SquareAngle];
+            }
+
+            return HONEYCOMB_STEP_BY_PARITY[parityAt(coord)][angle as HoneycombAngle];
+        };
+
+        const snapToLatticeAngle = (angle: number): LatticeAngle => {
+            let best = ANGLES[0];
+            let bestDist = Number.POSITIVE_INFINITY;
+
+            for (const candidate of ANGLES) {
+                const dist = angleDistance(angle, candidate);
+                if (dist < bestDist || (dist === bestDist && candidate < best)) {
+                    best = candidate;
+                    bestDist = dist;
+                }
+            }
+
+            return best;
+        };
+
+        const latticeAngleFromDelta = (coord: GridCoord, dCol: number, dRow: number): LatticeAngle | null => {
+            for (const angle of ANGLES) {
+                const delta = getStep(coord, angle);
+                if (delta.dCol === dCol && delta.dRow === dRow) return angle;
+            }
+            return null;
+        };
+
+        const weightMap: CrossoverWeightMap = new Map();
+        const ensureWeightRow = (helixId: number): Map<number, number> => {
+            if (!weightMap.has(helixId)) weightMap.set(helixId, new Map<number, number>());
+            return weightMap.get(helixId)!;
+        };
+        const setWeight = (from: number, to: number, weight: number) => {
+            ensureWeightRow(from).set(to, weight);
+        };
+
+        if (crossoverWeights instanceof Map) {
+            for (const [from, row] of crossoverWeights.entries()) {
+                for (const [to, weight] of row.entries()) {
+                    setWeight(from, to, weight);
+                }
+            }
+        } else if (Array.isArray(crossoverWeights)) {
+            for (const edge of crossoverWeights) {
+                if ('fromHelix' in edge && 'toHelix' in edge) {
+                    setWeight(edge.fromHelix, edge.toHelix, edge.weight);
+                } else {
+                    setWeight(edge.from, edge.to, edge.weight);
+                }
+            }
+        }
+
+        const getWeight = (a: number, b: number): number => {
+            const direct = weightMap.get(a)?.get(b);
+            if (direct !== undefined) return direct;
+
+            const reverse = weightMap.get(b)?.get(a);
+            if (reverse !== undefined) return reverse;
+
+            return 1;
+        };
+
+        const allHelixIds = new Set<number>();
+        allHelixIds.add(0);
+
+        for (const [from, row] of networkMap.entries()) {
+            allHelixIds.add(from);
+            for (const to of row.keys()) allHelixIds.add(to);
+        }
+        for (const [from, row] of weightMap.entries()) {
+            allHelixIds.add(from);
+            for (const to of row.keys()) allHelixIds.add(to);
+        }
+
+        const positions = new Map<number, GridCoord>();
+        const occupied = new Map<string, number>();
+        const globalRotationOffsets = new Map<number, number>();
+        const deferredQueue: DeferredItem[] = [];
+        const deferredSeen = new Set<string>();
+
+        const keyOf = (coord: GridCoord) => `${coord.col},${coord.row}`;
+
+        const enqueueDeferred = (parentId: number, helixId: number, inheritedOffset: number) => {
+            const key = `${parentId}|${helixId}`;
+            if (deferredSeen.has(key) || positions.has(helixId)) return;
+            deferredSeen.add(key);
+            deferredQueue.push({ parentId, helixId, inheritedOffset });
+        };
+
+        const maxSearchRadius = Math.max(1, options?.maxSearchRadius ?? 256);
+
+        const latticeNeighbors = (coord: GridCoord): GridCoord[] => {
+            return ANGLES.map((angle) => {
+                const step = getStep(coord, angle);
+                return {
+                    col: coord.col + step.dCol,
+                    row: coord.row + step.dRow
+                };
+            });
+        };
+
+        const findNearestOpen = (anchor: GridCoord): GridCoord => {
+            if (!occupied.has(keyOf(anchor))) return { col: anchor.col, row: anchor.row };
+
+            const visited = new Set<string>();
+            const queue: Array<{ coord: GridCoord; dist: number }> = [{ coord: anchor, dist: 0 }];
+            visited.add(keyOf(anchor));
+
+            let qIdx = 0;
+            while (qIdx < queue.length) {
+                const { coord, dist } = queue[qIdx++];
+                if (dist >= maxSearchRadius) continue;
+
+                const neighbors = latticeNeighbors(coord).sort((a, b) => {
+                    const da = Math.abs(a.col - anchor.col) + Math.abs(a.row - anchor.row);
+                    const db = Math.abs(b.col - anchor.col) + Math.abs(b.row - anchor.row);
+                    if (da !== db) return da - db;
+                    if (a.col !== b.col) return a.col - b.col;
+                    return a.row - b.row;
+                });
+
+                for (const next of neighbors) {
+                    const nextKey = keyOf(next);
+                    if (visited.has(nextKey)) continue;
+                    visited.add(nextKey);
+
+                    if (!occupied.has(nextKey)) return next;
+
+                    queue.push({ coord: next, dist: dist + 1 });
+                }
+            }
+
+            const fallback = { col: anchor.col + maxSearchRadius + 1, row: anchor.row };
+            while (occupied.has(keyOf(fallback))) {
+                fallback.col += 1;
+            }
+            return fallback;
+        };
+
+        const computeChildOffset = (
+            parentId: number,
+            childId: number,
+            parentCoord: GridCoord,
+            childCoord: GridCoord,
+            parentLocalAngle: number,
+            snappedForwardAngle: LatticeAngle
+        ): number => {
+            const dColBack = parentCoord.col - childCoord.col;
+            const dRowBack = parentCoord.row - childCoord.row;
+
+            const backGlobal = latticeAngleFromDelta(childCoord, dColBack, dRowBack);
+            const desiredBackGlobalAngle = backGlobal !== null
+                ? backGlobal
+                : normalizeAngle(snappedForwardAngle + 180);
+
+            const childLocalBack = networkMap.get(childId)?.get(parentId);
+            if (typeof childLocalBack === 'number') {
+                return normalizeAngle(desiredBackGlobalAngle - childLocalBack);
+            }
+
+            const inferredBackLocal = normalizeAngle(parentLocalAngle + 180);
+            return normalizeAngle(desiredBackGlobalAngle - inferredBackLocal);
+        };
+
+        const processNode = (node: QueueNode, targetQueue: QueueNode[]) => {
+            const parentCoord = positions.get(node.helixId);
+            if (!parentCoord) return;
+
+            const localEdges = networkMap.get(node.helixId);
+            if (!localEdges || localEdges.size === 0) return;
+
+            const candidates = Array.from(localEdges.entries())
+                .filter(([neighborId]) => neighborId !== node.helixId && !positions.has(neighborId))
+                .map(([neighborId, localAngle]) => ({
+                    neighborId,
+                    localAngle: normalizeAngle(localAngle),
+                    weight: getWeight(node.helixId, neighborId)
+                }))
+                .sort((a, b) => {
+                    if (b.weight !== a.weight) return b.weight - a.weight;
+                    return a.neighborId - b.neighborId;
+                });
+
+            const selected = candidates.slice(0, maxChildrenPerNode);
+            const overflow = candidates.slice(maxChildrenPerNode);
+            for (const item of overflow) {
+                enqueueDeferred(node.helixId, item.neighborId, node.offset);
+            }
+
+            for (const item of selected) {
+                if (positions.has(item.neighborId)) continue;
+
+                const predictedGlobal = normalizeAngle(item.localAngle + node.offset);
+                const snappedAngle = snapToLatticeAngle(predictedGlobal);
+                const step = getStep(parentCoord, snappedAngle);
+
+                const childCoord: GridCoord = {
+                    col: parentCoord.col + step.dCol,
+                    row: parentCoord.row + step.dRow
+                };
+
+                const cellKey = keyOf(childCoord);
+                const occupant = occupied.get(cellKey);
+
+                if (occupant !== undefined && occupant !== item.neighborId) {
+                    enqueueDeferred(node.helixId, item.neighborId, node.offset);
+                    continue;
+                }
+
+                positions.set(item.neighborId, childCoord);
+                occupied.set(cellKey, item.neighborId);
+
+                const childOffset = computeChildOffset(
+                    node.helixId,
+                    item.neighborId,
+                    parentCoord,
+                    childCoord,
+                    item.localAngle,
+                    snappedAngle
+                );
+
+                globalRotationOffsets.set(item.neighborId, childOffset);
+                targetQueue.push({ helixId: item.neighborId, offset: childOffset });
+            }
+        };
+
+        // Phase 1: strict weighted BFS spanning tree from helix 0.
+        positions.set(0, { col: 0, row: 0 });
+        occupied.set('0,0', 0);
+        globalRotationOffsets.set(0, 0);
+
+        const mainQueue: QueueNode[] = [{ helixId: 0, offset: 0 }];
+        let mainIdx = 0;
+        while (mainIdx < mainQueue.length) {
+            processNode(mainQueue[mainIdx++], mainQueue);
+        }
+
+        // Phase 2: place deferred artefacts nearest to their parent.
+        const runDeferredSubBfs = options?.runDeferredSubBfs ?? false;
+        const deferredSubQueue: QueueNode[] = [];
+
+        let deferredIdx = 0;
+        while (deferredIdx < deferredQueue.length) {
+            const item = deferredQueue[deferredIdx++];
+            if (positions.has(item.helixId)) continue;
+
+            const parentCoord = positions.get(item.parentId) ?? positions.get(0) ?? { col: 0, row: 0 };
+            const coord = findNearestOpen(parentCoord);
+
+            positions.set(item.helixId, coord);
+            occupied.set(keyOf(coord), item.helixId);
+
+            const inherited = globalRotationOffsets.get(item.parentId);
+            const chosenOffset = inherited !== undefined ? inherited : item.inheritedOffset;
+            globalRotationOffsets.set(item.helixId, chosenOffset);
+
+            if (runDeferredSubBfs) {
+                deferredSubQueue.push({ helixId: item.helixId, offset: chosenOffset });
+            }
+        }
+
+        if (runDeferredSubBfs) {
+            let subIdx = 0;
+            while (subIdx < deferredSubQueue.length) {
+                processNode(deferredSubQueue[subIdx++], deferredSubQueue);
+            }
+        }
+
+        // Ensure every helix in the input graph gets a coordinate.
+        const rootCoord = positions.get(0) ?? { col: 0, row: 0 };
+        const sortedHelixIds = Array.from(allHelixIds).sort((a, b) => a - b);
+        for (const helixId of sortedHelixIds) {
+            if (positions.has(helixId)) continue;
+            const coord = findNearestOpen(rootCoord);
+            positions.set(helixId, coord);
+            occupied.set(keyOf(coord), helixId);
+        }
+
+        const result = new Map<number, [number, number]>();
+        for (const [helixId, coord] of positions.entries()) {
+            result.set(helixId, [coord.col, coord.row]);
+        }
+
+        return result;
     }
 
     const RENUMBER_JUMP_PENALTY = 1000;
