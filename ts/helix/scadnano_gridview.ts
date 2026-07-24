@@ -44,8 +44,8 @@ namespace scadnano {
     const NODE_RADIUS  = 0.55;
     // Ghost dot radius (background grid marker)
     const GHOST_RADIUS = 0.14;
-    // All dots (grid ghosts + nodes) use one shared blue.
-    const DOT_COLOR = 0x55C1FF;
+    // All dots (grid ghosts + nodes) use one shared yellow.
+    const DOT_COLOR = 0xffd400;
     const RING_DEFAULT_COLOR = 0x000000;
     const RING_SELECTED_COLOR = 0xff4da6;
 

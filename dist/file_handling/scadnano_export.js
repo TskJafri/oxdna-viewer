@@ -36,7 +36,7 @@ class ScadnanoExportManager {
     // when N === 1 — that's the only case "Split from selected" can act on.
     focusedHelixIds = null;
     static LOCKED_COLOR = 0x808080;
-    static UNLOCKED_COLOR = 0x55C1FF;
+    static UNLOCKED_COLOR = 0xffd400;
     clearHistory() {
         this.history = this.createEmptyHistory();
         this.refreshHistoryButtons();
@@ -97,16 +97,17 @@ class ScadnanoExportManager {
             notify(`Scadnano export failed: ${err}`, 'alert');
         }
     }
-    // Triggered by the "Recalculate Grid" button. Reruns the layout pipeline
-    // on the existing helices and grid (as the user has combined/edited them)
-    // — skipping setGrid. The convergeLayout helper drives the full pipeline
+    // Triggered by the "Recalculate Grid" button. Takes the existing
+    // helices[][] array from currentScadnanoLayout, rebuilds the grid from
+    // scratch via toscad.setGrid, and then reruns the full layout pipeline
     // (directionAlign2 → alignGridPrim → getAngles → anglecomb → anglecorr →
     // runAxisOverlapMerge → calculateGlobalPositions → renumberHelicesGNN →
-    // applyHelixRenumber) to a fingerprint fixed point in this call, so
-    // clicking Recalculate once reaches the same state that multiple manual
-    // clicks used to converge to. collectCrossovers runs once afterwards
-    // against the final grid. Locked helix positions are tracked by
-    // nucleotide membership so they survive renumbering.
+    // applyHelixRenumber) to a fingerprint fixed point via convergeLayout.
+    // Rebuilding the grid ensures the layout reflects the helix membership
+    // after any combines / splits the user has done; otherwise the old grid
+    // marks (with their previous helix ids and offsets) would leak into the
+    // new pipeline. Locked helix positions are tracked by nucleotide
+    // membership so they survive renumbering.
     recalculateGridFromScratch() {
         if (!this.currentScadnanoLayout) {
             notify('Open the grid view first before recalculating.', 'warning');
@@ -128,15 +129,21 @@ class ScadnanoExportManager {
         let failed = false;
         this.runScadnanoLongCalculation(() => {
             try {
-                // Reuse the existing grid — setGrid is skipped entirely.
+                // Take the existing helices[][] array as the source of truth
+                // and rebuild the grid from scratch via setGrid. This mirrors
+                // the construction path used by prepareScadnanoLayout so the
+                // grid reflects the current helix membership (any combines /
+                // splits the user has done since the last recalculate) instead
+                // of carrying forward the previous grid's marks.
                 // Shallow-clone helices so anglecomb's in-place splices don't
                 // mutate currentScadnanoLayout.helices, keeping recalculate idempotent.
-                const grid = this.currentScadnanoLayout.grid;
                 const helices = this.currentScadnanoLayout.helices
                     .map(slot => slot.slice());
-                // binderHelices are not stored on the layout; pass empty so
-                // alignGridPrim and detectLatticeKind treat all helices as lattice members.
-                const binderHelices = [];
+                const { grid, binderHelices: detectedBinders } = toscad.setGrid(helices);
+                // Prefer freshly-detected binder helices; fall back to empty
+                // so alignGridPrim and detectLatticeKind treat all helices as
+                // lattice members when no binders are present.
+                const binderHelices = detectedBinders ?? [];
                 // Fixed-point loop for the entire pipeline, INCLUDING
                 // renumberHelicesGNN + applyHelixRenumber. Renumber is
                 // inside the loop because applyHelixRenumber rewrites
@@ -880,6 +887,11 @@ class ScadnanoExportManager {
     // the helix grouping. Reuses the existing cache when possible; otherwise
     // runs the cheap helix-detection path only (no full layout pipeline,
     // since grid positions are deliberately excluded from the output).
+    //
+    // Selection behaviour: if the grid view is open AND the user has at least
+    // one helix (or any nucleotide within a helix) selected, only the
+    // selected helices are exported — preserving the helices[][] shape. With
+    // no selection, every helix is exported.
     exportHelicesAsJson(name) {
         let helices = this.ensureScadnanoHelicesCache();
         if (!helices || helices.length === 0) {
@@ -896,7 +908,28 @@ class ScadnanoExportManager {
             notify('No helices available to export.', 'warning');
             return;
         }
-        const idsOnly = helices.map(helix => helix.map(n => n.id));
+        // If a selection exists, restrict the export to the selected helices.
+        // The grid editor's getSelectedHelixIds() returns the renumbered helix
+        // indices of every selected node (each grid node represents one helix,
+        // and its `id` is the renumbered helix index — see
+        // scadnano_gridview.loadFromHelixPos, which sets node.id = helixId
+        // from the helixPos map). Those indices match the helices[][] array
+        // indices produced by applyHelixRenumber, so we filter by INDEX here,
+        // not by nucleotide id.
+        let helicesToExport = helices;
+        const editor = this.scadnanoGridEditor;
+        if (editor && typeof editor.getSelectedHelixIds === 'function') {
+            const selectedIds = editor.getSelectedHelixIds();
+            if (Array.isArray(selectedIds) && selectedIds.length > 0) {
+                const selectedSet = new Set(selectedIds);
+                helicesToExport = helices.filter((_, idx) => selectedSet.has(idx));
+                if (helicesToExport.length === 0) {
+                    notify('Selected helices are no longer present in the layout.', 'warning');
+                    return;
+                }
+            }
+        }
+        const idsOnly = helicesToExport.map(helix => helix.map(n => n.id));
         const fileName = name && name.trim() ? `${name.trim()}.json` : 'helices.json';
         makeTextFile(fileName, JSON.stringify(idsOnly, null, 2));
     }
