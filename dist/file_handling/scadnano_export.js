@@ -100,8 +100,9 @@ class ScadnanoExportManager {
     // Triggered by the "Recalculate Grid" button. Takes the existing
     // helices[][] array from currentScadnanoLayout, rebuilds the grid from
     // scratch via toscad.setGrid, and then reruns the full layout pipeline
-    // (directionAlign2 → alignGridPrim → getAngles → anglecomb → anglecorr →
-    // runAxisOverlapMerge → calculateGlobalPositions → renumberHelicesGNN →
+    // (directionAlign2 → alignGridPrim → getAngles → filter binders →
+    // anglecomb → anglecorr → runAxisOverlapMerge → reintroduce binders →
+    // getAngles → anglecorr → calculateGlobalPositions → renumberHelicesGNN →
     // applyHelixRenumber) to a fingerprint fixed point via convergeLayout.
     // Rebuilding the grid ensures the layout reflects the helix membership
     // after any combines / splits the user has done; otherwise the old grid
@@ -1164,15 +1165,70 @@ class ScadnanoExportManager {
                     latticeTypeSet = requestedLatticeType;
                 }
             }
+            // ── Phase 1: main pipeline WITHOUT binder helices ────────────────
+            // Binder helices can interfere with angle resolution for the main
+            // structure. We track binder helices by their nucleotide IDs (which
+            // are immutable across merges/renumbering) so that the filter
+            // stays correct even after anglecomb2's mergeHelixInto remaps
+            // helixIds and splices the helices array.
             networkMap = toscad.getAngles(grid, helices, latticeTypeSet);
-            const combResult = toscad.anglecomb2(grid, helices, latticeTypeSet, networkMap);
-            networkMap = combResult.networkMap;
+            // Snapshot binder nucleotide IDs ONCE. These survive any merge/
+            // renumber because nucleotide ids are assigned at creation and
+            // never change — only helixId indices shift.
+            const binderNtIds = new Set();
+            for (const bHid of binderHelices) {
+                const slot = helices[bHid];
+                if (Array.isArray(slot)) {
+                    for (const nt of slot)
+                        binderNtIds.add(nt.id);
+                }
+            }
+            // Re-derive the set of binder helixIds from the grid, using
+            // the immutable nucleotide IDs as the anchor. This stays
+            // correct after any helixId remapping.
+            const deriveBinderHelixSet = () => {
+                const s = new Set();
+                for (const [ntId, m] of grid.entries()) {
+                    if (binderNtIds.has(ntId))
+                        s.add(m.helixId);
+                }
+                return s;
+            };
+            const filterBinderEntries = (nm) => {
+                const bSet = deriveBinderHelixSet();
+                const out = new Map();
+                for (const [hid, neighbors] of nm.entries()) {
+                    if (bSet.has(hid))
+                        continue;
+                    const filteredNeighbors = new Map();
+                    for (const [nid, angle] of neighbors.entries()) {
+                        if (bSet.has(nid))
+                            continue;
+                        filteredNeighbors.set(nid, angle);
+                    }
+                    out.set(hid, filteredNeighbors);
+                }
+                return out;
+            };
+            const filteredNetworkMap = filterBinderEntries(networkMap);
+            const combResult = toscad.anglecomb2(grid, helices, latticeTypeSet, filteredNetworkMap);
+            // anglecomb2 internally re-derives networkMap via getAngles after
+            // each merge, which would include the (now-remapped) binder
+            // helixIds. Re-filter to keep binders out for the subsequent
+            // anglecorr2 call.
+            networkMap = filterBinderEntries(combResult.networkMap);
             const corrResult = toscad.anglecorr2(grid, helices, latticeTypeSet, networkMap);
             networkMap = corrResult.networkMap;
             this.runAxisOverlapMerge(helices, grid, latticeTypeSet);
-            // Refresh angles so calculateGlobalPositions sees the final
-            // post-mutation state.
+            // ── Phase 2: reintroduce binder helices ──────────────────────────
+            // Grid and helices array have stayed self-consistent through the
+            // merges above (binder helixIds shifted along with the rest, and
+            // our nucleotide-ID tracking knows which helices they are now).
+            // Run getAngles on the full grid to bring binders back into the
+            // network map, then anglecorr2 to resolve their angles.
             networkMap = toscad.getAngles(grid, helices, latticeTypeSet);
+            const corrResult2 = toscad.anglecorr2(grid, helices, latticeTypeSet, networkMap);
+            networkMap = corrResult2.networkMap;
             helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeTypeSet);
             // Renumber inside the loop. Each pass' renumber rewrites helix ids
             // on the grid; the next pass' directionAlign2 / alignGridPrim then
@@ -1234,11 +1290,15 @@ class ScadnanoExportManager {
         this.currentScadnanoHelices = helices;
         const { grid, binderHelices } = toscad.setGrid(helices);
         // Iterate the whole pipeline — directionAlign2 → alignGridPrim →
-        // getAngles → anglecomb → anglecorr → runAxisOverlapMerge →
+        // getAngles → (filter out binders) → anglecomb → anglecorr →
+        // runAxisOverlapMerge → (reintroduce binders) → getAngles → anglecorr →
         // calculateGlobalPositions → renumberHelicesGNN → applyHelixRenumber
-        // — to a fingerprint fixed point. Renumber is INSIDE the loop because
-        // it rewrites helix ids on the grid, which changes the anchor for the
-        // next iteration's directionAlign2 / alignGridPrim; see convergeLayout.
+        // — to a fingerprint fixed point. Binder helices are excluded during
+        // the main angle-resolution pipeline so they don't interfere, then
+        // reintroduced for a final anglecorr pass before global positioning.
+        // Renumber is INSIDE the loop because it rewrites helix ids on the grid,
+        // which changes the anchor for the next iteration's directionAlign2 /
+        // alignGridPrim; see convergeLayout.
         const { helices: finalHelices, helixPos, latticeType } = this.convergeLayout(helices, grid, binderHelices, requestedLatticeType, wireframe);
         this.currentScadnanoHelices = finalHelices;
         // Build connections AFTER convergence so they reference the final IDs.
