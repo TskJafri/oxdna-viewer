@@ -187,8 +187,37 @@ var toscad;
         return { end1, end2, diameter };
     }
     toscad.crossoverEndpointsHelix = crossoverEndpointsHelix;
-    function setGrid(helices) {
+    function setGrid(helices, preserveGrid, preservedNtIds) {
         const grid = new Map();
+        // If a previous grid is provided for preservation, copy its marks into
+        // the new grid — but ONLY for nucleotides in preservedNtIds (if given).
+        // This lets helices that haven't been merged keep their grid positions,
+        // while nucleotides in merged/altered helices get fresh assignments.
+        // 
+        // IMPORTANT: remap the helixId of each preserved mark to match the
+        // current helices array slot. The preserved mark's helixId is from the
+        // previous iteration's slot ordering, which may differ from the current
+        // ordering after renumbering.
+        if (preserveGrid && preserveGrid.size > 0) {
+            // Build a lookup: ntId → current helixId (slot index)
+            const ntToCurrentHelixId = new Map();
+            for (let slotIdx = 0; slotIdx < helices.length; slotIdx++) {
+                const slot = helices[slotIdx];
+                if (!slot)
+                    continue;
+                for (const nt of slot) {
+                    ntToCurrentHelixId.set(nt.id, slotIdx);
+                }
+            }
+            for (const [ntId, markData] of preserveGrid.entries()) {
+                if (preservedNtIds && !preservedNtIds.has(ntId))
+                    continue;
+                const currentHelixId = ntToCurrentHelixId.get(ntId);
+                if (currentHelixId === undefined)
+                    continue; // nt not in current helices
+                grid.set(ntId, { ...markData, helixId: currentHelixId });
+            }
+        }
         // --- Helpers ---
         const mark = (nt, helixId, offset, dir) => {
             if (!grid.has(nt.id)) {

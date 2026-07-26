@@ -94,6 +94,11 @@ class ScadnanoExportManager {
     private currentScadnanoConnections: Array<[number, number]> = [];
     private currentScadnanoLayout: ScadnanoPreparedLayout | null = null;
 
+    // Original helices from calculateScadnanoHelices(), before any merges.
+    // Used by recalculateGridFromScratch to ensure the pipeline starts from
+    // the same initial state as the first export, making it truly idempotent.
+    private originalScadnanoHelices: Nucleotide[][] | null = null;
+
     // Cached findHelices() output. Populated lazily by calculateScadnanoHelices and
     // reused by the export pipeline so the partials + usedSides ledger computed by
     // generateHelix is available to applyAxisOverlapMerge without re-walking the strands.
@@ -238,41 +243,26 @@ class ScadnanoExportManager {
         this.runScadnanoLongCalculation(
             () => {
                 try {
-                    // Take the existing helices[][] array as the source of truth
-                    // and rebuild the grid from scratch via setGrid. This mirrors
-                    // the construction path used by prepareScadnanoLayout so the
-                    // grid reflects the current helix membership (any combines /
-                    // splits the user has done since the last recalculate) instead
-                    // of carrying forward the previous grid's marks.
+                    // Take the existing helices[][] array as the source of truth.
                     // Shallow-clone helices so anglecomb's in-place splices don't
                     // mutate currentScadnanoLayout.helices, keeping recalculate idempotent.
                     const helices: Nucleotide[][] = this.currentScadnanoLayout!.helices
                         .map(slot => slot.slice());
 
-                    const { grid, binderHelices: detectedBinders } = toscad.setGrid(helices);
+                    // Pass the stored grid so convergeLayout's first iteration can
+                    // preserve grid marks from it. This makes recalculateGridFromScratch
+                    // behave the same as the loop's subsequent iterations.
+                    const storedGrid = this.currentScadnanoLayout!.grid;
+                    const dummyBinders: number[] = [];
 
-                    // Prefer freshly-detected binder helices; fall back to empty
-                    // so alignGridPrim and detectLatticeKind treat all helices as
-                    // lattice members when no binders are present.
-                    const binderHelices: number[] = detectedBinders ?? [];
-
-                    // Fixed-point loop for the entire pipeline, INCLUDING
-                    // renumberHelicesGNN + applyHelixRenumber. Renumber is
-                    // inside the loop because applyHelixRenumber rewrites
-                    // mark.helixId on the grid, which changes the identity of
-                    // helix 0 for the next iteration's directionAlign2 /
-                    // alignGridPrim. Keeping it outside was exactly why the
-                    // button previously needed 3-4 clicks to converge — each
-                    // click renumbered, the next click re-anchored, and the
-                    // state slowly stabilised. Now one click reaches the same
-                    // fixed point. See convergeLayout.
                     const {
                         helices: finalHelices,
+                        grid: finalGrid,
                         helixPos,
                         latticeType
-                    } = this.convergeLayout(helices, grid, binderHelices, gridType, wireframe);
+                    } = this.convergeLayout(helices, storedGrid, dummyBinders, gridType, wireframe);
 
-                    const { crossovers } = toscad.collectCrossovers(grid);
+                    const { crossovers } = toscad.collectCrossovers(finalGrid);
                     this.currentScadnanoConnections = this.buildScadnanoConnections(crossovers);
 
                     this.currentScadnanoHelices = finalHelices;
@@ -280,7 +270,7 @@ class ScadnanoExportManager {
                         latticeType,
                         nucleotideCount: this.currentScadnanoLayout!.nucleotideCount,
                         helices: finalHelices,
-                        grid,
+                        grid: finalGrid,
                         helixPos,
                         wireframe
                     };
@@ -1327,6 +1317,8 @@ class ScadnanoExportManager {
         this.currentScadnanoPartials = result?.partials ?? null;
         this.currentScadnanoUsedSides = result?.usedSides ?? null;
         this.notifyHelixCoverageMismatch(helices, nucleotideElements);
+        // Store a deep copy as the original (pre-merge) helices for recalculateGridFromScratch.
+        this.originalScadnanoHelices = helices.map(h => h.slice());
         return helices;
     }
 
@@ -1355,6 +1347,7 @@ class ScadnanoExportManager {
         wireframe: boolean
     ): {
         helices: Nucleotide[][];
+        grid: any;
         helixPos: HelixPosMap;
         latticeType: ScadnanoGridType;
         networkMap: Map<number, Map<number, number>>;
@@ -1385,20 +1378,76 @@ class ScadnanoExportManager {
             helixPos = renumbered.helixPos;
 
             console.log(`[scadnano] convergeLayout (wireframe) — single pass, no iteration`);
-            return { helices, helixPos, latticeType, networkMap };
+            return { helices, grid, helixPos, latticeType, networkMap };
         }
 
         // ── Non-wireframe: fingerprint fixed-point loop ─────────────────────
+        // Each iteration rebuilds the grid from scratch via setGrid on the
+        // previous iteration's helices, then runs the full pipeline. This
+        // ensures that the grid is always consistent with the helices array,
+        // even after merges/renumbering. The lattice type is detected once
+        // on the first iteration and frozen for subsequent iterations.
+        // 
+        // After the first iteration, we pass the previous grid to setGrid as
+        // `preserveGrid`. This carries forward grid marks for nucleotides in
+        // helices that haven't been merged, while only reassigning positions
+        // for nucleotides in newly-merged or altered helices.
         let latticeTypeSet: ScadnanoGridType | null = null;
         networkMap = new Map();
         helixPos = new Map();
         let prevFp = '';
+        // Initialize prevGrid from the input grid parameter. This allows
+        // callers (like recalculateGridFromScratch) to pass a stored grid
+        // so the first iteration can preserve marks from it.
+        let prevGrid: any = grid;
+        // Initialize prevHelicesSnapshot from the input helices. This allows
+        // the first iteration to detect which helix slots are "stable" vs
+        // merged/altered compared to the previous state.
+        let prevHelicesSnapshot: Nucleotide[][] | null = helices.map(h => h.slice());
         // Iteration cap for the fixed-point loop.
         const MAX_ITER = 7;
 
         for (let iter = 1; iter <= MAX_ITER; iter++) {
+            // Rebuild grid from scratch on the current helices array.
+            // After the first iteration, preserve grid marks from the previous
+            // iteration for nucleotides in helices that haven't been merged.
+            // We detect merges by comparing nucleotide IDs: if a nucleotide
+            // was in helix[i] before and is still in helix[i] now, preserve it.
+            // If nucleotides moved (e.g. helix was merged into another), don't
+            // preserve — let setGrid reassign their grid positions.
+            let preservedNtIds: Set<number> | undefined;
+            if (prevGrid && prevHelicesSnapshot) {
+                preservedNtIds = new Set<number>();
+                const prevNtsBySlot = prevHelicesSnapshot.map(h => new Set(h.map(nt => nt.id)));
+                for (let i = 0; i < helices.length; i++) {
+                    const currNts = helices[i];
+                    if (!currNts) continue;
+                    // A helix is "stable" if its nucleotide set exactly matches
+                    // a helix from the previous iteration. This means no merge
+                    // touched it.
+                    for (let j = 0; j < prevNtsBySlot.length; j++) {
+                        const prevSlot = prevNtsBySlot[j];
+                        if (currNts.length !== prevSlot.size) continue;
+                        let match = true;
+                        for (const nt of currNts) {
+                            if (!prevSlot.has(nt.id)) { match = false; break; }
+                        }
+                        if (match) {
+                            // This helix slot is identical to a previous slot.
+                            // Preserve all its nucleotides' grid marks.
+                            for (const nt of currNts) preservedNtIds.add(nt.id);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            const { grid: freshGrid, binderHelices: freshBinders } = toscad.setGrid(helices, prevGrid, preservedNtIds);
+            grid = freshGrid;
+            binderHelices = freshBinders ?? [];
+
             toscad.directionAlign2(grid);
-            toscad.alignGridPrim(grid, iter === 1 ? binderHelices : []);
+            toscad.alignGridPrim(grid, binderHelices);
 
             // Resolve 'automatic' once, after the first alignment (detection
             // reads helixId / offset / direction off the aligned grid). Freeze
@@ -1497,13 +1546,20 @@ class ScadnanoExportManager {
             const fp = this.gridFingerprint(grid, helices.length);
             if (fp === prevFp) {
                 console.log(`[scadnano] convergeLayout converged in ${iter} pass${iter === 1 ? '' : 'es'}`);
-                return { helices, helixPos, latticeType: latticeTypeSet, networkMap };
+                return { helices, grid, helixPos, latticeType: latticeTypeSet, networkMap };
             }
             prevFp = fp;
+            // Save the current grid for preservation in the next iteration.
+            // Helices that survived this iteration's merges keep their grid marks;
+            // only nucleotides in newly-merged/altered helices get reassigned.
+            prevGrid = grid;
+            // Snapshot helices so the next iteration can detect which slots
+            // are stable (identical nucleotide sets) vs merged/altered.
+            prevHelicesSnapshot = helices.map(h => h.slice());
         }
 
         console.warn(`[scadnano] convergeLayout hit iteration cap ${MAX_ITER}; using last state.`);
-        return { helices, helixPos, latticeType: latticeTypeSet ?? 'honeycomb', networkMap };
+        return { helices, grid, helixPos, latticeType: latticeTypeSet ?? 'honeycomb', networkMap };
     }
 
     // Build the partialEnds + partialAxes inputs for hashAxisOverlap from the
@@ -1567,20 +1623,20 @@ class ScadnanoExportManager {
         // Renumber is INSIDE the loop because it rewrites helix ids on the grid,
         // which changes the anchor for the next iteration's directionAlign2 /
         // alignGridPrim; see convergeLayout.
-        const { helices: finalHelices, helixPos, latticeType } = this.convergeLayout(
+        const { helices: finalHelices, grid: finalGrid, helixPos, latticeType } = this.convergeLayout(
             helices, grid, binderHelices, requestedLatticeType, wireframe
         );
         this.currentScadnanoHelices = finalHelices;
 
         // Build connections AFTER convergence so they reference the final IDs.
-        const { crossovers } = toscad.collectCrossovers(grid);
+        const { crossovers } = toscad.collectCrossovers(finalGrid);
         this.currentScadnanoConnections = this.buildScadnanoConnections(crossovers);
 
         this.currentScadnanoLayout = {
             latticeType,
             nucleotideCount,
             helices: finalHelices,
-            grid,
+            grid: finalGrid,
             helixPos,
             wireframe
         };
