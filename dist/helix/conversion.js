@@ -187,7 +187,14 @@ var toscad;
         return { end1, end2, diameter };
     }
     toscad.crossoverEndpointsHelix = crossoverEndpointsHelix;
-    function setGrid(helices, preserveGrid, preservedNtIds) {
+    function setGrid(helices, preserveGrid, preservedNtIds, mergedGroups) {
+        // mergedGroups: merge provenance from the previous pipeline pass.
+        // Key = current helix slot; value = one nt-id array per pre-merge
+        // helix (an "origin-group"). Helices listed here are NOT re-walked —
+        // the backbone walk can't handle a helix made of disconnected
+        // components. Instead each origin-group keeps its internal grid marks
+        // from preserveGrid, and after the main loop the groups are re-aligned
+        // relative to each other (and the whole lattice) via alignGridPrim.
         const grid = new Map();
         // If a previous grid is provided for preservation, copy its marks into
         // the new grid — but ONLY for nucleotides in preservedNtIds (if given).
@@ -335,9 +342,30 @@ var toscad;
             if (!hasPairInHelix) {
                 binderHelices.push(helixId);
             }
+            // --- MERGED-HELIX FAST PATH ---
+            // This helix is the product of merges from the previous pipeline
+            // pass. Do NOT re-walk it — the walk can't handle disconnected
+            // components. Carry forward each origin-group's internal marks
+            // from preserveGrid (remapped to this slot). The groups are
+            // re-aligned relative to each other in the post-pass after this
+            // loop. Any nt missing from preserveGrid falls through to the
+            // binder sweeper below.
+            const originGroups = preserveGrid ? mergedGroups?.get(helixId) : undefined;
+            const isMergedHelix = !!(originGroups && originGroups.length > 0);
+            if (isMergedHelix) {
+                for (const group of originGroups) {
+                    for (const ntId of group) {
+                        if (grid.has(ntId))
+                            continue;
+                        const prevMark = preserveGrid.get(ntId);
+                        if (prevMark)
+                            grid.set(ntId, { ...prevMark, helixId });
+                    }
+                }
+            }
             let offset = 0; // Local offset for the main backbone
             // --- A-D. MAIN BACKBONE LOGIC ---
-            if (endpoints) {
+            if (!isMergedHelix && endpoints) {
                 // start "forward" from any endpoint. They will be oriented later. Our main priority is to generate a grid without overlap and sufficient details.
                 const helixFwd = endpoints.end1;
                 const helixFwdDir = (isInHelix(helixSet, helixFwd.n3) ? 'n3' : 'n5');
@@ -526,6 +554,120 @@ var toscad;
                 }
             }
         });
+        // --- MERGED-HELIX GROUP ALIGNMENT POST-PASS ---
+        // Each merged helix's origin-groups were preserved with their
+        // pre-merge (separate-helix) offsets. Temporarily split every merged
+        // helix into pseudo-helices — one per origin-group — and run
+        // alignGridPrim over the whole grid, so each group is anchored by its
+        // own crossovers to the full (already-placed) lattice. The groups were
+        // mutually disjoint on the offset axis at merge time (disjointness is
+        // a merge precondition), so once aligned they can be folded back under
+        // the real helixId without overlap. Afterwards, crossovers into the
+        // merged helix observe ~0 shift, so the pipeline's own alignGridPrim
+        // pass leaves the merged helix in place instead of shifting it as a
+        // unit and misaligning one of the groups.
+        if (preserveGrid && mergedGroups && mergedGroups.size > 0) {
+            let maxHelixId = -1;
+            for (const [, m] of grid) {
+                if (m.helixId > maxHelixId)
+                    maxHelixId = m.helixId;
+            }
+            // pseudo helixId -> real (merged) helixId
+            const pseudoToReal = new Map();
+            let nextPseudo = maxHelixId + 1;
+            mergedGroups.forEach((groups, helixId) => {
+                if (groups.length < 2)
+                    return;
+                // Group 0 keeps the real helixId; the rest become pseudo-helices.
+                for (let gi = 1; gi < groups.length; gi++) {
+                    const pseudo = nextPseudo++;
+                    pseudoToReal.set(pseudo, helixId);
+                    for (const ntId of groups[gi]) {
+                        const m = grid.get(ntId);
+                        if (m)
+                            m.helixId = pseudo;
+                    }
+                }
+            });
+            if (pseudoToReal.size > 0) {
+                toscad.alignGridPrim(grid, binderHelices);
+                for (const [, m] of grid) {
+                    const real = pseudoToReal.get(m.helixId);
+                    if (real !== undefined)
+                        m.helixId = real;
+                }
+                // Inter-group conflict sweep: NEVER distort a helix. An
+                // origin-group is moved ONLY as a whole unit, and ONLY its
+                // offsets change — direction/orientation is never touched.
+                // If ANY mark of a later group overlaps an earlier group's
+                // cell, the ENTIRE later group is shifted +1 at a time until
+                // fully disjoint. A group never moves unless it overlaps.
+                const groupIdxByNt = new Map();
+                mergedGroups.forEach((groups) => {
+                    groups.forEach((group, gi) => {
+                        for (const ntId of group)
+                            groupIdxByNt.set(ntId, gi);
+                    });
+                });
+                // The mover: shift every mark of one origin-group by +delta.
+                const shiftGroup = (helixId, gi, delta) => {
+                    if (delta === 0)
+                        return;
+                    const group = mergedGroups.get(helixId)?.[gi];
+                    if (!group)
+                        return;
+                    for (const ntId of group) {
+                        const m = grid.get(ntId);
+                        if (m && m.helixId === helixId)
+                            m.offset += delta;
+                    }
+                };
+                // Do any marks of (helixId, gi) share a cell with a DIFFERENT
+                // group on that helix? Direction-aware: same cell + same
+                // direction = overlap.
+                const groupOverlaps = (helixId, gi) => {
+                    const group = mergedGroups.get(helixId)?.[gi];
+                    if (!group)
+                        return false;
+                    const groupSet = new Set(group);
+                    for (const ntId of group) {
+                        const m = grid.get(ntId);
+                        if (!m || m.helixId !== helixId)
+                            continue;
+                        const key = `${m.direction}|${m.offset}`;
+                        for (const [otherNtId, other] of grid) {
+                            if (other.helixId !== helixId)
+                                continue;
+                            if (groupSet.has(otherNtId))
+                                continue;
+                            if (`${other.direction}|${other.offset}` === key)
+                                return true;
+                        }
+                    }
+                    return false;
+                };
+                // Repeat until no overlaps remain anywhere (bounded).
+                let sweepGuard = 0;
+                let movedAny = false;
+                while (sweepGuard++ < 50) {
+                    let overlappedThisRound = false;
+                    mergedGroups.forEach((groups, helixId) => {
+                        for (let gi = 1; gi < groups.length; gi++) {
+                            if (!groupOverlaps(helixId, gi))
+                                continue;
+                            shiftGroup(helixId, gi, 1);
+                            overlappedThisRound = true;
+                            movedAny = true;
+                        }
+                    });
+                    if (!overlappedThisRound)
+                        break;
+                }
+                if (movedAny) {
+                    console.warn(`[setGrid] Inter-group overlap resolved by shifting whole origin-groups (orientation preserved).`);
+                }
+            }
+        }
         return { grid, binderHelices };
     }
     toscad.setGrid = setGrid;

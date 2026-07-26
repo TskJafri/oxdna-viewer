@@ -1157,9 +1157,18 @@ class ScadnanoExportManager {
         // the first iteration to detect which helix slots are "stable" vs
         // merged/altered compared to the previous state.
         let prevHelicesSnapshot = helices.map(h => h.slice());
+        // Merge-provenance products from the previous iteration. Each entry is
+        // one merged helix, expressed as a list of origin-groups (nt-id arrays,
+        // one per pre-merge helix). Rebuilt at the end of every iteration from
+        // that iteration's explicit merge log (anglecomb2 + axis-overlap) and
+        // mapped onto the current helix slots at the start of the next.
+        let prevMergeProducts = [];
         // Iteration cap for the fixed-point loop.
         const MAX_ITER = 7;
         for (let iter = 1; iter <= MAX_ITER; iter++) {
+            // Merge events recorded during this pass, folded into provenance
+            // products at the end of the pass.
+            const iterMerges = [];
             // Rebuild grid from scratch on the current helices array.
             // After the first iteration, preserve grid marks from the previous
             // iteration for nucleotides in helices that haven't been merged.
@@ -1199,7 +1208,32 @@ class ScadnanoExportManager {
                     }
                 }
             }
-            const { grid: freshGrid, binderHelices: freshBinders } = toscad.setGrid(helices, prevGrid, preservedNtIds);
+            // Map the previous iteration's merge products onto the current
+            // helix slots. Nucleotide ids are stable across renumbering, so a
+            // product is located via any of its member nucleotides (no splits
+            // exist in the pipeline, so all members land in one slot).
+            let mergedGroups;
+            if (prevGrid && prevMergeProducts.length > 0) {
+                const productByNt = new Map();
+                for (const groups of prevMergeProducts) {
+                    for (const group of groups) {
+                        for (const ntId of group)
+                            productByNt.set(ntId, groups);
+                    }
+                }
+                mergedGroups = new Map();
+                for (let i = 0; i < helices.length; i++) {
+                    const slot = helices[i];
+                    if (!slot || slot.length === 0)
+                        continue;
+                    const groups = productByNt.get(slot[0].id);
+                    if (groups)
+                        mergedGroups.set(i, groups);
+                }
+                if (mergedGroups.size === 0)
+                    mergedGroups = undefined;
+            }
+            const { grid: freshGrid, binderHelices: freshBinders } = toscad.setGrid(helices, prevGrid, preservedNtIds, mergedGroups);
             grid = freshGrid;
             binderHelices = freshBinders ?? [];
             toscad.directionAlign2(grid);
@@ -1263,6 +1297,9 @@ class ScadnanoExportManager {
             };
             const filteredNetworkMap = filterBinderEntries(networkMap);
             const combResult = toscad.anglecomb2(grid, helices, latticeTypeSet, filteredNetworkMap);
+            for (const mp of combResult.mergedPairs) {
+                iterMerges.push({ keepNtIds: mp.keepNtIds, mergedNtIds: mp.mergedNtIds });
+            }
             // anglecomb2 internally re-derives networkMap via getAngles after
             // each merge, which would include the (now-remapped) binder
             // helixIds. Re-filter to keep binders out for the subsequent
@@ -1270,7 +1307,10 @@ class ScadnanoExportManager {
             networkMap = filterBinderEntries(combResult.networkMap);
             const corrResult = toscad.anglecorr2(grid, helices, latticeTypeSet, networkMap);
             networkMap = corrResult.networkMap;
-            this.runAxisOverlapMerge(helices, grid, latticeTypeSet);
+            const axisMergeLog = this.runAxisOverlapMerge(helices, grid, latticeTypeSet);
+            for (const entry of axisMergeLog) {
+                iterMerges.push({ keepNtIds: entry.keepNtIds, mergedNtIds: entry.mergedNtIds });
+            }
             // ── Phase 2: reintroduce binder helices ──────────────────────────
             // Grid and helices array have stayed self-consistent through the
             // merges above (binder helixIds shifted along with the rest, and
@@ -1301,33 +1341,84 @@ class ScadnanoExportManager {
             // only nucleotides in newly-merged/altered helices get reassigned.
             prevGrid = grid;
             // Snapshot helices so the next iteration can detect which slots
-            // are stable (identical nucleotide sets) vs merged/altered.
+            // are stable (identical nt sets) vs merged/altered.
             prevHelicesSnapshot = helices.map(h => h.slice());
+            // Fold this iteration's merge events into provenance products so
+            // the next iteration's setGrid can preserve each origin-group's
+            // internal marks and re-align the groups, instead of re-walking
+            // the merged helix as one disconnected component.
+            prevMergeProducts = this.buildMergeProducts(iterMerges);
         }
         console.warn(`[scadnano] convergeLayout hit iteration cap ${MAX_ITER}; using last state.`);
         return { helices, grid, helixPos, latticeType: latticeTypeSet ?? 'honeycomb', networkMap };
     }
+    // Fold an iteration's ordered merge events into "products": for every helix
+    // that received merges, the list of origin-groups (nt-id arrays) — one
+    // group per pre-merge helix. Grouping is one level deep: a helix that was
+    // itself merged in a previous iteration contributes all of its nucleotides
+    // as a single group.
+    buildMergeProducts(mergeLog) {
+        const products = [];
+        const productIndexByNt = new Map();
+        const retarget = (fromIdx, toIdx) => {
+            if (fromIdx === toIdx)
+                return;
+            for (const group of products[fromIdx]) {
+                for (const ntId of group)
+                    productIndexByNt.set(ntId, toIdx);
+            }
+            products[fromIdx] = [];
+        };
+        for (const { keepNtIds, mergedNtIds } of mergeLog) {
+            if (!keepNtIds.length || !mergedNtIds.length)
+                continue;
+            const keepIdx = productIndexByNt.get(keepNtIds[0]);
+            const mergedIdx = productIndexByNt.get(mergedNtIds[0]);
+            if (keepIdx !== undefined && keepIdx === mergedIdx)
+                continue;
+            const keepGroups = keepIdx !== undefined ? products[keepIdx] : [keepNtIds.slice()];
+            const mergedGroups = mergedIdx !== undefined ? products[mergedIdx] : [mergedNtIds.slice()];
+            let target;
+            if (keepIdx !== undefined) {
+                target = keepIdx;
+                products[target] = [...keepGroups, ...mergedGroups];
+            }
+            else {
+                target = products.length;
+                products.push([...keepGroups, ...mergedGroups]);
+                for (const ntId of keepNtIds)
+                    productIndexByNt.set(ntId, target);
+            }
+            if (mergedIdx !== undefined) {
+                retarget(mergedIdx, target);
+            }
+            else {
+                for (const ntId of mergedNtIds)
+                    productIndexByNt.set(ntId, target);
+            }
+        }
+        return products.filter(p => p.length > 1);
+    }
     // Build the partialEnds + partialAxes inputs for hashAxisOverlap from the
     // cached findHelices output, run hashAxisOverlap, and feed the resulting
-    // merge pairs into helix.applyAxisOverlapMerge. Returns the number of
-    // merges performed (caller refreshes getAngles only when this is > 0).
+    // merge pairs into helix.applyAxisOverlapMerge. Returns the merge log
+    // (pre-merge helix ids + nucleotide membership per merge event).
     runAxisOverlapMerge(helices, grid, latticeType) {
+        const empty = [];
         const partials = this.currentScadnanoPartials;
         const usedSides = this.currentScadnanoUsedSides;
         if (!Array.isArray(partials) || !usedSides || partials.length === 0)
-            return 0;
+            return empty;
         const partialEnds = helix.mapPartialEnds(partials);
         if (partialEnds.size === 0)
-            return 0;
+            return empty;
         const partialAxes = helix.partialAxesTowardFreeSide(partials, partialEnds, usedSides);
         if (partialAxes.size === 0)
-            return 0;
+            return empty;
         const mergePairs = helix.hashAxisOverlap(partials, partialEnds, usedSides, partialAxes);
         if (!Array.isArray(mergePairs) || mergePairs.length === 0)
-            return 0;
-        const before = helices.length;
-        helix.applyAxisOverlapMerge(helices, grid, partials, mergePairs);
-        return before - helices.length;
+            return empty;
+        return helix.applyAxisOverlapMerge(helices, grid, partials, mergePairs);
     }
     prepareScadnanoLayout(requestedLatticeType, forceRecompute = false, wireframe = false) {
         const nucleotideCount = this.getCurrentNucleotideCount();

@@ -999,7 +999,14 @@ var toscad;
         // Merge mechanics: identical to anglecomb. Remap grid helix ids
         // (mergedHelix → keepHelix, ids above mergedHelix shift down by 1),
         // splice helices[mergedHelix] into helices[keepHelix].
+        // Returns the pre-merge nucleotide membership of both helices so
+        // callers can reconstruct merge provenance (which nucleotides
+        // belonged to which helix) after the splice.
         const mergeHelixInto = (keepHelix, mergedHelix) => {
+            const keepNts = helices[keepHelix] ?? [];
+            const mergedNts = helices[mergedHelix] ?? [];
+            const keepNtIds = keepNts.map(n => n.id);
+            const mergedNtIds = mergedNts.map(n => n.id);
             const remapHelixId = (helixId) => {
                 if (helixId === mergedHelix)
                     return keepHelix;
@@ -1010,10 +1017,9 @@ var toscad;
             for (const [, mark] of grid.entries()) {
                 mark.helixId = remapHelixId(mark.helixId);
             }
-            const keepNts = helices[keepHelix] ?? [];
-            const mergedNts = helices[mergedHelix] ?? [];
             helices[keepHelix] = keepNts.concat(mergedNts);
             helices.splice(mergedHelix, 1);
+            return { keepNtIds, mergedNtIds };
         };
         // Helix axis (normalised) between the min- and max-offset nts on
         // the helix. Same logic as anglecomb's local helper.
@@ -1173,9 +1179,14 @@ var toscad;
                             }
                             const keep = Math.min(A, B);
                             const merged = Math.max(A, B);
-                            mergeHelixInto(keep, merged);
+                            const mergeIds = mergeHelixInto(keep, merged);
                             strongMutuals.sort((a, b) => a - b);
-                            mergedPairs.push({ keepHelix: keep, mergedHelix: merged, source, cell, round, witnesses: strongMutuals });
+                            mergedPairs.push({
+                                keepHelix: keep, mergedHelix: merged, source, cell, round,
+                                witnesses: strongMutuals,
+                                keepNtIds: mergeIds.keepNtIds,
+                                mergedNtIds: mergeIds.mergedNtIds
+                            });
                             console.log(`[anglecomb2] round=${round} merged ${merged} into ${keep} at cell (${cell[0]},${cell[1]}) ` +
                                 `source=${source} witnesses=[${strongMutuals.join(',')}] |axisDot|=${axisDot.toFixed(3)}`);
                             mergedThisPass = true;
@@ -1480,6 +1491,86 @@ var toscad;
             ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
             : sorted[mid];
     }
+    function buildCellIndex(grid) {
+        const idx = new Map();
+        for (const [, m] of grid.entries()) {
+            let hm = idx.get(m.helixId);
+            if (!hm) {
+                hm = new Map();
+                idx.set(m.helixId, hm);
+            }
+            const key = `${m.direction}|${m.offset}`;
+            if (!hm.has(key))
+                hm.set(key, new Set());
+            hm.get(key).add(m.helixId);
+        }
+        return idx;
+    }
+    // A cell is "free for selfHid" when nothing occupies it, or only marks of
+    // selfHid occupy it (a helix never conflicts with itself — its own marks
+    // are presumed internally consistent before any move).
+    function cellFree(idx, hid, selfHid, dir, off) {
+        const hm = idx.get(hid);
+        if (!hm)
+            return true;
+        const s = hm.get(`${dir}|${off}`);
+        if (!s)
+            return true;
+        if (selfHid === hid)
+            return true;
+        for (const other of s)
+            if (other !== selfHid)
+                return false;
+        return true;
+    }
+    // Would shifting every mark of helix hid by delta cause a collision?
+    function collidesAt(grid, idx, hid, delta) {
+        if (delta === 0)
+            return false;
+        for (const [, m] of grid.entries()) {
+            if (m.helixId !== hid)
+                continue;
+            if (!cellFree(idx, hid, hid, m.direction, m.offset + delta))
+                return true;
+        }
+        return false;
+    }
+    // Pick the best non-colliding delta for helix hid.
+    // Tries the ideal shift first, then walks outward ±1, ±2, … up to
+    // maxRadius (±1 keeps crossover parity so even ±2 crossovers still align).
+    // Returns null when no collision-free placement exists within the radius —
+    // the caller must then keep the helix's previous position (i.e. not move).
+    function pickCollisionFreeDelta(grid, hid, idealDelta, maxRadius = 24) {
+        const idx = buildCellIndex(grid);
+        if (!collidesAt(grid, idx, hid, idealDelta))
+            return idealDelta;
+        for (let radius = 1; radius <= maxRadius; radius++) {
+            for (const sign of [1, -1]) {
+                const cand = idealDelta + sign * radius;
+                if (!collidesAt(grid, idx, hid, cand))
+                    return cand;
+            }
+        }
+        return null;
+    }
+    // Apply a single helix's shift and then re-normalize all offsets so the
+    // global minimum sits at 0 (keeps offsets non-negative even when the
+    // minimum was produced by a rejected move's neighbors).
+    function applySingleShift(grid, hid, delta) {
+        if (delta === 0)
+            return;
+        for (const [, m] of grid.entries())
+            if (m.helixId === hid)
+                m.offset += delta;
+        let globalMin = Infinity;
+        for (const [, m] of grid.entries())
+            if (m.offset < globalMin)
+                globalMin = m.offset;
+        if (globalMin !== 0 && globalMin !== Infinity) {
+            for (const [, m] of grid.entries())
+                m.offset -= globalMin;
+        }
+    }
     // ── Helper: apply shift to every nt on a helix, then normalize ──
     function applyHelixShifts(grid, shiftMap) {
         for (const [, mark] of grid.entries()) {
@@ -1616,7 +1707,34 @@ var toscad;
             }
         }
         // ── Apply shifts (non-binder helices) ─────────────────────────
-        applyHelixShifts(grid, cumulativeShift);
+        // Sequential, overlap-aware placement: each helix is moved to the
+        // collision-free delta closest to its MST-ideal cumulative shift.
+        // Applying one helix at a time lets later helices see (and avoid)
+        // the cells occupied by earlier ones — including pseudo-helices of a
+        // split merged helix, which would otherwise fold back onto the same
+        // helixId with colliding offsets. A helix with no valid placement
+        // within the search radius keeps its previous position.
+        {
+            const orderedHelices = helixList
+                .filter(h => h !== 0 && (cumulativeShift.get(h) ?? 0) !== 0)
+                .sort((a, b) => {
+                const da = Math.abs(cumulativeShift.get(a) ?? 0);
+                const db = Math.abs(cumulativeShift.get(b) ?? 0);
+                return db !== da ? db - da : a - b;
+            });
+            for (const hid of orderedHelices) {
+                const ideal = cumulativeShift.get(hid) ?? 0;
+                const delta = pickCollisionFreeDelta(grid, hid, ideal);
+                if (delta === null) {
+                    console.warn(`[alignGridPrim] No collision-free placement for helix ${hid} (ideal shift ${ideal}); keeping current position.`);
+                    continue;
+                }
+                if (delta !== ideal) {
+                    console.log(`[alignGridPrim] Helix ${hid}: ideal shift ${ideal} would overlap; placed at ${delta} instead.`);
+                }
+                applySingleShift(grid, hid, delta);
+            }
+        }
         // ── Binder correction: align each strand segment individually ───
         const binderSet = new Set(binderHelices ?? []);
         if (binderSet.size > 0) {

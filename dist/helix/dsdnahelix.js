@@ -599,8 +599,13 @@ var helix;
                 toscad.applyCombineShifts(grid, shifts);
             const keep = Math.min(helixA, helixB);
             const merged = Math.max(helixA, helixB);
+            // Capture pre-merge membership of both helices so callers can
+            // reconstruct merge provenance (which nucleotides belonged to
+            // which helix) after the combine.
+            const keepNtIds = (helices[keep] ?? []).map(nt => nt.id);
+            const mergedNtIds = (helices[merged] ?? []).map(nt => nt.id);
             combineHelices(helices, [helixA, helixB], grid);
-            log.push({ keepHelix: keep, mergedHelix: merged, partialA: a, partialB: b });
+            log.push({ keepHelix: keep, mergedHelix: merged, partialA: a, partialB: b, keepNtIds, mergedNtIds });
         });
         return log;
     }

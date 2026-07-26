@@ -624,8 +624,8 @@ namespace helix {
 		grid: toscad.GridMap,
 		partials: Nucleotide[][],
 		mergePairs: HashMergePair[]
-	): Array<{ keepHelix: number; mergedHelix: number; partialA: number; partialB: number }> {
-		const log: Array<{ keepHelix: number; mergedHelix: number; partialA: number; partialB: number }> = [];
+	): Array<{ keepHelix: number; mergedHelix: number; partialA: number; partialB: number; keepNtIds: number[]; mergedNtIds: number[] }> {
+		const log: Array<{ keepHelix: number; mergedHelix: number; partialA: number; partialB: number; keepNtIds: number[]; mergedNtIds: number[] }> = [];
 		if (!Array.isArray(helices) || !(grid instanceof Map) ||
 			!Array.isArray(partials) || !Array.isArray(mergePairs)) return log;
 		if (mergePairs.length === 0) return log;
@@ -654,8 +654,13 @@ namespace helix {
 			if (shifts && shifts.size > 0) toscad.applyCombineShifts(grid, shifts);
 			const keep = Math.min(helixA, helixB);
 			const merged = Math.max(helixA, helixB);
+			// Capture pre-merge membership of both helices so callers can
+			// reconstruct merge provenance (which nucleotides belonged to
+			// which helix) after the combine.
+			const keepNtIds = (helices[keep] ?? []).map(nt => nt.id);
+			const mergedNtIds = (helices[merged] ?? []).map(nt => nt.id);
 			combineHelices(helices, [helixA, helixB], grid);
-			log.push({ keepHelix: keep, mergedHelix: merged, partialA: a, partialB: b });
+			log.push({ keepHelix: keep, mergedHelix: merged, partialA: a, partialB: b, keepNtIds, mergedNtIds });
 		});
 		return log;
 	}
