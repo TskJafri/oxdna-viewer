@@ -596,20 +596,21 @@ var toscad;
                     if (real !== undefined)
                         m.helixId = real;
                 }
-                // Inter-group conflict sweep: NEVER distort a helix. An
-                // origin-group is moved ONLY as a whole unit, and ONLY its
-                // offsets change — direction/orientation is never touched.
-                // If ANY mark of a later group overlaps an earlier group's
-                // cell, the ENTIRE later group is shifted +1 at a time until
-                // fully disjoint. A group never moves unless it overlaps.
-                const groupIdxByNt = new Map();
-                mergedGroups.forEach((groups) => {
-                    groups.forEach((group, gi) => {
-                        for (const ntId of group)
-                            groupIdxByNt.set(ntId, gi);
-                    });
-                });
-                // The mover: shift every mark of one origin-group by +delta.
+                // Inter-group conflict resolution: NEVER distort a helix.
+                // An origin-group is moved ONLY as a whole unit, and ONLY
+                // its offsets change — direction/orientation is never
+                // touched. For every group that overlaps others on the
+                // same helix, compute the minimum-|delta| shift (searching
+                // BOTH +/- directions) that leaves it disjoint from every
+                // other group on that helix, then apply it in a single
+                // step. Searching both directions matters: alignGridPrim
+                // can shift a group either way relative to its siblings,
+                // and the "correct" resolution is whichever direction has
+                // the group already close to disjoint. A pure +delta nudge
+                // can either explode (walking a small group through a
+                // large one) or leave the crash-later state where the
+                // required delta exceeds the sweep budget.
+                // Shift every mark of one origin-group by delta (offset only).
                 const shiftGroup = (helixId, gi, delta) => {
                     if (delta === 0)
                         return;
@@ -622,49 +623,124 @@ var toscad;
                             m.offset += delta;
                     }
                 };
-                // Do any marks of (helixId, gi) share a cell with a DIFFERENT
-                // group on that helix? Direction-aware: same cell + same
-                // direction = overlap.
-                const groupOverlaps = (helixId, gi) => {
-                    const group = mergedGroups.get(helixId)?.[gi];
-                    if (!group)
-                        return false;
-                    const groupSet = new Set(group);
-                    for (const ntId of group) {
+                // For (helixId, gi), find the min-|delta| shift such that
+                // no mark of gi collides (same direction + same offset)
+                // with any mark of ANY OTHER group on the same helix.
+                // Returns 0 if already disjoint, or null if no delta
+                // within the search bound resolves the conflict.
+                const findCleanShift = (helixId, gi) => {
+                    const groups = mergedGroups.get(helixId);
+                    if (!groups)
+                        return 0;
+                    const myGroup = groups[gi];
+                    if (!myGroup || myGroup.length === 0)
+                        return 0;
+                    const mySet = new Set(myGroup);
+                    // My occupied cells, indexed by direction.
+                    const myCells = new Map();
+                    let myMin = Infinity, myMax = -Infinity;
+                    for (const ntId of myGroup) {
                         const m = grid.get(ntId);
                         if (!m || m.helixId !== helixId)
                             continue;
-                        const key = `${m.direction}|${m.offset}`;
-                        for (const [otherNtId, other] of grid) {
-                            if (other.helixId !== helixId)
-                                continue;
-                            if (groupSet.has(otherNtId))
-                                continue;
-                            if (`${other.direction}|${other.offset}` === key)
-                                return true;
+                        let s = myCells.get(m.direction);
+                        if (!s) {
+                            s = new Set();
+                            myCells.set(m.direction, s);
                         }
+                        s.add(m.offset);
+                        if (m.offset < myMin)
+                            myMin = m.offset;
+                        if (m.offset > myMax)
+                            myMax = m.offset;
                     }
-                    return false;
+                    if (myCells.size === 0)
+                        return 0;
+                    // Cells occupied by OTHER groups on the same helix.
+                    const otherCells = new Map();
+                    let otherMin = Infinity, otherMax = -Infinity;
+                    for (const [ntId, m] of grid) {
+                        if (m.helixId !== helixId)
+                            continue;
+                        if (mySet.has(ntId))
+                            continue;
+                        let s = otherCells.get(m.direction);
+                        if (!s) {
+                            s = new Set();
+                            otherCells.set(m.direction, s);
+                        }
+                        s.add(m.offset);
+                        if (m.offset < otherMin)
+                            otherMin = m.offset;
+                        if (m.offset > otherMax)
+                            otherMax = m.offset;
+                    }
+                    if (otherCells.size === 0)
+                        return 0;
+                    const conflictsAt = (delta) => {
+                        for (const [dir, myOffs] of myCells) {
+                            const others = otherCells.get(dir);
+                            if (!others)
+                                continue;
+                            for (const off of myOffs) {
+                                if (others.has(off + delta))
+                                    return true;
+                            }
+                        }
+                        return false;
+                    };
+                    if (!conflictsAt(0))
+                        return 0;
+                    // Bound: any collision requires (my_off + delta) to
+                    // land on an other-off, so |delta| ≤ (other-span +
+                    // my-span). Add a small pad so we can step JUST past
+                    // the far edge in either direction.
+                    const mySpan = (myMax - myMin) || 0;
+                    const otherSpan = (otherMax - otherMin) || 0;
+                    const maxSearch = Math.max(mySpan + otherSpan + 8, 32);
+                    for (let mag = 1; mag <= maxSearch; mag++) {
+                        if (!conflictsAt(mag))
+                            return mag;
+                        if (!conflictsAt(-mag))
+                            return -mag;
+                    }
+                    return null;
                 };
-                // Repeat until no overlaps remain anywhere (bounded).
-                let sweepGuard = 0;
+                // Iterate: resolve one group at a time, using the current
+                // grid state (so gi=2 sees where gi=1 landed). Each
+                // successful shift makes that group globally disjoint on
+                // its helix, so the outer loop terminates when a full
+                // pass moves nothing. Guard cap protects against
+                // pathological chains between helices.
                 let movedAny = false;
-                while (sweepGuard++ < 50) {
-                    let overlappedThisRound = false;
+                let unresolvable = 0;
+                let sweepGuard = 0;
+                while (sweepGuard++ < 200) {
+                    let didMove = false;
                     mergedGroups.forEach((groups, helixId) => {
                         for (let gi = 1; gi < groups.length; gi++) {
-                            if (!groupOverlaps(helixId, gi))
+                            const delta = findCleanShift(helixId, gi);
+                            if (delta === null) {
+                                unresolvable++;
                                 continue;
-                            shiftGroup(helixId, gi, 1);
-                            overlappedThisRound = true;
+                            }
+                            if (delta === 0)
+                                continue;
+                            shiftGroup(helixId, gi, delta);
+                            didMove = true;
                             movedAny = true;
                         }
                     });
-                    if (!overlappedThisRound)
+                    if (!didMove)
                         break;
                 }
                 if (movedAny) {
-                    console.warn(`[setGrid] Inter-group overlap resolved by shifting whole origin-groups (orientation preserved).`);
+                    console.warn(`[setGrid] Merged-helix inter-group overlap resolved by min-|delta| shifts` +
+                        ` (sweeps=${sweepGuard - 1}${unresolvable > 0 ? `, unresolved=${unresolvable}` : ''}).`);
+                }
+                if (unresolvable > 0) {
+                    console.error(`[setGrid] ${unresolvable} merged-helix group(s) had no collision-free placement` +
+                        ` within the search bound. Grid will fail validation downstream.`);
                 }
             }
         }

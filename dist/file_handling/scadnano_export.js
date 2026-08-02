@@ -1127,7 +1127,7 @@ class ScadnanoExportManager {
             }
             networkMap = toscad.getAngles(grid, helices, latticeType);
             helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
-            const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType);
+            const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType, binderHelices);
             const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
             helices = renumbered.helices;
             helixPos = renumbered.helixPos;
@@ -1326,7 +1326,15 @@ class ScadnanoExportManager {
             // anchor on the newly-designated helix 0. Once the numbering
             // matches the GNN canonical order and mutations have settled, the
             // remap is identity and the fingerprint stops changing.
-            const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeTypeSet);
+            //
+            // Pass the CURRENT binder helix set (derived from immutable
+            // nucleotide ids, so it's post-merge/post-remap correct) so the
+            // renumber's anchor selection never assigns helix 0 to a binder.
+            // Helix 0 seeds calculateGlobalPositions and directionAlign2 on
+            // the next iteration; a binder anchor there misroots the whole
+            // lattice.
+            const currentBinderHelices = Array.from(deriveBinderHelixSet());
+            const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeTypeSet, currentBinderHelices);
             const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
             helices = renumbered.helices;
             helixPos = renumbered.helixPos;

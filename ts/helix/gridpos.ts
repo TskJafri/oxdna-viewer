@@ -2676,7 +2676,8 @@ namespace toscad {
     export function renumberHelicesGNN(
         grid: GridMap,
         helixPos: Map<number, [number, number]>,
-        lattice: string = 'honeycomb'
+        lattice: string = 'honeycomb',
+        binderHelices?: number[]
     ): RenumberResult {
 
         // ── 1. Adjacency + cost helpers (identical to renumberHelices) ──
@@ -2696,22 +2697,59 @@ namespace toscad {
             return [v.x, v.y] as [number, number];
         });
 
-        // Find the anchor node: lowest row (pos[1] = y), break ties by lowest col (pos[0] = x).
-        // This pins helix 0 to the top-left corner of the layout in both square and honeycomb.
-        let startNode = 0;
-        let startRow = Infinity;
-        let startCol = Infinity;
-        for (let i = 0; i < n; i++) {
-            const pos = helixPos.get(nodes[i]) ?? [0, 0];
-            const row = pos[1];
-            const col = pos[0];
-            if (row < startRow || (row === startRow && col < startCol)) {
-                startRow = row;
-                startCol = col;
-                startNode = i;
+        // Anchor selection: lowest row (y), tie-broken by lowest col (x).
+        // This pins helix 0 to the top-left corner of the layout for both
+        // lattices. Because helix 0 also seeds calculateGlobalPositions'
+        // Phase-1 BFS on the NEXT iteration, we must not let it be a binder:
+        // binders don't participate in the offset MST or lattice-detection
+        // passes, so a binder anchor would misroot the whole layout. When
+        // the geometric top-left IS a binder, walk the same (row, col)
+        // ordering to the next candidate that isn't. If every helix is a
+        // binder (degenerate — no core structure), fall back to the pure
+        // geometric top-left.
+        const binderNodeSet = new Set<number>();
+        if (Array.isArray(binderHelices)) {
+            for (const hid of binderHelices) {
+                const i = idx.get(hid);
+                if (i !== undefined) binderNodeSet.add(i);
             }
         }
-        console.log(`[renumberHelicesGNN] anchor node idx=${startNode} (helixId=${nodes[startNode]}, col=${startCol}, row=${startRow})`);
+
+        const posOrder = Array.from({ length: n }, (_, i) => i).sort((a, b) => {
+            const pa = helixPos.get(nodes[a]) ?? [0, 0];
+            const pb = helixPos.get(nodes[b]) ?? [0, 0];
+            if (pa[1] !== pb[1]) return pa[1] - pb[1];
+            return pa[0] - pb[0];
+        });
+
+        let startNode = posOrder[0] ?? 0;
+        let skippedBinderAnchors = 0;
+        if (binderNodeSet.size > 0) {
+            let chosen: number | null = null;
+            for (const cand of posOrder) {
+                if (!binderNodeSet.has(cand)) { chosen = cand; break; }
+                skippedBinderAnchors++;
+            }
+            if (chosen !== null) {
+                startNode = chosen;
+            } else {
+                // Every helix is a binder — nothing to pick from. Log so the
+                // caller can see something is off with the input.
+                console.warn(
+                    `[renumberHelicesGNN] every helix is flagged as a binder; ` +
+                    `falling back to geometric top-left (helixId=${nodes[startNode]}).`
+                );
+            }
+        }
+
+        const startPos = helixPos.get(nodes[startNode]) ?? [0, 0];
+        console.log(
+            `[renumberHelicesGNN] anchor node idx=${startNode} ` +
+            `(helixId=${nodes[startNode]}, col=${startPos[0]}, row=${startPos[1]})` +
+            (skippedBinderAnchors > 0
+                ? ` — skipped ${skippedBinderAnchors} binder(s) higher in top-left ordering`
+                : '')
+        );
 
         const dist = (a: number, b: number): number => {
             const [ax, ay] = world[a];
