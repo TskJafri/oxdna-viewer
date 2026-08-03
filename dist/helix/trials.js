@@ -10,9 +10,6 @@ Usage (paste into the browser dev console):
     trials.crossovers();             // log + download crossovers.csv
     trials.crossovers({ download: false });   // just return the CSV string
 
-    trials.crossoversCombined();     // same, but after anglecomb merges same-axis helices
-    trials.crossoversCombined({ filename: 'merged_crossovers.csv' });
-
 The crossover counts are directional in the sense that we walk every strand
 5'->3' and credit the helix we leave (parent) -> the helix we enter (target).
 A symmetric crossover therefore contributes to BOTH (A,B) and (B,A).
@@ -98,37 +95,4 @@ var trials;
         });
     }
     trials.crossovers = crossovers;
-    /**
-     * Same as `crossovers`, but first runs the canonical conversion pipeline
-     * up through `anglecomb`, which merges same-axis disjoint helices into a
-     * single helix. Crossovers are then counted on the post-merge grid, so
-     * pieces that findHelices over-segmented don't show up as crossovers
-     * between themselves.
-     */
-    function crossoversCombined(options = {}) {
-        const { tolerance = 3, download = true, filename = 'crossovers_combined.csv', log = true, lattice = 'honeycomb', } = options;
-        const result = helix.findHelices(nucleotideOnly(), tolerance);
-        const helices = result?.helices ?? [];
-        if (!helices.length) {
-            console.warn('[trials.crossoversCombined] No helices found.');
-            return '';
-        }
-        // Full canonical pipeline up through the combine step.
-        const { grid, binderHelices } = toscad.setGrid(helices);
-        toscad.directionAlign2(grid);
-        toscad.alignGridPrim(grid, binderHelices);
-        const angles = toscad.getAngles(grid, helices, lattice);
-        const merged = toscad.anglecomb(grid, helices, lattice, angles);
-        if (log) {
-            console.log(`[trials.crossoversCombined] ${merged.mergedPairs.length} pairs merged ` +
-                `(${helices.length} helices remaining)`);
-        }
-        const { bins, helixIds } = binCrossovers(grid, helices.length);
-        return emitCsv(bins, helixIds, {
-            filename, download, log,
-            tag: 'trials.crossoversCombined',
-            helixCount: helices.length,
-        });
-    }
-    trials.crossoversCombined = crossoversCombined;
 })(trials || (trials = {}));

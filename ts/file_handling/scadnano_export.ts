@@ -1539,11 +1539,40 @@ class ScadnanoExportManager {
 
             const filteredNetworkMap = filterBinderEntries(networkMap);
 
-            const combResult = toscad.anglecomb2(grid, helices, latticeTypeSet, filteredNetworkMap);
+            // ── anglecomb3 replaces anglecomb2 ─────────────────────────────
+            // New rule: merge iff hashAxisOverlap picked the pair AND their
+            // crossover-count cosine similarity > 0.5. Precompute the hash
+            // pair list here (same inputs runAxisOverlapMerge would use) and
+            // hand it to anglecomb3, which delegates the actual merges to
+            // applyAxisOverlapMerge (identical mechanics to runAxisOverlapMerge).
+            //
+            // Note: this REPLACES anglecomb2's collision-bucket signal. Pairs
+            // that anglecomb2 would have merged via same-cell colocation but
+            // that hashAxisOverlap didn't nominate will no longer merge here.
+            let hashMergePairs: helix.HashMergePair[] = [];
+            {
+                const partials = this.currentScadnanoPartials;
+                const usedSides = this.currentScadnanoUsedSides;
+                if (Array.isArray(partials) && usedSides && partials.length > 0) {
+                    const partialEnds = helix.mapPartialEnds(partials);
+                    if (partialEnds.size > 0) {
+                        const partialAxes = helix.partialAxesTowardFreeSide(partials, partialEnds, usedSides);
+                        if (partialAxes.size > 0) {
+                            hashMergePairs = helix.hashAxisOverlap(partials, partialEnds, usedSides, partialAxes);
+                        }
+                    }
+                }
+            }
+            const combResult = toscad.anglecomb3(
+                grid, helices, latticeTypeSet,
+                this.currentScadnanoPartials ?? [],
+                hashMergePairs,
+                filteredNetworkMap
+            );
             for (const mp of combResult.mergedPairs) {
                 iterMerges.push({ keepNtIds: mp.keepNtIds, mergedNtIds: mp.mergedNtIds });
             }
-            // anglecomb2 internally re-derives networkMap via getAngles after
+            // anglecomb3 internally re-derives networkMap via getAngles after
             // each merge, which would include the (now-remapped) binder
             // helixIds. Re-filter to keep binders out for the subsequent
             // anglecorr2 call.
@@ -1551,11 +1580,6 @@ class ScadnanoExportManager {
 
             const corrResult = toscad.anglecorr2(grid, helices, latticeTypeSet, networkMap);
             networkMap = corrResult.networkMap;
-
-            const axisMergeLog = this.runAxisOverlapMerge(helices, grid, latticeTypeSet);
-            for (const entry of axisMergeLog) {
-                iterMerges.push({ keepNtIds: entry.keepNtIds, mergedNtIds: entry.mergedNtIds });
-            }
 
             // ── Phase 2: reintroduce binder helices ──────────────────────────
             // Grid and helices array have stayed self-consistent through the
@@ -1657,28 +1681,6 @@ class ScadnanoExportManager {
         }
 
         return products.filter(p => p.length > 1);
-    }
-
-    // Build the partialEnds + partialAxes inputs for hashAxisOverlap from the
-    // cached findHelices output, run hashAxisOverlap, and feed the resulting
-    // merge pairs into helix.applyAxisOverlapMerge. Returns the merge log
-    // (pre-merge helix ids + nucleotide membership per merge event).
-    private runAxisOverlapMerge(helices: Nucleotide[][], grid: any, latticeType: ScadnanoGridType): ReturnType<typeof helix.applyAxisOverlapMerge> {
-        const empty: ReturnType<typeof helix.applyAxisOverlapMerge> = [];
-        const partials = this.currentScadnanoPartials;
-        const usedSides = this.currentScadnanoUsedSides;
-        if (!Array.isArray(partials) || !usedSides || partials.length === 0) return empty;
-
-        const partialEnds = helix.mapPartialEnds(partials);
-        if (partialEnds.size === 0) return empty;
-
-        const partialAxes = helix.partialAxesTowardFreeSide(partials, partialEnds, usedSides);
-        if (partialAxes.size === 0) return empty;
-
-        const mergePairs = helix.hashAxisOverlap(partials, partialEnds, usedSides, partialAxes);
-        if (!Array.isArray(mergePairs) || mergePairs.length === 0) return empty;
-
-        return helix.applyAxisOverlapMerge(helices, grid, partials, mergePairs);
     }
 
     private prepareScadnanoLayout(

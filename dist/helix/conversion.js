@@ -3,17 +3,19 @@
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
 /*
-Here's an easy way to use this code:
+Entry-point helpers for the scadnano conversion pipeline.
 
-    const {helices} = helix.findHelices(elements,3)
+The full canonical pipeline lives in ScadnanoExportManager.prepareScadnanoLayout
+(ts/file_handling/scadnano_export.ts). If you need to drive the stages by hand
+from the console, the shape is roughly:
 
+    const { helices } = helix.findHelices(elements, 3);
     const { grid, binderHelices } = toscad.setGrid(helices);
     toscad.directionAlign2(grid);
     toscad.alignGridPrim(grid, binderHelices);
-
     const angles = toscad.getAngles(grid, helices, 'honeycomb');
-    const corrected = toscad.anglecomb2(grid, helices, 'honeycomb', angles);
-    const correct = toscad.anglecorr2(grid, helices, 'honeycomb', corrected.networkMap);
+    // ... anglecomb3 (needs partials + hashMergePairs) → anglecorr2 → ...
+    // see prepareScadnanoLayout for the current wiring.
 */
 var toscad;
 (function (toscad) {

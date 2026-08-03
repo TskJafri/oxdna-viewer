@@ -528,6 +528,48 @@ var toscad;
         return counts;
     }
     toscad.getConnectionCounts = getConnectionCounts;
+    // Cosine similarity between the crossover-count vectors of two helices.
+    //
+    //   cos(A, B) = Σ_i (w_{A,i} · w_{B,i})  /  ( ||w_A|| · ||w_B|| )
+    //
+    // where w_{X,i} = crossovers(X, i) and i ranges over "neighbor helices"
+    // (any helix ≠ A, ≠ B). A and B themselves are excluded so the score
+    // reflects overlap in EXTERNAL connectivity — how similarly A and B are
+    // wired to the rest of the graph — rather than being inflated by any
+    // direct A↔B crossovers.
+    //
+    // Returns 0 if either vector has zero norm (i.e., the helix has no
+    // strong external neighbors). Result is in [0, 1] since all weights
+    // are non-negative.
+    function helixPairCosine(A, B, connectionCounts) {
+        const nbA = connectionCounts.get(A);
+        const nbB = connectionCounts.get(B);
+        if (!nbA || !nbB)
+            return 0;
+        // Neighbor universe = (A's neighbors ∪ B's neighbors) \ {A, B}.
+        const neighbors = new Set();
+        for (const n of nbA.keys())
+            if (n !== A && n !== B)
+                neighbors.add(n);
+        for (const n of nbB.keys())
+            if (n !== A && n !== B)
+                neighbors.add(n);
+        let dot = 0;
+        let sumSqA = 0;
+        let sumSqB = 0;
+        for (const i of neighbors) {
+            const wA = nbA.get(i) ?? 0;
+            const wB = nbB.get(i) ?? 0;
+            dot += wA * wB;
+            sumSqA += wA * wA;
+            sumSqB += wB * wB;
+        }
+        if (sumSqA === 0 || sumSqB === 0)
+            return 0;
+        const raw = dot / (Math.sqrt(sumSqA) * Math.sqrt(sumSqB));
+        return Math.max(0, Math.min(1, raw));
+    }
+    toscad.helixPairCosine = helixPairCosine;
     // helper function to check for angle collisions in the map.
     function angleCollisions(networkMap) {
         const overlappingHelices = [];
@@ -974,34 +1016,44 @@ var toscad;
         };
     }
     toscad.splitHelix = splitHelix;
-    // anglecomb2 — global-position variant of anglecomb.
+    // anglecomb3 — three phases per iteration:
     //
-    // Reads the multimap from tempGlobalPos and merges helices whose
-    // CANONICAL predictions land on the same cell. Same physical gates as
-    // anglecomb (disjoint offsets, axis collinearity, ≥2 crossovers on the
-    // witness edges), but the witness is now any mutual neighbor rather
-    // than a single arbitrary source, and the collision signal is global
-    // geometry rather than a local-frame angle proxy.
+    //   Phase 1 — hash pairs: MERGE UNCONDITIONALLY.
+    //             No gates. No cos threshold. If hashAxisOverlap nominated
+    //             the pair (its own end-to-end cylinder + antiparallel-axis
+    //             tests already passed upstream), we trust it. All hash
+    //             pairs are pIdx-exclusive by construction, so ordering
+    //             doesn't matter — we retranslate pIdx→helixId per pair.
+    //             cos / axisDot / disjoint status are logged for visibility
+    //             but do NOT gate anything.
     //
-    // Two-round structure. Strict round requires every strong-witness
-    // mutual neighbor to also predict A and B at the colocation cell —
-    // dissent defers the merge to the relaxed round (once anglecorr2
-    // lands, dissent will get rotated away between rounds; for now the
-    // relaxed round just fires whatever strict deferred). Relaxed round
-    // keeps the same gates minus the unanimity check.
+    //   Phase 2 — anglecomb2 strict: bucket by (viaParent, exactLocalAngle),
+    //             gates 1+2+3, strict-parent unanimity. One merge per pass,
+    //             loops to fixed-point.
     //
-    // Returns the refreshed networkMap and a merged-pair log.
-    function anglecomb2(grid, helices, lattice = 'honeycomb', angleMap = getAngles(grid, helices, lattice)) {
+    //   Phase 3 — QUEUE-DRAIN of anglecomb2 relaxed passers:
+    //             candidates = { bucket pair + gates 1+2+3 + ≥1 strong
+    //                            mutual witness (gate 4b) }
+    //             Sort by cos desc, axisDot desc (tiebreak).
+    //             Drain greedy: each helix participates in at most one
+    //             merge per drain (any subsequent entry touching an already
+    //             consumed helix is dropped and gets a fresh chance in the
+    //             next outer iteration).
+    //
+    // Outer iterations repeat until zero merges occur. Merge mechanic is
+    // anglecomb2's light-touch: helixId remap on the grid + splice on the
+    // helices array. Phase 1 can produce non-disjoint merges (nucleotides
+    // at overlapping offsets in the merged helix); a warning is logged in
+    // that case.
+    function anglecomb3(grid, helices, lattice = 'honeycomb', partials, hashMergePairs, angleMap = getAngles(grid, helices, lattice)) {
         const AXIS_DOT_THRESHOLD = 0.935;
-        const MAX_PASSES = 200;
+        const MAX_ITERATIONS = 200;
         let networkMap = angleMap;
         const mergedPairs = [];
-        // Merge mechanics: identical to anglecomb. Remap grid helix ids
-        // (mergedHelix → keepHelix, ids above mergedHelix shift down by 1),
-        // splice helices[mergedHelix] into helices[keepHelix].
-        // Returns the pre-merge nucleotide membership of both helices so
-        // callers can reconstruct merge provenance (which nucleotides
-        // belonged to which helix) after the splice.
+        // ── shared helpers ──────────────────────────────────────────────
+        // (kept local; anglecomb2 has near-identical inline versions, but
+        // duplicating rather than sharing avoids coupling anglecomb2's evolution.)
+        // Light merge — matches anglecomb2's mergeHelixInto exactly.
         const mergeHelixInto = (keepHelix, mergedHelix) => {
             const keepNts = helices[keepHelix] ?? [];
             const mergedNts = helices[mergedHelix] ?? [];
@@ -1021,8 +1073,7 @@ var toscad;
             helices.splice(mergedHelix, 1);
             return { keepNtIds, mergedNtIds };
         };
-        // Helix axis (normalised) between the min- and max-offset nts on
-        // the helix. Same logic as anglecomb's local helper.
+        // Helix 3D axis — same as anglecomb2's helper.
         const helixAxis = (helixId) => {
             const nts = helices[helixId] ?? [];
             let minOffset = Number.POSITIVE_INFINITY;
@@ -1052,160 +1103,320 @@ var toscad;
                 return null;
             return dir.divideScalar(len);
         };
-        for (const round of ['strict', 'relaxed']) {
-            let pass = 0;
-            while (pass++ < MAX_PASSES) {
-                const preds = tempGlobalPos(networkMap, grid, lattice);
-                // Group predictions by (viaParent, EXACT local angle). A
-                // single parent P asserting that 2+ helices sit at the same
-                // local angle from itself is exactly old anglecomb's
-                // signal, preserved bit-for-bit.
-                //
-                // We deliberately don't bucket by predicted cell, because
-                // snapToLatticeAngle would conflate distinct local angles
-                // that happen to snap to the same lattice direction — e.g.
-                // 60° and 65° both snap to 60° in a honeycomb. Those are
-                // different geometric relationships and shouldn't share a
-                // merge candidate bucket.
-                const bucket = new Map();
-                for (const [hid, plist] of preds.entries()) {
-                    for (const p of plist) {
-                        if (p.viaParent < 0)
-                            continue; // synthetic roots don't source claims
-                        const key = `${p.viaParent}|${p.edgeLocalAngle}`;
-                        let b = bucket.get(key);
-                        if (!b) {
-                            b = {
-                                parent: p.viaParent,
-                                localAngle: p.edgeLocalAngle,
-                                coord: p.coord,
-                                hids: new Set()
-                            };
-                            bucket.set(key, b);
-                        }
-                        b.hids.add(hid);
+        const pIdxToHelixId = (pIdx) => {
+            const p = partials?.[pIdx];
+            if (!Array.isArray(p) || p.length === 0)
+                return -1;
+            const mark = grid.get(p[0].id);
+            return (mark && typeof mark.helixId === 'number') ? mark.helixId : -1;
+        };
+        // Gate 2 (axis collinearity, |dot| >= threshold) and Gate 3
+        // (axis-shadow non-overlap). Returned axisDot is |dot| — used for
+        // tiebreaking in phase 4.
+        const gate23 = (A, B) => {
+            const axisA = helixAxis(A);
+            const axisB = helixAxis(B);
+            if (!axisA || !axisB)
+                return { pass: false, axisDot: 0, reason: 'missing-axis' };
+            const axisDot = Math.abs(axisA.dot(axisB));
+            if (axisDot < AXIS_DOT_THRESHOLD)
+                return { pass: false, axisDot, reason: 'axisDot-below-threshold' };
+            if (helix.axisShadowOverlap(helices[A], helices[B]))
+                return { pass: false, axisDot, reason: 'shadow-overlap' };
+            return { pass: true, axisDot, reason: 'ok' };
+        };
+        // (viaParent, exactLocalAngle) buckets from preds — same signal as
+        // anglecomb2's collision detector.
+        const collectBuckets = (preds) => {
+            const bucket = new Map();
+            for (const [hid, plist] of preds.entries()) {
+                for (const p of plist) {
+                    if (p.viaParent < 0)
+                        continue;
+                    const key = `${p.viaParent}|${p.edgeLocalAngle}`;
+                    let b = bucket.get(key);
+                    if (!b) {
+                        b = { parent: p.viaParent, localAngle: p.edgeLocalAngle, coord: p.coord, hids: new Set() };
+                        bucket.set(key, b);
+                    }
+                    b.hids.add(hid);
+                }
+            }
+            return [...bucket.values()];
+        };
+        const inAnyBucket = (A, B, buckets) => {
+            for (const b of buckets) {
+                if (b.hids.has(A) && b.hids.has(B))
+                    return true;
+            }
+            return false;
+        };
+        // Gate 4a — strict-parent unanimity for a child at a specific cell.
+        // Reused from anglecomb2 verbatim.
+        const strictParentsAgree = (childHid, cell, preds, cc) => {
+            let sawStrong = false;
+            for (const p of preds.get(childHid) ?? []) {
+                if (p.viaParent < 0)
+                    continue;
+                const w = cc.get(p.viaParent)?.get(childHid) ?? 0;
+                if (w < 2)
+                    continue;
+                sawStrong = true;
+                if (p.coord[0] !== cell[0] || p.coord[1] !== cell[1])
+                    return false;
+            }
+            return sawStrong;
+        };
+        // Gate 4b — strong mutual witnesses (≥2 crossovers to BOTH A and B).
+        // Reused from anglecomb2.
+        const computeStrongMutuals = (A, B, preds, cc) => {
+            const parentsA = new Set();
+            for (const p of preds.get(A) ?? [])
+                if (p.viaParent >= 0)
+                    parentsA.add(p.viaParent);
+            const out = [];
+            for (const n of parentsA) {
+                if (n === A || n === B)
+                    continue;
+                let isBParent = false;
+                for (const p of preds.get(B) ?? []) {
+                    if (p.viaParent === n) {
+                        isBParent = true;
+                        break;
                     }
                 }
-                const candidates = [...bucket.values()].filter(b => b.hids.size >= 2);
-                if (candidates.length === 0) {
-                    console.log(`[anglecomb2] round=${round} pass=${pass} no colocations`);
-                    break;
+                if (!isBParent)
+                    continue;
+                const nToA = cc.get(n)?.get(A) ?? 0;
+                const nToB = cc.get(n)?.get(B) ?? 0;
+                if (nToA >= 2 && nToB >= 2)
+                    out.push(n);
+            }
+            return out.sort((a, b) => a - b);
+        };
+        const minNtIdOf = (hid) => {
+            const nts = helices[hid] ?? [];
+            let m = Number.POSITIVE_INFINITY;
+            for (const nt of nts)
+                if (nt && nt.id < m)
+                    m = nt.id;
+            return isFinite(m) ? m : -1;
+        };
+        const haveHashPairs = Array.isArray(hashMergePairs) && hashMergePairs.length > 0;
+        const havePartials = Array.isArray(partials) && partials.length > 0;
+        if (!haveHashPairs || !havePartials) {
+            console.log(`[anglecomb3] no partials / no hash pairs — hash-driven phases will be skipped`);
+        }
+        // ── outer iteration ────────────────────────────────────────────
+        let iteration = 0;
+        let anyMergeThisIteration = true;
+        while (anyMergeThisIteration && iteration < MAX_ITERATIONS) {
+            iteration++;
+            anyMergeThisIteration = false;
+            // ── PHASE 1: hash pairs — UNCONDITIONAL merge ──────────────
+            // hashAxisOverlap already ran its own end-to-end tests (cylinder
+            // overlap + antiparallel free-side axes) upstream. If it says
+            // yes, we merge. cos / axisDot / gate outcomes are logged for
+            // visibility but do NOT gate anything.
+            if (haveHashPairs && havePartials) {
+                let phase1Merged = true;
+                while (phase1Merged) {
+                    phase1Merged = false;
+                    const cc = getConnectionCounts(grid);
+                    for (const mp of hashMergePairs) {
+                        const hA = pIdxToHelixId(mp.a);
+                        const hB = pIdxToHelixId(mp.b);
+                        if (hA < 0 || hB < 0 || hA === hB)
+                            continue;
+                        if (!helices[hA] || !helices[hB])
+                            continue;
+                        const cos = helixPairCosine(hA, hB, cc);
+                        const g23 = gate23(hA, hB);
+                        const wasDisjoint = disjoint(helices, hA, hB, grid);
+                        const shadowOverlap = helices[hA] && helices[hB]
+                            ? helix.axisShadowOverlap(helices[hA], helices[hB])
+                            : false;
+                        const keep = Math.min(hA, hB);
+                        const merged = Math.max(hA, hB);
+                        const ids = mergeHelixInto(keep, merged);
+                        mergedPairs.push({
+                            keepHelix: keep, mergedHelix: merged,
+                            keepNtIds: ids.keepNtIds, mergedNtIds: ids.mergedNtIds,
+                            phase: 'hash', cos, axisDot: g23.axisDot,
+                            wasDisjoint, shadowOverlap,
+                        });
+                        console.log(`[anglecomb3] iter=${iteration} phase=hash merged ${merged}→${keep} ` +
+                            `cos=${cos.toFixed(3)} axisDot=${g23.axisDot.toFixed(3)} ` +
+                            `disjoint=${wasDisjoint} shadowOverlap=${shadowOverlap}` +
+                            (!g23.pass ? ` (gate23 would have rejected: ${g23.reason})` : ``));
+                        if (!wasDisjoint) {
+                            console.warn(`[anglecomb3] ⚠️ non-disjoint hash merge ${merged}→${keep} — ` +
+                                `merged helix will have overlapping offsets on its number line.`);
+                        }
+                        if (shadowOverlap) {
+                            console.warn(`[anglecomb3] ⚠️ hash merge ${merged}→${keep} shadow-overlaps — ` +
+                                `axisShadowOverlap would have flagged this as side-by-side. Trusting hash.`);
+                        }
+                        networkMap = getAngles(grid, helices, lattice);
+                        phase1Merged = true;
+                        anyMergeThisIteration = true;
+                        break; // restart phase-1 loop with fresh cc / helixIds
+                    }
                 }
-                const connectionCounts = getConnectionCounts(grid);
-                let mergedThisPass = false;
-                outer: for (const { parent: source, coord: cell, hids } of candidates) {
-                    const sorted = [...hids].sort((a, b) => a - b);
+            }
+            // ── PHASE 2: anglecomb2 strict (one merge per pass, to fixed-point) ──
+            {
+                let phase2Merged = true;
+                while (phase2Merged) {
+                    phase2Merged = false;
+                    const preds = tempGlobalPos(networkMap, grid, lattice);
+                    const cc = getConnectionCounts(grid);
+                    const buckets = collectBuckets(preds);
+                    outer2: for (const bucket of buckets) {
+                        if (bucket.hids.size < 2)
+                            continue;
+                        const sorted = [...bucket.hids].sort((a, b) => a - b);
+                        for (let i = 0; i < sorted.length; i++) {
+                            const A = sorted[i];
+                            for (let j = i + 1; j < sorted.length; j++) {
+                                const B = sorted[j];
+                                if (!disjoint(helices, A, B, grid))
+                                    continue;
+                                const g23 = gate23(A, B);
+                                if (!g23.pass)
+                                    continue;
+                                if (!strictParentsAgree(A, bucket.coord, preds, cc))
+                                    continue;
+                                if (!strictParentsAgree(B, bucket.coord, preds, cc))
+                                    continue;
+                                const cos = helixPairCosine(A, B, cc);
+                                const keep = Math.min(A, B);
+                                const merged = Math.max(A, B);
+                                const ids = mergeHelixInto(keep, merged);
+                                mergedPairs.push({
+                                    keepHelix: keep, mergedHelix: merged,
+                                    keepNtIds: ids.keepNtIds, mergedNtIds: ids.mergedNtIds,
+                                    phase: 'strict', cos, axisDot: g23.axisDot,
+                                    source: bucket.parent, cell: bucket.coord,
+                                });
+                                console.log(`[anglecomb3] iter=${iteration} phase=strict merged ${merged}→${keep} ` +
+                                    `at (${bucket.coord[0]},${bucket.coord[1]}) source=${bucket.parent} ` +
+                                    `cos=${cos.toFixed(3)} axisDot=${g23.axisDot.toFixed(3)}`);
+                                networkMap = getAngles(grid, helices, lattice);
+                                phase2Merged = true;
+                                anyMergeThisIteration = true;
+                                break outer2;
+                            }
+                        }
+                    }
+                }
+            }
+            // ── PHASE 3: queue-drain of relaxed anglecomb2 passers ──────
+            {
+                const preds = tempGlobalPos(networkMap, grid, lattice);
+                const cc = getConnectionCounts(grid);
+                const buckets = collectBuckets(preds);
+                // dedup key: unordered pair. Prefer the higher (cos, axisDot).
+                const queueMap = new Map();
+                const enqueue = (e) => {
+                    const key = `${Math.min(e.A, e.B)}|${Math.max(e.A, e.B)}`;
+                    const existing = queueMap.get(key);
+                    if (!existing ||
+                        e.cos > existing.cos ||
+                        (e.cos === existing.cos && e.axisDot > existing.axisDot)) {
+                        queueMap.set(key, e);
+                    }
+                };
+                // Relaxed anglecomb2 — bucket pairs passing gates 1+2+3+4b
+                for (const bucket of buckets) {
+                    if (bucket.hids.size < 2)
+                        continue;
+                    const sorted = [...bucket.hids].sort((a, b) => a - b);
                     for (let i = 0; i < sorted.length; i++) {
                         const A = sorted[i];
                         for (let j = i + 1; j < sorted.length; j++) {
                             const B = sorted[j];
-                            // Gate 1: offset-axis disjointness (unchanged).
                             if (!disjoint(helices, A, B, grid))
                                 continue;
-                            // Gate 2: 3D axis collinearity (unchanged).
-                            const axisA = helixAxis(A);
-                            const axisB = helixAxis(B);
-                            if (!axisA || !axisB)
+                            const g23 = gate23(A, B);
+                            if (!g23.pass)
                                 continue;
-                            const axisDot = Math.abs(axisA.dot(axisB));
-                            if (axisDot < AXIS_DOT_THRESHOLD)
+                            const witnesses = computeStrongMutuals(A, B, preds, cc);
+                            if (witnesses.length === 0)
                                 continue;
-                            // Gate 3: axis-shadow side-by-side rejection. Collinear helices
-                            // that lie on top of each other (bundle neighbors) rather than
-                            // meeting end-to-end will project heavily onto each other's axis
-                            // and get filtered here.
-                            if (helix.axisShadowOverlap(helices[A], helices[B])) {
-                                console.log(`[anglecomb2] round=${round} pass=${pass} rejected pair (${A},${B}) — side-by-side shadow overlap`);
+                            const cos = helixPairCosine(A, B, cc);
+                            const minNtA = minNtIdOf(A);
+                            const minNtB = minNtIdOf(B);
+                            if (minNtA < 0 || minNtB < 0)
                                 continue;
-                            }
-                            // Compute strong mutual witnesses (helices that
-                            // are viaParent for both A and B with ≥2
-                            // crossovers to each). Used as relaxed round's
-                            // gate; also logged for post-mortem regardless
-                            // of which round fires.
-                            const parentsA = new Set();
-                            for (const p of preds.get(A) ?? [])
-                                if (p.viaParent >= 0)
-                                    parentsA.add(p.viaParent);
-                            const strongMutuals = [];
-                            for (const n of parentsA) {
-                                if (n === A || n === B)
-                                    continue;
-                                let isBParent = false;
-                                for (const p of preds.get(B) ?? []) {
-                                    if (p.viaParent === n) {
-                                        isBParent = true;
-                                        break;
-                                    }
-                                }
-                                if (!isBParent)
-                                    continue;
-                                const nToA = connectionCounts.get(n)?.get(A) ?? 0;
-                                const nToB = connectionCounts.get(n)?.get(B) ?? 0;
-                                if (nToA >= 2 && nToB >= 2)
-                                    strongMutuals.push(n);
-                            }
-                            // ── Round-specific gate ─────────────────────────
-                            if (round === 'strict') {
-                                // Per-candidate strong-parent consensus. For
-                                // each of A and B, every parent with ≥2
-                                // crossovers to it must predict it at the
-                                // bucket cell. Weak (single-crossover) parents
-                                // are ignored — their evidence is too thin to
-                                // veto. Require at least one strong parent
-                                // per candidate to avoid vacuous truth on
-                                // helices with only weak edges.
-                                const strongParentsAgree = (childHid) => {
-                                    let sawStrong = false;
-                                    for (const p of preds.get(childHid) ?? []) {
-                                        if (p.viaParent < 0)
-                                            continue;
-                                        const w = connectionCounts.get(p.viaParent)?.get(childHid) ?? 0;
-                                        if (w < 2)
-                                            continue;
-                                        sawStrong = true;
-                                        if (p.coord[0] !== cell[0] || p.coord[1] !== cell[1])
-                                            return false;
-                                    }
-                                    return sawStrong;
-                                };
-                                if (!strongParentsAgree(A) || !strongParentsAgree(B))
-                                    continue;
-                            }
-                            else {
-                                // Relaxed: at least one strong mutual witness.
-                                if (strongMutuals.length === 0)
-                                    continue;
-                            }
-                            const keep = Math.min(A, B);
-                            const merged = Math.max(A, B);
-                            const mergeIds = mergeHelixInto(keep, merged);
-                            strongMutuals.sort((a, b) => a - b);
-                            mergedPairs.push({
-                                keepHelix: keep, mergedHelix: merged, source, cell, round,
-                                witnesses: strongMutuals,
-                                keepNtIds: mergeIds.keepNtIds,
-                                mergedNtIds: mergeIds.mergedNtIds
+                            enqueue({
+                                A, B, minNtA, minNtB,
+                                cos, axisDot: g23.axisDot,
+                                cell: bucket.coord, source: bucket.parent, witnesses,
                             });
-                            console.log(`[anglecomb2] round=${round} merged ${merged} into ${keep} at cell (${cell[0]},${cell[1]}) ` +
-                                `source=${source} witnesses=[${strongMutuals.join(',')}] |axisDot|=${axisDot.toFixed(3)}`);
-                            mergedThisPass = true;
-                            break outer;
                         }
                     }
                 }
-                if (!mergedThisPass) {
-                    console.log(`[anglecomb2] round=${round} pass=${pass} ${candidates.length} colocation(s) but none passed gates`);
-                    break;
+                // Sort: cos desc, axisDot desc.
+                const queue = [...queueMap.values()].sort((x, y) => y.cos - x.cos || y.axisDot - x.axisDot);
+                if (queue.length > 0) {
+                    console.log(`[anglecomb3] iter=${iteration} phase=queue built ${queue.length} candidate(s) ` +
+                        `(top cos=${queue[0].cos.toFixed(3)}, bottom cos=${queue[queue.length - 1].cos.toFixed(3)})`);
                 }
-                // Grid changed → networkMap must be re-derived before next
-                // tempGlobalPos, or Phase 1's BFS will trip on stale ids.
-                networkMap = getAngles(grid, helices, lattice);
+                // Drain greedy. Track consumed helices by their pre-drain
+                // representative nt id (immutable across merges).
+                const consumedNts = new Set();
+                let queueMergedAny = false;
+                for (const entry of queue) {
+                    if (consumedNts.has(entry.minNtA) || consumedNts.has(entry.minNtB)) {
+                        console.log(`[anglecomb3] iter=${iteration} phase=queue-relaxed skipped (${entry.A},${entry.B}) ` +
+                            `cos=${entry.cos.toFixed(3)} — helix consumed earlier in drain`);
+                        continue;
+                    }
+                    // Resolve to CURRENT helixIds via nt-id → grid mark.
+                    const currA = grid.get(entry.minNtA)?.helixId ?? -1;
+                    const currB = grid.get(entry.minNtB)?.helixId ?? -1;
+                    if (currA < 0 || currB < 0 || currA === currB)
+                        continue;
+                    if (!helices[currA] || !helices[currB])
+                        continue;
+                    const keep = Math.min(currA, currB);
+                    const merged = Math.max(currA, currB);
+                    const ids = mergeHelixInto(keep, merged);
+                    mergedPairs.push({
+                        keepHelix: keep, mergedHelix: merged,
+                        keepNtIds: ids.keepNtIds, mergedNtIds: ids.mergedNtIds,
+                        phase: 'queue-relaxed',
+                        cos: entry.cos,
+                        axisDot: entry.axisDot,
+                        source: entry.source,
+                        cell: entry.cell,
+                        witnesses: entry.witnesses,
+                    });
+                    console.log(`[anglecomb3] iter=${iteration} phase=queue-relaxed merged ${merged}→${keep} ` +
+                        `cos=${entry.cos.toFixed(3)} axisDot=${entry.axisDot.toFixed(3)}` +
+                        (entry.cell ? ` cell=(${entry.cell[0]},${entry.cell[1]})` : '') +
+                        (entry.source !== undefined ? ` source=${entry.source}` : '') +
+                        (entry.witnesses && entry.witnesses.length > 0
+                            ? ` witnesses=[${entry.witnesses.join(',')}]` : ''));
+                    consumedNts.add(entry.minNtA);
+                    consumedNts.add(entry.minNtB);
+                    queueMergedAny = true;
+                }
+                if (queueMergedAny) {
+                    networkMap = getAngles(grid, helices, lattice);
+                    anyMergeThisIteration = true;
+                }
             }
+            console.log(`[anglecomb3] iter=${iteration} complete — ` +
+                (anyMergeThisIteration ? 'had merges, continuing' : 'no merges, done'));
+        }
+        if (iteration >= MAX_ITERATIONS) {
+            console.warn(`[anglecomb3] hit MAX_ITERATIONS=${MAX_ITERATIONS}`);
         }
         return { networkMap, mergedPairs };
     }
-    toscad.anglecomb2 = anglecomb2;
+    toscad.anglecomb3 = anglecomb3;
     // anglecorr2 — global-position variant of anglecorr.
     //
     // Consumes the multimap from tempGlobalPos. Detection is identical to

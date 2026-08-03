@@ -151,10 +151,10 @@ namespace helix {
 				const step = terminatingConditions(curr, currPair, 1) || terminatingConditions(curr, currPair, -1);
 				if (!step) break;
 
-				console.log("Circular strand detected")
+				// console.log("Circular strand detected")
 				// Circular helix guard: if the next step loops back into this partial, stop here.
 				if (seen.has(step.nextA.id) || seen.has(step.nextB.id)) break;
-				console.log("Circular strand stopped")
+				// console.log("Circular strand stopped")
 
 				// Always consume the immediate neighbors (curr+1 and a-1) even if mismatched.
 				record(partial, seen, step.nextA);
@@ -677,7 +677,7 @@ namespace helix {
 	export function axisShadowOverlap(
 		helixA: Nucleotide[],
 		helixB: Nucleotide[],
-		threshold: number = 0.5
+		threshold: number = 0.3
 	): boolean {
 		if (!Array.isArray(helixA) || !Array.isArray(helixB)) return false;
 		if (helixA.length < 2 || helixB.length < 2) return false;

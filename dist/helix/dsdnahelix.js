@@ -143,11 +143,11 @@ var helix;
                 const step = terminatingConditions(curr, currPair, 1) || terminatingConditions(curr, currPair, -1);
                 if (!step)
                     break;
-                console.log("Circular strand detected");
+                // console.log("Circular strand detected")
                 // Circular helix guard: if the next step loops back into this partial, stop here.
                 if (seen.has(step.nextA.id) || seen.has(step.nextB.id))
                     break;
-                console.log("Circular strand stopped");
+                // console.log("Circular strand stopped")
                 // Always consume the immediate neighbors (curr+1 and a-1) even if mismatched.
                 record(partial, seen, step.nextA);
                 record(partial, seen, step.nextB);
@@ -619,7 +619,7 @@ var helix;
     // [0, L], and the clipped fraction of L is the coverage. Returns true when
     // max(covA, covB) >= threshold — i.e., the helices lie on top of each other
     // rather than meeting end-to-end, and the merge should be rejected.
-    function axisShadowOverlap(helixA, helixB, threshold = 0.5) {
+    function axisShadowOverlap(helixA, helixB, threshold = 0.3) {
         if (!Array.isArray(helixA) || !Array.isArray(helixB))
             return false;
         if (helixA.length < 2 || helixB.length < 2)
