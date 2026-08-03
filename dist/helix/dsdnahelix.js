@@ -3,32 +3,15 @@
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
 /*
-// for ease of use, and to prevent dumb mistakes as I code and test things out, here is exactly the commands to use this in console:
-findBasepairs(); // use 3 because there are 2 versions of findBasepairs, and 3 is the fastest. Dont ask why i named it that.
-helix.dropIntraStrandPairs();
-let {partials, unpaired} = helix.findHelixPartials2(elements, 2);
-let {ssdna, stubs, longssScaffold} = helix.ssdnaPartials(unpaired);
-let ssScaffold = helix.longssScaffoldfunc(longssScaffold, stubs);
-let {helices, lastScraps, binders, binder2, disconnected, unhandled} = helix.generateHelix(partials, ssdna, ssScaffold, stubs);
-// and helices are what you want!
-// This code has been completed (polishing required but sure).
-// After running this, check for helix.flat().length == elements.size
-// If false, then something went wrong! RIP.
-*/
-/*
-// Check for double-pairing or cross-pairing.
-let pairTally = new Map();
-let overloadedNucleotides = [];
-elements.forEach(nt=>{
-    let targetPairId = nt.pair;
-    if (targetPairId !== undefined && targetPairId !== null) {
-        let currentCount = pairTally.get(targetPairId) || 0;
-        pairTally.set(targetPairId, currentCount + 1);
-        if (currentCount + 1 === 2) {
-            overloadedNucleotides.push(targetPairId);
-        }
-    }
-})
+Main purpose of this file: Build a basic helices[][] list. This will be the basis of the nts that will be mutated further down the line.
+
+Run it with: helix.findHelices(elements, 2)
+
+Definitions:
+1. Partial: A partial is a contiguous stretch of 2 anti-parallel strands containing nucleotides (allowing mismatches within `tolerance`).
+2. ssDNA partial: A contiguous stretch of nucleotides along a single strand. These are by defintion unpaired.
+3. longssScaffold: A contiguous stretch of nucleotides along a single strand that is part of the scaffold. These are by definition unpaired.
+4. stub: A single nucleotide that is not part of any contiguous runs.
 */
 // For even easier use, just run:
 // let {helices, partials, usedSides} = await helix.findHelices(elements, 2);
@@ -106,7 +89,7 @@ var helix;
             let currPair = pairInPool;
             const strandA = curr.strand; // required to ensure we don't cross strands. This is how we know partials is actually a partial helix.
             const strandB = currPair.strand;
-            // this is the partial being built.
+            // See Definition 1.
             const partial = [];
             const seen = new Set();
             const terminatingConditions = (nucA, nucB, dir) => {
@@ -118,8 +101,6 @@ var helix;
                     return null;
                 // Tolerance window: OR logic. Continue if ANY offset in [1, tolerance] has forward paired to backward.
                 // (allows rescue by walking farther along topological neighbors on both strands).
-                let forwardCursor = nucA;
-                let backwardCursor = nucB;
                 for (let offset = 1; offset <= tolerance; offset++) {
                     const forward = elmts.get(nucA.id + dir * offset);
                     const backward = elmts.get(nucB.id - dir * offset);
@@ -143,11 +124,6 @@ var helix;
                 const step = terminatingConditions(curr, currPair, 1) || terminatingConditions(curr, currPair, -1);
                 if (!step)
                     break;
-                // console.log("Circular strand detected")
-                // Circular helix guard: if the next step loops back into this partial, stop here.
-                if (seen.has(step.nextA.id) || seen.has(step.nextB.id))
-                    break;
-                // console.log("Circular strand stopped")
                 // Always consume the immediate neighbors (curr+1 and a-1) even if mismatched.
                 record(partial, seen, step.nextA);
                 record(partial, seen, step.nextB);
@@ -161,64 +137,18 @@ var helix;
                 partials.push(partial);
             }
         }
-        // Deduplicate across all partials: any nucleotide that appears more than once
-        // is moved to unpaired along with its pair and any nucleotide paired to it.
-        // they will be handled as either ssDNA or just directly added to helix later.
-        const seenfordups = new Map();
-        const duplicates = new Set();
-        partials.forEach(helix => {
-            helix.forEach(nt => {
-                if (seenfordups.has(nt.id)) {
-                    duplicates.add(nt.id);
-                }
-                else {
-                    seenfordups.set(nt.id, nt);
-                }
-            });
-        });
-        // had to add the multi-pairing logic (down below) to fix the problem. But still logging for curiosity.
-        console.log('Duplicates set: ', duplicates);
-        if (duplicates.size) {
-            // Collect pair ids for duplicates
-            console.log('duplicates found: ', duplicates);
-            console.log('total duplicates: ', duplicates.size);
-            const pairIds = new Set();
-            duplicates.forEach(id => {
-                const a = elmts2.get(id);
-                if (a) {
-                    unpaired.set(a.id, a);
-                    if (a.pair) {
-                        pairIds.add(a.pair.id);
-                        unpaired.set(a.pair.id, a.pair);
-                    }
-                }
-            });
-            // Remove duplicates, their pairs, and any nucleotide whose pair is a duplicate
-            partials.forEach((helix, i) => {
-                partials[i] = helix.filter(nt => {
-                    if (duplicates.has(nt.id) || pairIds.has(nt.id)) {
-                        unpaired.set(nt.id, nt);
-                        return false;
-                    }
-                    if (nt.pair && duplicates.has(nt.pair.id)) {
-                        unpaired.set(nt.id, nt);
-                        return false;
-                    }
-                    return true;
-                });
-            });
-            // Drop empty partial lists
-            partials = partials.filter(helix => helix.length > 0);
-        }
         return { partials, unpaired: Array.from(unpaired.values()) };
     }
     helix_1.findHelixPartials2 = findHelixPartials2;
-    // Groups unpaired/binder nucleotides (unpaired) into ssDNA partials by strand.
-    // Only contiguous runs (>2) along a strand are kept; shorter runs go to stubs.
-    function ssdnaPartials(unpaired) {
+    // Groups unpaired/binder nucleotides (unpaired) into ssdna/longssScaffold/stubs.
+    // Only contiguous runs (>2) along a strand are kept; single nts go to stubs.
+    function sortUnpaired(unpaired) {
         const unpairStrand = new Map();
+        // See Definition 2.
         const ssdna = [];
+        // See Definition 3.
         const stubs = [];
+        // See Definition 4. Kept as runs (never flattened) so boundaries stay topological.
         const longssScaffold = [];
         const scaffold = getScaffoldStrand();
         unpaired.forEach(nt => {
@@ -249,39 +179,18 @@ var helix;
                             ssdna.push(run);
                         }
                         else {
-                            longssScaffold.push(...run);
+                            longssScaffold.push(run);
                         }
                     }
                     else {
                         run.forEach(r => stubs.push(r));
                     }
                 }
-                // // expand run both directions along n5/n3 within unpaired set
-                // const run: Nucleotide[] = [];
-                // const pushRun = (node: Nucleotide | null, dir: 'n5' | 'n3') => {
-                // 	let curr = node;
-                // 	while (curr && inSet.has(curr.id) && !visited.has(curr.id)) {
-                // 		run.push(curr);
-                // 		visited.add(curr.id);
-                // 		curr = curr[dir] as Nucleotide | null;
-                // 	}
-                // };
-                // // walk n5 then n3 from seed to capture contiguous block
-                // pushRun(nt, 'n5');
-                // // pushRun added seed and upstream; now extend downstream from the last added toward n3
-                // // ensure we start from the n3 of the seed to avoid duplicate seed
-                // const seedN3 = nt.n3 as Nucleotide | null;
-                // pushRun(seedN3, 'n3');
-                // if (run.length > 2) {
-                // 	ssdna.push(run);
-                // } else {
-                // 	run.forEach(r => stubs.push(r));
-                // }
             }
         });
         return { ssdna, stubs, longssScaffold };
     }
-    helix_1.ssdnaPartials = ssdnaPartials;
+    helix_1.sortUnpaired = sortUnpaired;
     // helper function for adding the average a3 vector in canvas. Really should not be here.
     function averageA3a(list) {
         if (!list.length)
@@ -305,52 +214,31 @@ var helix;
     }
     helix_1.averageA3a = averageA3a;
     ;
-    // helper to consolidate the nucleotides into contiguous segments, and enforce equal halves for scaffold segments.
+    // Enforce equal halves on each scaffold run (already grouped topologically by sortUnpaired).
     function longssScaffoldfunc(longssScaffold, stubs = []) {
         const ssScaffold = [];
-        if (!longssScaffold.length)
-            return ssScaffold;
-        // Work on a sorted copy so numeric contiguity is easy to detect.
-        const sorted = [...longssScaffold].sort((a, b) => a.id - b.id);
-        let runAway = [];
-        const flushRun = () => {
-            if (!runAway.length)
-                return;
-            if (runAway.length < 3) {
-                runAway.forEach(nt => stubs.push(nt));
-                runAway = [];
+        longssScaffold.forEach(run => {
+            if (run.length < 3) {
+                run.forEach(nt => stubs.push(nt));
                 return;
             }
             // Enforce equal halves; trim one nucleotide if odd-length to satisfy the requirement.
-            const evenLen = runAway.length - (runAway.length % 2);
-            if (evenLen !== runAway.length) {
-                const dropped = runAway[evenLen];
+            const evenLen = run.length - (run.length % 2);
+            if (evenLen !== run.length) {
+                const dropped = run[evenLen];
                 if (dropped)
                     stubs.push(dropped);
             }
-            if (evenLen === 0) {
-                runAway = [];
+            if (evenLen === 0)
                 return;
-            }
             const half = evenLen / 2;
-            ssScaffold.push(runAway.slice(0, half));
-            ssScaffold.push(runAway.slice(half, evenLen));
-            runAway = [];
-        };
-        sorted.forEach(nt => {
-            const last = runAway[runAway.length - 1];
-            if (!last || nt.id === last.id + 1) {
-                runAway.push(nt);
-                return;
-            }
-            flushRun();
-            runAway.push(nt);
+            ssScaffold.push(run.slice(0, half));
+            ssScaffold.push(run.slice(half, evenLen));
         });
-        flushRun();
         return ssScaffold;
     }
     helix_1.longssScaffoldfunc = longssScaffoldfunc;
-    // let partialStrandMap = new Map<number, Map<number, Nucleotide[]>>();
+    // Find the 4 endpoints of each partial in partialEndsMap. The sides are not oriented any way.
     function mapPartialEnds(partials) {
         const partialEndsMap = new Map();
         partials.forEach((partial, index) => {
@@ -365,10 +253,7 @@ var helix;
                 // strand1 is assigned to the one with the lowest ID at the 3' end (ends3[0])
                 const start1 = ends5.find(n => n.strand === ends3[0].strand);
                 const start2 = ends5.find(n => n.strand === ends3[1].strand);
-                // Skip 1-bp partials: when a strand has length 1 inside the partial,
-                // start1 == end1 (or start2 == end2). There's no linear extent, so the
-                // "two sides" model doesn't apply. These partials are merged by attach-count
-                // cap in generateHelix instead of by side uniqueness.
+                // One bp partial can't have a side
                 if (start1.id === ends3[0].id || start2.id === ends3[1].id)
                     return;
                 partialEndsMap.set(index, {
@@ -380,46 +265,8 @@ var helix;
         return partialEndsMap;
     }
     helix_1.mapPartialEnds = mapPartialEnds;
-    //  Returns the indices of partials that have exactly 1 free side.
-    //  Only partials present in `partialEndsMap` (i.e. those with 2 sides) are considered.
-    function partialsWithOneFreeSide(partials, partialEndsMap, usedSides) {
-        const result = [];
-        for (let pIdx = 0; pIdx < partials.length; pIdx++) {
-            if (!partialEndsMap.has(pIdx))
-                continue;
-            const sideUsage = usedSides.get(pIdx);
-            const side0Used = (sideUsage?.get(0) ?? 0) > 1e-9;
-            const side1Used = (sideUsage?.get(1) ?? 0) > 1e-9;
-            if (side0Used !== side1Used) {
-                result.push(pIdx);
-            }
-        }
-        return result;
-    }
-    helix_1.partialsWithOneFreeSide = partialsWithOneFreeSide;
-    // Like partialsWithOneFreeSide, but also computes the helical axis for each such partial
-    // and flips it so it points TOWARDS the free side. Returns pIdx -> { vector }.
-    // planeVector from getPartialAxis points side 0 -> side 1 (guess = midSide1 - midSide0,
-    // and planeVector is aligned to guess), so we negate it when the free side is 0.
-    function partialAxesTowardFreeSide(partials, partialEndsMap, usedSides) {
-        const result = new Map();
-        const oneFreeSide = partialsWithOneFreeSide(partials, partialEndsMap, usedSides);
-        for (const pIdx of oneFreeSide) {
-            const ends = partialEndsMap.get(pIdx);
-            if (!ends)
-                continue;
-            const sideUsage = usedSides.get(pIdx);
-            const side0Free = (sideUsage?.get(0) ?? 0) < 1e-9;
-            const { planeVector } = getPartialAxis(ends);
-            if (side0Free)
-                planeVector.negate();
-            result.set(pIdx, { vector: planeVector });
-        }
-        return result;
-    }
-    helix_1.partialAxesTowardFreeSide = partialAxesTowardFreeSide;
-    // Shortest distance between two 3D line segments (P1->P2) and (P3->P4).
     // Eberly's algorithm. Inputs in any consistent unit; output in same unit.
+    // Shortest distance between two 3D line segments (P1->P2) and (P3->P4).
     // Used by hashAxisOverlap for cylinder-vs-cylinder overlap (distance <= 2*radius).
     function segmentDistance3D(P1, P2, P3, P4) {
         const d1x = P2.x - P1.x, d1y = P2.y - P1.y, d1z = P2.z - P1.z;
@@ -468,33 +315,11 @@ var helix;
         const caz = P1.z + s * d1z - (P3.z + t * d2z);
         return Math.sqrt(cax * cax + cay * cay + caz * caz);
     }
-    // Hash-merge using overlapping cylindrical volumes ("hash cells") around each partial's
-    // free-side basepair. Each partial contributes one hash-cylinder:
-    //   origin = midpoint of the free-side basepair (start1+end2)/2 or (end1+start2)/2
-    //   dir    = the partial's helical axis vector pointing TOWARD the free side
-    //            (already produced by the caller via partialAxesTowardFreeSide)
-    //   length = cylinderLengthAng (default 50 Å)
-    //   radius = cylinderRadiusAng (default 12.5 Å)
-    // Brute-force pairwise. Two partials are candidate-mergeable iff BOTH:
-    //   1. Their hash-cylinders overlap: shortest segment-segment distance between the two
-    //      cylinder centerlines <= 2*radius (Eberly's algorithm in segmentDistance3D).
-    //   2. axis_a . axis_b < dotThreshold (default -0.9, i.e. strongly anti-parallel).
-    //      Rationale: both axes point TOWARD their free sides, so a valid end-to-end merge
-    //      (free sides facing each other) makes the axes anti-parallel -> dot close to -1.
-    // `dist` is computed but not used as a filter (the overlap test handles spatial rejection).
-    //
-    // Candidate pairs are greedily resolved in ASCENDING dot order (most negative first = best
-    // anti-parallel alignment wins), with each pIdx exclusive (a partial with one free side
-    // joins at most one merge). This weighting by `dot` is the tie-break rule.
-    //
-    // NOTE: `bbOffsets` from Nucleotide.getInstanceParameter3 returns positions in oxView
-    // internal units, where 1 unit = 8.518 Å. All distance thresholds given in Å are converted
-    // once for internal comparison in oxView units.
-    function hashAxisOverlap(partials, partialEndsMap, usedSides, partialAxes, options) {
+    function hashAxisOverlap(partials, partialEndsMap, usedSides, partialAxes, 
+    // Allow user to give inputs
+    { dotThreshold = -0.9, cylRadiusAng = 12.5, cylLengthAng = 50 } = {}) {
+        // constant that converts oxdna units to angstoms. 1 oxdna unit = 8.518A.
         const OX_TO_ANG = 8.518;
-        const dotThreshold = options?.dotThreshold ?? -0.9;
-        const cylRadiusAng = options?.cylinderRadiusAng ?? 12.5;
-        const cylLengthAng = options?.cylinderLengthAng ?? 50;
         const cylLengthOx = cylLengthAng / OX_TO_ANG;
         const overlapOx = (2 * cylRadiusAng) / OX_TO_ANG;
         const entries = [];
@@ -514,22 +339,17 @@ var helix;
             const segEnd = origin.clone().add(dir.clone().multiplyScalar(cylLengthOx));
             entries.push({ pIdx, origin, dir, segEnd });
         });
-        // Brute-force: collect all candidate pairs that pass BOTH gates.
+        // Brute-force: collect all candidate pairs that pass BOTH gates. They almost always will.
         const candidates = [];
         for (let i = 0; i < entries.length; i++) {
             const A = entries[i];
             for (let j = i + 1; j < entries.length; j++) {
                 const B = entries[j];
-                // Gate 1: cylinder overlap. Each hash-cylinder is a finite segment from its
-                // origin to segEnd along the partial's axis. Two cylinders overlap iff the
-                // shortest distance between their centerline segments <= 2*radius. This is the
-                // essential spatial filter — without it, anti-parallel partials on opposite
-                // sides of the scene would falsely match.
+                // Check for the "cylinder overlap" which is a finite segment.
                 const segDist = segmentDistance3D(A.origin, A.segEnd, B.origin, B.segEnd);
                 if (segDist > overlapOx)
                     continue;
-                // Gate 2: anti-parallel alignment. Both axes point toward their free sides,
-                // so a valid merge (free sides facing each other) requires dot < dotThreshold.
+                // Must be aligned towards the same side.
                 const dot = A.dir.dot(B.dir);
                 if (dot >= dotThreshold)
                     continue;
@@ -552,139 +372,6 @@ var helix;
         return result;
     }
     helix_1.hashAxisOverlap = hashAxisOverlap;
-    // Consume a list of hashAxisOverlap merge pairs and fold any cross-helix pairs
-    // into a single helix via combineHelices. For each pair:
-    //   1. Look up each partial's current helix via grid.get(partials[x][0].id).helixId.
-    //   2. If both partials already belong to the same current helix, skip.
-    //   3. If they're in different helices, use the same path as the scadnano
-    //      "Combine Helices" button to make the pair disjoint on the grid
-    //      (computeCombineShifts + applyCombineShifts) and then combineHelices.
-    // Pairs are processed in input order; each iteration re-reads helixIds from
-    // the grid, so indices returned by combineHelices' idRemap are tracked
-    // correctly for any subsequent pairs.
-    function applyAxisOverlapMerge(helices, grid, partials, mergePairs) {
-        const log = [];
-        if (!Array.isArray(helices) || !(grid instanceof Map) ||
-            !Array.isArray(partials) || !Array.isArray(mergePairs))
-            return log;
-        if (mergePairs.length === 0)
-            return log;
-        mergePairs.forEach(({ a, b }) => {
-            const pa = partials[a];
-            const pb = partials[b];
-            if (!Array.isArray(pa) || pa.length === 0)
-                return;
-            if (!Array.isArray(pb) || pb.length === 0)
-                return;
-            const markA = grid.get(pa[0].id);
-            const markB = grid.get(pb[0].id);
-            if (!markA || !markB)
-                return;
-            const helixA = markA.helixId;
-            const helixB = markB.helixId;
-            if (typeof helixA !== 'number' || typeof helixB !== 'number')
-                return;
-            if (helixA === helixB)
-                return; // same current helix — nothing to do
-            if (helixA >= helices.length || helixB >= helices.length)
-                return;
-            if (!Array.isArray(helices[helixA]) || helices[helixA].length === 0)
-                return;
-            if (!Array.isArray(helices[helixB]) || helices[helixB].length === 0)
-                return;
-            // Mirror the Combine Helices button: shift GridMark.offsets so the pair
-            // is disjoint on the grid, then perform the logical merge.
-            const shifts = toscad.computeCombineShifts(helices, [helixA, helixB], grid);
-            if (shifts && shifts.size > 0)
-                toscad.applyCombineShifts(grid, shifts);
-            const keep = Math.min(helixA, helixB);
-            const merged = Math.max(helixA, helixB);
-            // Capture pre-merge membership of both helices so callers can
-            // reconstruct merge provenance (which nucleotides belonged to
-            // which helix) after the combine.
-            const keepNtIds = (helices[keep] ?? []).map(nt => nt.id);
-            const mergedNtIds = (helices[merged] ?? []).map(nt => nt.id);
-            combineHelices(helices, [helixA, helixB], grid);
-            log.push({ keepHelix: keep, mergedHelix: merged, partialA: a, partialB: b, keepNtIds, mergedNtIds });
-        });
-        return log;
-    }
-    helix_1.applyAxisOverlapMerge = applyAxisOverlapMerge;
-    // Rejects "side-by-side" helix merges by measuring how much of each helix's
-    // axis segment is covered by the other's shadow. Endpoints of each helix are
-    // picked as the two farthest-apart nucleotides (2-pass diameter approximation),
-    // using the basepair midpoint if the pair is in the same helix and the
-    // nucleotide's own position otherwise. Each endpoint of one helix is projected
-    // onto the other's axis, the resulting interval is clipped to the segment
-    // [0, L], and the clipped fraction of L is the coverage. Returns true when
-    // max(covA, covB) >= threshold — i.e., the helices lie on top of each other
-    // rather than meeting end-to-end, and the merge should be rejected.
-    function axisShadowOverlap(helixA, helixB, threshold = 0.3) {
-        if (!Array.isArray(helixA) || !Array.isArray(helixB))
-            return false;
-        if (helixA.length < 2 || helixB.length < 2)
-            return false;
-        const endpointsOf = (helix) => {
-            const ids = new Set();
-            for (const nt of helix)
-                ids.add(nt.id);
-            const pointOf = (nt) => {
-                const own = nt.getPos();
-                if (nt.pair && ids.has(nt.pair.id)) {
-                    return own.clone().add(nt.pair.getPos()).multiplyScalar(0.5);
-                }
-                return own.clone();
-            };
-            // Farthest from seed, then farthest from that — approximate diameter in O(n).
-            const seedPos = helix[0].getPos();
-            let farA = helix[0];
-            let farADist = -1;
-            for (const nt of helix) {
-                const d = seedPos.distanceToSquared(nt.getPos());
-                if (d > farADist) {
-                    farADist = d;
-                    farA = nt;
-                }
-            }
-            const farAPos = farA.getPos();
-            let farB = farA;
-            let farBDist = -1;
-            for (const nt of helix) {
-                const d = farAPos.distanceToSquared(nt.getPos());
-                if (d > farBDist) {
-                    farBDist = d;
-                    farB = nt;
-                }
-            }
-            if (farA === farB)
-                return null;
-            return [pointOf(farA), pointOf(farB)];
-        };
-        const epA = endpointsOf(helixA);
-        const epB = endpointsOf(helixB);
-        if (!epA || !epB)
-            return false;
-        const [P0, P1] = epA;
-        const [Q0, Q1] = epB;
-        // Coverage of segment S0→S1 by the shadow of X0/X1 on its axis, clipped to [0, L].
-        const coverage = (S0, S1, X0, X1) => {
-            const axis = S1.clone().sub(S0);
-            const L = axis.length();
-            if (L < 1e-9)
-                return 0;
-            axis.divideScalar(L);
-            const t0 = X0.clone().sub(S0).dot(axis);
-            const t1 = X1.clone().sub(S0).dot(axis);
-            const lo = Math.max(0, Math.min(t0, t1));
-            const hi = Math.min(L, Math.max(t0, t1));
-            return Math.max(0, hi - lo) / L;
-        };
-        const covA = coverage(P0, P1, Q0, Q1);
-        const covB = coverage(Q0, Q1, P0, P1);
-        console.log(`[axisShadowOverlap] covA=${covA.toFixed(3)} covB=${covB.toFixed(3)}`);
-        return Math.max(covA, covB) >= threshold;
-    }
-    helix_1.axisShadowOverlap = axisShadowOverlap;
     // Perfected!
     // this one uses average a3 vectors of CONNECTED strands, as opposed to average a3 vectors of the entire partial (which cancels out, due to topology).
     function generateHelix(partials, ssdna, ssScaffold, stubs) {
@@ -779,10 +466,7 @@ var helix;
                 return { node: partials.length + stubsId, kind: 'stubs', index: stubsId };
             return null;
         };
-        // Each partial has up to 2 sides (from mapPartialEnds). One side gets at most 1 connection to another partial.
-        // 1-bp partials are excluded from partialEndsMap upstream — they get no sides here. Their
-        // per-partial cap is enforced by noSideAttachCount (max 2 attachments) in the greedy below.
-        // Build (partialIdx, ntId) -> sideIdx (0 or 1) so any exit-nt resolves to its side.
+        // Find which side of a partial the nt belongs to.
         const partialEndsMap = mapPartialEnds(partials);
         const ntToSide = new Map();
         partials.forEach((_, pIdx) => {
@@ -791,10 +475,10 @@ var helix;
             ntToSide.set(pIdx, inner);
             if (!ends)
                 return;
-            // Side 0: start1 (5' of strand A) paired with end2 (3' of strand B)
+            // Side 0: start1 paired with end2 (arbitrary choice, does not matter)
             inner.set(ends.start1.id, 0);
             inner.set(ends.end2.id, 0);
-            // Side 1: end1 (3' of strand A) paired with start2 (5' of strand B)
+            // Side 1: end1 paired with start2
             inner.set(ends.end1.id, 1);
             inner.set(ends.start2.id, 1);
         });
@@ -813,11 +497,11 @@ var helix;
             setB.add(a);
             partialAdj.set(b, setB);
         };
-        const directEdges = [];
-        const addDirectEdge = (a, sideA, b, sideB, dots) => {
+        const directLinks = [];
+        const addDirectLink = (a, sideA, b, sideB, dots) => {
             if (a === b)
                 return;
-            directEdges.push({ a, sideA, b, sideB, dots });
+            directLinks.push({ a, sideA, b, sideB, dots });
         };
         const stubsLinks = new Map();
         const addstubsLink = (stubNode, partialIdx, dots, strand, partialSide) => {
@@ -863,7 +547,7 @@ var helix;
                                     // code does not account for any partials that don't go into mapPartialEnds().
                                     const sideA = getSideForNt(nodeA.index, prev.id);
                                     const sideB = getSideForNt(nodeB.index, nt.id);
-                                    addDirectEdge(nodeA.index, sideA, nodeB.index, sideB, d);
+                                    addDirectLink(nodeA.index, sideA, nodeB.index, sideB, d);
                                 }
                                 else if (nodeA.kind === 'stubs' || nodeB.kind === 'stubs') {
                                     const stubNode = nodeA.kind === 'stubs' ? nodeA : nodeB;
@@ -881,17 +565,13 @@ var helix;
                 });
             });
         });
-        // Per-partial used-side amounts. For multi-bp partials (side is always defined when
-        // used) this tracks how much of each side has been consumed. Partial-partial edges and
-        // stub bridges consume a full side (1.0); ssDNA overhangs consume half a side (0.5),
-        // so two ssDNA overhangs may share the same side. A side is free iff its total is < 1.
+        // Track which side has been used, per partial pIdx.
         const usedSides = new Map();
-        // Per-partial attachment count for 0-side partials only. 1-bp partials have no
-        // `partialEndsMap` entry, so `side` is undefined and nothing ever lands in
-        // `usedSides` for them — this counter is the only way to cap them at 2 neighbors.
+        // Per-partial attachment count for 1-bp partials only (they don't have sides).
         const noSideAttachCount = new Map();
         const PER_PARTIAL_CAP = 2;
         const getNoSideCount = (pIdx) => noSideAttachCount.get(pIdx) ?? 0;
+        // helper to check if a partial has a free side available.
         const slotAvailable = (pIdx, side, amount = 1) => {
             if (side === undefined)
                 return getNoSideCount(pIdx) + amount <= PER_PARTIAL_CAP;
@@ -986,26 +666,11 @@ var helix;
                 }
             }
         });
-        // Two-stage greedy merge:
-        //
-        // Stage A — direct partial<->partial edges only, sorted by dots desc.
-        //   Backbone strand continuity (a direct strand-edge between two partials) is the
-        //   strongest signal that those partials belong to the same helix. Run this first
-        //   so a direct edge can claim a partial's side before any stub bridge can.
-        //
-        // Stage B — stub bridges only, on whatever sides remain unconsumed.
-        //   A stub bridge legitimately merges two partials only when their respective sides
-        //   are not already claimed by direct backbone neighbors. If a partial's side was
-        //   consumed in Stage A, any stub bridge targeting that side is rejected here — that
-        //   prevents a stub from yanking a partial out of its real (direct-edge) helix.
-        //
-        // Why the same-group check matters: as edges are accepted, partials get merged via
-        // union-find. A later edge between two partials that are already in the same group
-        // would be redundant — connecting them again does nothing structurally, but it would
-        // still consume two sides, blocking those sides from a real cross-group merge.
-        const sortedDirect = directEdges.slice().sort((x, y) => y.dots - x.dots);
+        // Store records of links between partials, sorted by alignment.
+        const sortedDirect = directLinks.slice().sort((x, y) => y.dots - x.dots);
+        // Store records of sub-mediated links between partials, sorted by alignment.
         const sortedStub = stubEdges.slice().sort((x, y) => y.dots - x.dots);
-        // Stage A: direct partial<->partial.
+        // First we do direct partial<->partial joining.
         for (const c of sortedDirect) {
             if (!slotAvailable(c.a, c.sideA))
                 continue;
@@ -1020,8 +685,7 @@ var helix;
             reserveSlot(c.a, c.sideA, 1);
             reserveSlot(c.b, c.sideB, 1);
         }
-        // Stage B: stub bridges. Same checks plus the existing safeguard against bridging
-        // two groups that already have a direct partial-partial connection.
+        // Then we do stub bridges. Same checks plus the existing safeguard against bridging two groups that already have a direct partial-partial connection.
         for (const c of sortedStub) {
             if (!slotAvailable(c.a, c.sideA))
                 continue;
@@ -1120,9 +784,8 @@ var helix;
                 });
                 return Array.from(helixIndices.values());
             };
-            // For an ssScaffold segment, find the partial side through which it connects to a
-            // specific helix. If the connection is not through a partial side (e.g. through a
-            // stub or internal partial nucleotide), no side needs to be reserved.
+            // For an ssScaffold segment, find the partial side through which it connects to a specific helix. 
+            // If the connection is not through a partial side (e.g. through a stub or internal partial nucleotide), no side needs to be reserved.
             const findSsScaffoldConnectionSide = (segment, helixIdx) => {
                 const segmentIds = new Set(segment.map(nt => nt.id));
                 for (const nt of segment) {
@@ -1143,6 +806,7 @@ var helix;
             let pending = ssScaffold.filter(segment => segment.length > 0);
             const maxRounds = Math.max(1, pending.length * 2);
             let round = 0;
+            // while there's still ssScaffold segments remaining to attach...
             while (pending.length) {
                 round += 1;
                 let attachedThisRound = 0;
@@ -1202,6 +866,7 @@ var helix;
                 pending = nextPending;
             }
         }
+        // Log which partial belongs to which helix.
         const partialToHelix = new Map();
         helices.forEach((list, hIdx) => {
             list.forEach(nt => {
@@ -1211,6 +876,7 @@ var helix;
                 }
             });
         });
+        // helper to add a segment of nucleotides to a helix
         const addSegmentToHelix = (targetIdx, segment) => {
             const helix = helices[targetIdx];
             if (!helix)
@@ -1223,7 +889,7 @@ var helix;
                 seen.add(nt.id);
             });
         };
-        // const oppositeDir = (dir: 'n5' | 'n3') => (dir === 'n5' ? 'n3' : 'n5');
+        // returns the first nucleotide in the segment that has a neighbor outside the segment on the specified side (n5 or n3).
         const findEndOnSide = (segment, segmentSet, dir) => {
             for (const nt of segment) {
                 const neighbor = nt[dir];
@@ -1232,6 +898,7 @@ var helix;
             }
             return null;
         };
+        // Walks n3/n5 until it hits a partial.
         const walkForPartial = (start, dir, segmentSet) => {
             let curr = start;
             while (curr) {
@@ -1244,6 +911,7 @@ var helix;
             }
             return undefined;
         };
+        // Walks n3/n5 up to N steps, but stops if it leaves the partial.
         const stepWithinSamePartial = (start, dir, steps, pIdx) => {
             let curr = start;
             let last = start;
@@ -1258,6 +926,7 @@ var helix;
             }
             return last;
         };
+        // Walks N steps along n3/n5 without partial boundaries.
         const stepN = (start, dir, steps) => {
             let curr = start;
             for (let i = 0; i < steps; i++) {
@@ -1282,8 +951,6 @@ var helix;
                 const firstHelixId = partialToHelix.get(first.pIdx);
                 const firstPartialSide = getSideForNt(first.pIdx, first.node.id);
                 // note: using more than 1 step might look fine, but it can cause issues in edge cases.
-                // specifically, structure 51 from nanobase (Dumbbell structure) has issues with this.
-                // Sticking to 1 step has NOT shown ANY problems so far.
                 const lastInPartial = stepWithinSamePartial(first.node, dir, 1, first.pIdx);
                 const pair = lastInPartial.pair;
                 if (!pair) {
@@ -1485,7 +1152,8 @@ var helix;
                 // spanning the same {A, B} pair fuse into one new helix together.
                 addBinderToPairGroup(ids[0], ids[1], entry.segment);
             }
-            // ids.length === 0 or > 2: should be unreachable for binder2; silently dropped.
+            // ids.length === 0: a binder2 entry whose classifier produced no helix ids (shouldn't happen, but skipped silently).
+            // ids.length > 2: currently unreachable.
         });
         const materializeBinderHelix = (segments) => {
             if (!segments.length)
@@ -1598,12 +1266,13 @@ var helix;
         return { helices, lastScraps, binders, binder2, disconnected, unhandled, usedSides };
     }
     helix_1.generateHelix = generateHelix;
+    // One ring to rule them all...
     function findHelices(inputMap, tolerance = 2) {
         findBasepairsOptim2();
         dropIntraStrandPairs();
         // ok now we can do the rest of the stuff.
         let { partials, unpaired } = findHelixPartials2(inputMap, tolerance);
-        let { ssdna, stubs, longssScaffold } = ssdnaPartials(unpaired);
+        let { ssdna, stubs, longssScaffold } = sortUnpaired(unpaired);
         let ssScaffold = longssScaffoldfunc(longssScaffold, stubs);
         let { helices, lastScraps, binders, binder2, disconnected, unhandled, usedSides } = generateHelix(partials, ssdna, ssScaffold, stubs);
         console.log("Helices size:", helices.flat().length);
@@ -1612,13 +1281,6 @@ var helix;
     }
     helix_1.findHelices = findHelices;
     // Merge two or more helices into the one with the lowest index.
-    // Mutates `helices` in place: pushes nucleotides from higher-indexed entries into the kept helix
-    // and SPLICES those entries out, so the array shrinks. Also mutates `grid` in place: every
-    // GridMark whose helixId points at a merged-away helix is rewritten to the kept id, and every
-    // surviving helixId is shifted down through the same remap that's returned. Returns an
-    // `idRemap` (oldIdx -> newIdx) that callers still need for any external references that key
-    // off helix index — gridview node ids, crossover connection ids, etc.
-    // No checks for grid layout yet
     function combineHelices(helices, indices, grid) {
         if (!Array.isArray(helices) || !Array.isArray(indices) || !(grid instanceof Map))
             return null;
@@ -1685,12 +1347,6 @@ var helix;
     }
     helix_1.combineHelices = combineHelices;
     // Reverse a combineHelices call using a snapshot recorded at merge time.
-    // Mutates `helices` in place: rebuilds at full pre-merge length, places each survivor back at
-    // its old index, and repopulates each removed slot from its captured `ntIds`. Mutates `grid`
-    // in place: marks for nucleotides in any removed slot get their original `helixId` back;
-    // every other mark shifts up through the inverse remap.
-    // Returns an `inverseRemap(currentId) -> oldId` helper so callers can fix up external state
-    // (gridview node ids, connection endpoints) that's still keyed in post-merge numbering.
     function splitHelices(helices, grid, snapshot) {
         if (!Array.isArray(helices) || !(grid instanceof Map) || !snapshot)
             return null;
@@ -1758,8 +1414,43 @@ var helix;
         return { inverseRemap };
     }
     helix_1.splitHelices = splitHelices;
+    //  Returns the indices of partials that have exactly 1 free side. (partials with >1 bp)
+    function partialsWithOneFreeSide(partials, partialEndsMap, usedSides // This is a map introduced in generateHelices that keeps track of the consumed sides.
+    ) {
+        const result = [];
+        for (let pIdx = 0; pIdx < partials.length; pIdx++) {
+            if (!partialEndsMap.has(pIdx))
+                continue;
+            const sideUsage = usedSides.get(pIdx);
+            // Check if side 0 and side 1 are used.
+            const side0Used = (sideUsage?.get(0) ?? 0) > 1e-9;
+            const side1Used = (sideUsage?.get(1) ?? 0) > 1e-9;
+            if (side0Used !== side1Used) {
+                result.push(pIdx);
+            }
+        }
+        return result;
+    }
+    helix_1.partialsWithOneFreeSide = partialsWithOneFreeSide;
+    // Computes the helical axis for each partial with one free side, and points the axis towards the free side
+    function partialAxesTowardFreeSide(partials, partialEndsMap, usedSides) {
+        const result = new Map();
+        const oneFreeSide = partialsWithOneFreeSide(partials, partialEndsMap, usedSides);
+        for (const pIdx of oneFreeSide) {
+            const ends = partialEndsMap.get(pIdx);
+            if (!ends)
+                continue;
+            const sideUsage = usedSides.get(pIdx);
+            const side0Free = (sideUsage?.get(0) ?? 0) < 1e-9;
+            const { planeVector } = getPartialAxis(ends);
+            if (side0Free)
+                planeVector.negate();
+            result.set(pIdx, { vector: planeVector });
+        }
+        return result;
+    }
+    helix_1.partialAxesTowardFreeSide = partialAxesTowardFreeSide;
     // Fits a plane through the given points and returns the plane normal
-    // (the eigenvector of the covariance-like matrix with the smallest eigenvalue).
     function fitPlane(points) {
         // centroid
         const rc = new THREE.Vector3(0, 0, 0);
@@ -1832,8 +1523,6 @@ var helix;
     }
     helix_1.fitPlane = fitPlane;
     // Returns the axis of an DNA duplex given the four end nucleotides of the two strands.
-    // - start1/end1 are the 5'/3' ends of strand A
-    // - start2/end2 are the 5'/3' ends of strand B (start1 pairs with end2, end1 pairs with start2)
     function getPartialAxis(d) {
         const backboneSite = (nt) => nt.getInstanceParameter3('bbOffsets');
         // initial guess vector from the midpoint of the start1-end2 pair to end1-start2 pair
@@ -1919,7 +1608,7 @@ var helix;
         return { planeVector, finalHelPos };
     }
     helix_1.getPartialAxis = getPartialAxis;
-    // Draws the duplex axis vector in the scene, anchored at the start1 nucleotide.
+    // Just for a visualization and good only for debugging...
     function addPartialAxisToScene(d) {
         const { planeVector } = getPartialAxis(d);
         const origin = d.start1.getInstanceParameter3('bbOffsets')

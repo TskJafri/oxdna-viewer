@@ -7,7 +7,7 @@
 findBasepairs3(); // use 3 because there are 2 versions of findBasepairs, and 3 is the fastest. Dont ask why i named it that.
 let {partials, unpaired} = airport.findHelixPartials(elements, 2);
 
-let {ssdna, stubs, longssScaffold} = airport.ssdnaPartials(unpaired);
+let {ssdna, stubs, longssScaffold} = airport.sortUnpaired(unpaired);
 let ssScaffold = airport.longssScaffoldfunc(longssScaffold, stubs);
 let {helices, lastScraps, binders, binder2, disconnected, unhandled} = airport.generateHelix(partials, ssdna, ssScaffold, stubs);
 // and helices are what you want!
