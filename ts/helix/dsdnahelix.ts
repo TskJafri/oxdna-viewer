@@ -206,30 +206,6 @@ namespace helix {
 		return { ssdna, stubs, longssScaffold };
 	}
 
-	// helper function for adding the average a3 vector in canvas. Really should not be here.
-	export function averageA3a(list: Nucleotide[]) {
-		if (!list.length) return new THREE.Vector3(0, 0, 0);
-
-		// Align all A3 vectors so they point in a consistent direction before averaging.
-		const ref = list[0].getA3().clone().normalize();
-		const acc = ref.clone();
-		for (let i = 1; i < list.length; i++) {
-			const v = list[i].getA3().clone().normalize();
-			acc.add(v.dot(ref) < 0 ? v.multiplyScalar(-1) : v);
-		}
-		acc.divideScalar(list.length);
-		const avg = acc.normalize();
-
-		// Visualize the averaged orientation from the first nucleotide origin when possible.
-		const origin = list[0]?.getPos();
-		if (origin && typeof THREE !== 'undefined' && typeof scene !== 'undefined' && (scene as any)?.add) {
-			const helper = new THREE.ArrowHelper(avg.clone(), origin, 5);
-			(scene as any).add(helper);
-		}
-
-		return avg;
-	};
-
 	// Enforce equal halves on each scaffold run (already grouped topologically by sortUnpaired).
 	export function longssScaffoldfunc(longssScaffold: Nucleotide[][], stubs: Nucleotide[] = []) {
 		const ssScaffold: Nucleotide[][] = [];
@@ -1725,22 +1701,5 @@ namespace helix {
 		if (helPos.length) finalHelPos.divideScalar(helPos.length);
 
 		return { planeVector, finalHelPos };
-	}
-
-	// Just for a visualization and good only for debugging...
-	export function addPartialAxisToScene(d: {
-		start1: Nucleotide;
-		end1: Nucleotide;
-		start2: Nucleotide;
-		end2: Nucleotide;
-	}) {
-		const { planeVector } = getPartialAxis(d);
-		const origin = d.start1.getInstanceParameter3('bbOffsets')
-			.add(d.end2.getInstanceParameter3('bbOffsets'))
-			.multiplyScalar(0.5);
-		if (typeof THREE !== 'undefined' && typeof scene !== 'undefined' && (scene as any)?.add) {
-			const arrow = new THREE.ArrowHelper(planeVector.clone().normalize(), origin, 10);
-			(scene as any).add(arrow);
-		}
 	}
 }

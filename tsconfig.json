@@ -40,6 +40,7 @@
     "./ts/file_handling/xyz_reader.ts",
     "./ts/file_handling/scadnano_export.ts",
     "./ts/helix/dsdnahelix.ts",
+    "./ts/helix/helper.ts",
     "./ts/helix/scadnano_gridview.ts",
     "./ts/helix/ssrna.ts",
     "ts/helix/conversion.ts",

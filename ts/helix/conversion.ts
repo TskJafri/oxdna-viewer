@@ -3,7 +3,8 @@
 /// <reference path="../main.ts" />
 
 /*
-Entry-point helpers for the scadnano conversion pipeline.
+Very important to know the following before you read the code further:
+- scadnano files use strands, not individual nucleotides, and each strand requires a direction. Thus, we use "fwd" and "bwd" for directions.
 
 The full canonical pipeline lives in ScadnanoExportManager.prepareScadnanoLayout
 (ts/file_handling/scadnano_export.ts). If you need to drive the stages by hand
@@ -19,9 +20,8 @@ from the console, the shape is roughly:
 */
 
 namespace toscad {
+    // Find the two most distant endpoints in the helix using BFS.
     export function helixEndpoints(helix: Nucleotide[]) {
-        // Find the two most distant endpoints in the helix using BFS.
-
         // first we remove duplicates
         // best hope is that there never should be. All of the duplicates must necessarily be removed by findhelix2.ts.
         const nodes: Nucleotide[] = Array.from(new Map<number, Nucleotide>(helix.map((n: Nucleotide) => [n.id, n])).values());
@@ -70,6 +70,7 @@ namespace toscad {
         const visited = new Set<number>();
         let best = { end1: nodes[0], end2: nodes[0], diameter: 0 };
 
+        // Actual iteration
         for (const n of nodes) {
             if (visited.has(n.id)) continue;
             const first = bfs(n);
@@ -92,115 +93,9 @@ namespace toscad {
         return best;
     };
 
-    export function showHelixEndpoints(helices: Nucleotide[][]) {
-        // const helices = await helix.findHelices(elements, 2);
-        const endpoints = helices.map((helix, i) => {
-            const res = helixEndpoints(helix);
-            return {
-                helixIndex: i,
-                endpointA: res?.end1?.id,
-                endpointB: res?.end2?.id,
-                diameter: res?.diameter
-            };
-        })
-        console.log(endpoints);
-        return endpoints;
-    };
-
     export type GridMark = { helixId: number; offset: number; direction: 'forward' | 'backward' };
     export type GridMap = Map<number, GridMark>;
     export type Direction = 'n3' | 'n5';
-
-    export function crossoverEndpointsHelix(
-        grid: GridMap,
-        helix: Nucleotide[],
-        helixId: number
-    ) {
-        const nodes: Nucleotide[] = Array.from(
-            new Map<number, Nucleotide>(helix.map((nt: Nucleotide) => [nt.id, nt])).values()
-        );
-        if (!nodes.length) return null;
-
-        const nodeById = new Map<number, Nucleotide>(nodes.map((nt: Nucleotide) => [nt.id, nt]));
-        const neighbors = (nt: Nucleotide): Nucleotide[] => {
-            const list: Nucleotide[] = [];
-            const n5 = nt.n5; if (n5 instanceof Nucleotide && nodeById.has(n5.id)) list.push(n5);
-            const n3 = nt.n3; if (n3 instanceof Nucleotide && nodeById.has(n3.id)) list.push(n3);
-            const pair = nt.pair; if (pair instanceof Nucleotide && nodeById.has(pair.id)) list.push(pair);
-            return list;
-        };
-
-        const bfsDistances = (start: Nucleotide) => {
-            const q: Nucleotide[] = [start];
-            const dist = new Map<number, number>();
-            dist.set(start.id, 0);
-
-            for (let i = 0; i < q.length; i++) {
-                const cur = q[i];
-                const d = dist.get(cur.id);
-                if (d === undefined) continue;
-
-                for (const nb of neighbors(cur)) {
-                    if (!dist.has(nb.id)) {
-                        dist.set(nb.id, d + 1);
-                        q.push(nb);
-                    }
-                }
-            }
-
-            return dist;
-        };
-
-        const crossoverNtIdsByHelix = new Map<number, Set<number>>();
-        const ensureSet = (hId: number) => {
-            if (!crossoverNtIdsByHelix.has(hId)) crossoverNtIdsByHelix.set(hId, new Set<number>());
-            return crossoverNtIdsByHelix.get(hId)!;
-        };
-
-        for (const crossover of crossoverNts(grid)) {
-            ensureSet(crossover.fromHelix).add(crossover.fromNt.id);
-            ensureSet(crossover.toHelix).add(crossover.toNt.id);
-        }
-
-        const crossoverIds = crossoverNtIdsByHelix.get(helixId);
-        if (!crossoverIds || crossoverIds.size === 0) return null;
-
-        const helixEnds = helixEndpoints(nodes);
-        if (!helixEnds) return null;
-
-        const closestCrossoverFrom = (start: Nucleotide): Nucleotide | null => {
-            const dist = bfsDistances(start);
-            let bestNt: Nucleotide | null = null;
-            let bestDist = Infinity;
-
-            for (const ntId of crossoverIds) {
-                const d = dist.get(ntId);
-                if (d === undefined) continue;
-                if (d < bestDist) {
-                    const nt = nodeById.get(ntId);
-                    if (!nt) continue;
-                    bestDist = d;
-                    bestNt = nt;
-                }
-            }
-
-            return bestNt;
-        };
-
-        const end1 = closestCrossoverFrom(helixEnds.end1);
-        const end2 = closestCrossoverFrom(helixEnds.end2);
-        if (!end1 || !end2) return null;
-
-        const diameter = bfsDistances(end1).get(end2.id) ?? 0;
-        return { end1, end2, diameter };
-    }
-
-
-    // Helper interface to keep track of where we are on both strands
-    interface DualCursor {
-        fwd: Nucleotide | null;
-        bwd: Nucleotide | null;
-    }
 
     export function setGrid(
         helices: Nucleotide[][],
@@ -208,26 +103,12 @@ namespace toscad {
         preservedNtIds?: Set<number>,
         mergedGroups?: Map<number, number[][]>
     ): { grid: GridMap; binderHelices: number[] } {
-        // mergedGroups: merge provenance from the previous pipeline pass.
-        // Key = current helix slot; value = one nt-id array per pre-merge
-        // helix (an "origin-group"). Helices listed here are NOT re-walked —
-        // the backbone walk can't handle a helix made of disconnected
-        // components. Instead each origin-group keeps its internal grid marks
-        // from preserveGrid, and after the main loop the groups are re-aligned
-        // relative to each other (and the whole lattice) via alignGridPrim.
+        // Initialize the map
         const grid: GridMap = new Map();
 
-        // If a previous grid is provided for preservation, copy its marks into
-        // the new grid — but ONLY for nucleotides in preservedNtIds (if given).
-        // This lets helices that haven't been merged keep their grid positions,
-        // while nucleotides in merged/altered helices get fresh assignments.
-        // 
-        // IMPORTANT: remap the helixId of each preserved mark to match the
-        // current helices array slot. The preserved mark's helixId is from the
-        // previous iteration's slot ordering, which may differ from the current
-        // ordering after renumbering.
+        // Check if we want to "preserve" any helices.
         if (preserveGrid && preserveGrid.size > 0) {
-            // Build a lookup: ntId → current helixId (slot index)
+            // Map each nt ID to it's current helix.
             const ntToCurrentHelixId = new Map<number, number>();
             for (let slotIdx = 0; slotIdx < helices.length; slotIdx++) {
                 const slot = helices[slotIdx];
@@ -306,7 +187,11 @@ namespace toscad {
             return path.reverse();
         };
 
-        const findNextPaired = (start: DualCursor, dirs: { fwd: Direction, bwd: Direction }, set: Set<number>): { anchor: Nucleotide, steps: number, source: string } | null => {
+        const findNextPaired = (
+            start: { fwd: Nucleotide | null; bwd: Nucleotide | null }, // fwd: forward, bwd: backward
+            dirs: { fwd: Direction, bwd: Direction }, // n3/n5
+            set: Set<number>
+        ): { anchor: Nucleotide, steps: number, source: string } | null => {
             let fwdCurr = start.fwd;
             let bwdCurr = start.bwd;
             let steps = 0;
