@@ -5,6 +5,8 @@
 /*
 Very important to know the following before you read the code further:
 - scadnano files use strands, not individual nucleotides, and each strand requires a direction. Thus, we use "fwd" and "bwd" for directions.
+- 'forward'-labeled nt has offsets that increase along its own 5'->3'.
+- buildScadnano3 builds strands from 5'->3', and is fully and only influenced by topology and setGrid.
 
 The full canonical pipeline lives in ScadnanoExportManager.prepareScadnanoLayout
 (ts/file_handling/scadnano_export.ts). If you need to drive the stages by hand
@@ -108,7 +110,7 @@ namespace toscad {
 
         // Check if we want to "preserve" any helices.
         if (preserveGrid && preserveGrid.size > 0) {
-            // Map each nt ID to it's current helix.
+            // Map each ntId to a helix in helices[][]
             const ntToCurrentHelixId = new Map<number, number>();
             for (let slotIdx = 0; slotIdx < helices.length; slotIdx++) {
                 const slot = helices[slotIdx];
@@ -118,6 +120,7 @@ namespace toscad {
                 }
             }
 
+            // For the existing preservedNtIds, remap them to the current helixId and copy them into the new grid.
             for (const [ntId, markData] of preserveGrid.entries()) {
                 if (preservedNtIds && !preservedNtIds.has(ntId)) continue;
                 const currentHelixId = ntToCurrentHelixId.get(ntId);
@@ -126,15 +129,17 @@ namespace toscad {
             }
         }
 
-        // --- Helpers ---
+        // Helper to mark the grid.
         const mark = (nt: Nucleotide, helixId: number, offset: number, dir: 'forward' | 'backward') => {
             if (!grid.has(nt.id)) {
                 grid.set(nt.id, { helixId, offset, direction: dir });
             }
         };
 
+        // Is the nucleotide inside the helix we ask for?
         const isInHelix = (set: Set<number>, nt: Nucleotide | null): nt is Nucleotide => !!nt && set.has(nt.id);
 
+        // get the pair WITHIN the set.
         const getPair = (set: Set<number>, nt: Nucleotide | null): Nucleotide | null =>
             (nt && nt.pair && set.has(nt.pair.id)) ? (nt.pair as Nucleotide) : null;
 
@@ -156,6 +161,7 @@ namespace toscad {
         };
 
         // note: this one DOES include the stopAt nucleotide...
+        // Few other subtle differences.
         const tracePathWithStop = (start: Nucleotide, dir: Direction, set: Set<number>, stopAt: Nucleotide): { path: Nucleotide[]; reachedStop: boolean } => {
             const path: Nucleotide[] = [];
             const visited = new Set<number>();
@@ -188,36 +194,52 @@ namespace toscad {
         };
 
         const findNextPaired = (
-            start: { fwd: Nucleotide | null; bwd: Nucleotide | null }, // fwd: forward, bwd: backward
-            dirs: { fwd: Direction, bwd: Direction }, // n3/n5
+            start: { fwd: Nucleotide | null; bwd: Nucleotide | null },
+            dirs: { fwd: Direction; bwd: Direction },
             set: Set<number>
-        ): { anchor: Nucleotide, steps: number, source: string } | null => {
-            let fwdCurr = start.fwd;
-            let bwdCurr = start.bwd;
-            let steps = 0;
-            const visitedFwd = new Set<number>();
-            const visitedBwd = new Set<number>();
-            if (fwdCurr) visitedFwd.add(fwdCurr.id);
-            if (bwdCurr) visitedBwd.add(bwdCurr.id);
+        ): { anchor: Nucleotide; steps: number; source: string } | null => {
+            type Side = {
+                label: 'fwd' | 'bwd';
+                curr: Nucleotide | null;
+                dir: Direction;
+                visited: Set<number>;
+                otherStartId: number | null;  // partner nt id to exclude from the "found pair" check
+            };
 
-            while (steps < 200) {
-                const nextFwd = fwdCurr ? (fwdCurr[dirs.fwd] as Nucleotide | null) : null;
-                const nextBwd = bwdCurr ? (bwdCurr[dirs.bwd] as Nucleotide | null) : null;
-                const validFwd = isInHelix(set, nextFwd) && nextFwd && !visitedFwd.has(nextFwd.id);
-                const validBwd = isInHelix(set, nextBwd) && nextBwd && !visitedBwd.has(nextBwd.id);
+            const sides: Side[] = [
+                { label: 'fwd', curr: start.fwd, dir: dirs.fwd, visited: new Set<number>(), otherStartId: start.bwd?.id ?? null },
+                { label: 'bwd', curr: start.bwd, dir: dirs.bwd, visited: new Set<number>(), otherStartId: start.fwd?.id ?? null },
+            ];
+            for (const s of sides) if (s.curr) s.visited.add(s.curr.id);
 
-                if (!validFwd && !validBwd) return null;
-                steps++;
-                if (validFwd && nextFwd) { fwdCurr = nextFwd; visitedFwd.add(fwdCurr.id); } else { fwdCurr = null; }
-                if (validBwd && nextBwd) { bwdCurr = nextBwd; visitedBwd.add(bwdCurr.id); } else { bwdCurr = null; }
-
-                if (fwdCurr) {
-                    const p = getPair(set, fwdCurr);
-                    if (p && !(start.bwd && p.id === start.bwd.id)) return { anchor: fwdCurr, steps, source: 'fwd' };
+            // Main loop
+            for (let steps = 0; steps < 200; steps++) {
+                // Advance both sides
+                let anyAdvanced = false;
+                for (const s of sides) {
+                    if (!s.curr) continue;
+                    const next = s.curr[s.dir] as Nucleotide | null;
+                    if (!isInHelix(set, next) || s.visited.has(next.id)) {
+                        s.curr = null;
+                        continue;
+                    }
+                    s.curr = next;
+                    s.visited.add(s.curr.id);
+                    anyAdvanced = true;
                 }
-                if (bwdCurr) {
-                    const p = getPair(set, bwdCurr);
-                    if (p && !(start.fwd && p.id === start.fwd.id)) return { anchor: p, steps, source: 'bwd_pair' };
+                if (!anyAdvanced) return null;
+
+                // Check the added sides for a pair within the set.
+                for (const s of sides) {
+                    if (!s.curr) continue;
+                    const p = getPair(set, s.curr);
+                    if (!p) continue;
+                    if (s.otherStartId !== null && p.id === s.otherStartId) continue;
+                    return {
+                        anchor: s.label === 'fwd' ? s.curr : p,
+                        steps: steps + 1,
+                        source: s.label === 'fwd' ? 'fwd' : 'bwd_pair',
+                    };
                 }
             }
             return null;
@@ -226,13 +248,14 @@ namespace toscad {
         // Track which helices are binder-only (no internal base-pairing)
         const binderHelices: number[] = [];
 
-        // --- Main Loop ---
+        // Main loop for setting the grid.
         helices.forEach((helix, helixId) => {
             if (!helix.length) return;
-            const helixSet = new Set(helix.map(n => n.id));
+            // nucleotide -> helixId
+            const helixSet = new Set<number>(helix.map(n => n.id));
             const endpoints = helixEndpoints(helix);
 
-            // Detect binder helix: no nucleotide has a pair within the helix
+            // Detect binder helix: no nucleotide has a pair *within* the helix
             const hasPairInHelix = helix.some(n =>
                 n.pair && n.pair instanceof Nucleotide && helixSet.has(n.pair.id)
             );
@@ -240,14 +263,7 @@ namespace toscad {
                 binderHelices.push(helixId);
             }
 
-            // --- MERGED-HELIX FAST PATH ---
-            // This helix is the product of merges from the previous pipeline
-            // pass. Do NOT re-walk it — the walk can't handle disconnected
-            // components. Carry forward each origin-group's internal marks
-            // from preserveGrid (remapped to this slot). The groups are
-            // re-aligned relative to each other in the post-pass after this
-            // loop. Any nt missing from preserveGrid falls through to the
-            // binder sweeper below.
+            // If the helix is a merged helix, find which ones were the originals. Disconnected helices CANNOT be walked by this walker.
             const originGroups = preserveGrid ? mergedGroups?.get(helixId) : undefined;
             const isMergedHelix = !!(originGroups && originGroups.length > 0);
             if (isMergedHelix) {
@@ -262,7 +278,7 @@ namespace toscad {
 
             let offset = 0; // Local offset for the main backbone
 
-            // --- A-D. MAIN BACKBONE LOGIC ---
+            // main body of setting the grid. Only runs across non-merged helices.
             if (!isMergedHelix && endpoints) {
                 // start "forward" from any endpoint. They will be oriented later. Our main priority is to generate a grid without overlap and sufficient details.
                 const helixFwd = endpoints.end1;
@@ -271,20 +287,6 @@ namespace toscad {
                 const revFwdDir = helixFwdDir === 'n3' ? 'n5' : 'n3';
                 const revBwdDir = helixBwdDir === 'n3' ? 'n5' : 'n3';
 
-                // Convention: a 'forward'-labeled nt has offsets that increase
-                // along its own 5'→3'. This is what buildScadnano3 assumes
-                // (step = +1 for forward) and what directionAlign2's trend
-                // criterion needs in order to be equivalent to label
-                // alternation at crossovers.
-                //
-                // We stamp offsets in the helixFwdDir direction. When
-                // helixFwdDir === 'n3' that direction is the walked strand's
-                // own 5'→3', so the walked strand naturally has forward=inc
-                // and gets the 'forward' label. When helixFwdDir === 'n5'
-                // we're stamping along the walked strand's 3'→5', meaning
-                // its offsets decrease along its own 5'→3'; the *pair*
-                // strand is the one whose offsets increase along its 5'→3'.
-                // So we swap the labels in that case.
                 const walkLabel: 'forward' | 'backward' = helixFwdDir === 'n3' ? 'forward' : 'backward';
                 const pairLabel: 'forward' | 'backward' = helixFwdDir === 'n3' ? 'backward' : 'forward';
 
@@ -292,7 +294,7 @@ namespace toscad {
                 let firstAnchor: Nucleotide | null = null;
                 let firstAnchorPair: Nucleotide | null = null;
                 // if it has a pair, set it as a head otherwise find a new anchorpoint.
-                // findNextPaired finds an anchorpoint which does have a valid pair within the helix.
+                // findNextPaired finds an anchorpoint which does have a valid pair within the helix (to anchor the other direction at some offset)
                 if (getPair(helixSet, helixFwd)) {
                     firstAnchor = helixFwd;
                 } else {
@@ -340,10 +342,8 @@ namespace toscad {
                     // probably doesn't need this check but can happen due to cross/double pairing?
                     if (nextAnchor.id === currFwd.id) break;
                     // Circular helix guard: stop if we've already processed this anchor.
-                    // Only mark circular when the source is 'fwd' — that means the forward
-                    // strand's n3 chain physically looped back. A 'bwd_pair' revisit just
-                    // means the bwd cursor walked past the fwd strand's end, which is normal.
                     if (visitedAnchors.has(nextAnchor.id)) {
+                        console.log("CIRCULAR STRAND DETECTED")
                         break;
                     }
                     visitedAnchors.add(nextAnchor.id);
@@ -359,8 +359,7 @@ namespace toscad {
                         if (potentialHead.length > fwdTail.length) { fwdHead = potentialHead; fwdTail = []; }
                     }
 
-                    // this backward trace is actually very significant. 
-                    // without it, cross-pairing becomes a real issue.
+                    // this backward trace is actually very significant. Without it, cross-pairing becomes a real issue.
                     let bwdTail: Nucleotide[] = [];
                     let bwdHead: Nucleotide[] = [];
                     if (currBwd && nextPair) {
@@ -401,20 +400,28 @@ namespace toscad {
                 }
             }
 
-            // --- E. THE BINDER SWEEPER (Cleanest Version) ---
-            // 1. Identify what is missing from the Grid
-            const unvisited = helix.filter(n => !grid.has(n.id));
+            // set containing unvisited nucleotides.
+            const unvisitedSet = new Set<number>();
+            for (const n of helix) {
+                if (!grid.has(n.id)) unvisitedSet.add(n.id);
+            }
+            /* The main walker will miss:
+                - pure binder helices (binders always forced to face the forward direction)
+                - disconnected helices
+                - disconnected nucleotides
+            Thus, the following part aims to mark those remaining nucleotides into the grid. It iterates over all the helices.
+            */
+            if (unvisitedSet.size > 0) {
+                console.log(`[setGrid] For binders, processing ${unvisitedSet.size} disconnected items on Helix ${helixId}`);
 
-            if (unvisited.length > 0) {
-                console.log(`[setGrid] For binders, processing ${unvisited.length} disconnected items on Helix ${helixId}`);
-
-                // 2. Determine "True" Start Offset from Grid State
+                // Determine "True" Start Offset from Grid State
                 let currentBinderOffset = 0;
                 let maxFoundOffset = -1;
 
-                for (const val of grid.values()) {
-                    if (val.helixId === helixId) {
-                        if (val.offset > maxFoundOffset) maxFoundOffset = val.offset;
+                for (const n of helix) {
+                    const m = grid.get(n.id);
+                    if (m && m.helixId === helixId && m.offset > maxFoundOffset) {
+                        maxFoundOffset = m.offset;
                     }
                 }
 
@@ -423,11 +430,11 @@ namespace toscad {
                     currentBinderOffset = maxFoundOffset + 4; // Add visual buffer
                 }
 
-                // 3. Group and Grid
-                const unvisitedSet = new Set(unvisited.map(n => n.id));
+                // track the nucleotides that have been dealt with
                 const processedExtras = new Set<number>();
 
-                for (const node of unvisited) {
+                for (const node of helix) {
+                    if (!unvisitedSet.has(node.id)) continue;
                     if (processedExtras.has(node.id)) continue;
 
                     // Trace Back to find segment start
@@ -457,231 +464,45 @@ namespace toscad {
             }
         });
 
-        // --- MERGED-HELIX GROUP ALIGNMENT POST-PASS ---
-        // Each merged helix's origin-groups were preserved with their
-        // pre-merge (separate-helix) offsets. Temporarily split every merged
-        // helix into pseudo-helices — one per origin-group — and run
-        // alignGridPrim over the whole grid, so each group is anchored by its
-        // own crossovers to the full (already-placed) lattice. The groups were
-        // mutually disjoint on the offset axis at merge time (disjointness is
-        // a merge precondition), so once aligned they can be folded back under
-        // the real helixId without overlap. Afterwards, crossovers into the
-        // merged helix observe ~0 shift, so the pipeline's own alignGridPrim
-        // pass leaves the merged helix in place instead of shifting it as a
-        // unit and misaligning one of the groups.
-        if (preserveGrid && mergedGroups && mergedGroups.size > 0) {
-            let maxHelixId = -1;
-            for (const [, m] of grid) {
-                if (m.helixId > maxHelixId) maxHelixId = m.helixId;
-            }
-
-            // pseudo helixId -> real (merged) helixId
-            const pseudoToReal = new Map<number, number>();
-            let nextPseudo = maxHelixId + 1;
-            mergedGroups.forEach((groups, helixId) => {
-                if (groups.length < 2) return;
-                // Group 0 keeps the real helixId; the rest become pseudo-helices.
-                for (let gi = 1; gi < groups.length; gi++) {
-                    const pseudo = nextPseudo++;
-                    pseudoToReal.set(pseudo, helixId);
-                    for (const ntId of groups[gi]) {
-                        const m = grid.get(ntId);
-                        if (m) m.helixId = pseudo;
-                    }
-                }
-            });
-
-            if (pseudoToReal.size > 0) {
-                alignGridPrim(grid, binderHelices);
-                for (const [, m] of grid) {
-                    const real = pseudoToReal.get(m.helixId);
-                    if (real !== undefined) m.helixId = real;
-                }
-
-                // Inter-group conflict resolution: NEVER distort a helix.
-                // An origin-group is moved ONLY as a whole unit, and ONLY
-                // its offsets change — direction/orientation is never
-                // touched. For every group that overlaps others on the
-                // same helix, compute the minimum-|delta| shift (searching
-                // BOTH +/- directions) that leaves it disjoint from every
-                // other group on that helix, then apply it in a single
-                // step. Searching both directions matters: alignGridPrim
-                // can shift a group either way relative to its siblings,
-                // and the "correct" resolution is whichever direction has
-                // the group already close to disjoint. A pure +delta nudge
-                // can either explode (walking a small group through a
-                // large one) or leave the crash-later state where the
-                // required delta exceeds the sweep budget.
-
-                // Shift every mark of one origin-group by delta (offset only).
-                const shiftGroup = (helixId: number, gi: number, delta: number) => {
-                    if (delta === 0) return;
-                    const group = mergedGroups.get(helixId)?.[gi];
-                    if (!group) return;
-                    for (const ntId of group) {
-                        const m = grid.get(ntId);
-                        if (m && m.helixId === helixId) m.offset += delta;
-                    }
-                };
-
-                // For (helixId, gi), find the min-|delta| shift such that
-                // no mark of gi collides (same direction + same offset)
-                // with any mark of ANY OTHER group on the same helix.
-                // Returns 0 if already disjoint, or null if no delta
-                // within the search bound resolves the conflict.
-                const findCleanShift = (helixId: number, gi: number): number | null => {
-                    const groups = mergedGroups.get(helixId);
-                    if (!groups) return 0;
-                    const myGroup = groups[gi];
-                    if (!myGroup || myGroup.length === 0) return 0;
-                    const mySet = new Set<number>(myGroup);
-
-                    // My occupied cells, indexed by direction.
-                    const myCells = new Map<string, Set<number>>();
-                    let myMin = Infinity, myMax = -Infinity;
-                    for (const ntId of myGroup) {
-                        const m = grid.get(ntId);
-                        if (!m || m.helixId !== helixId) continue;
-                        let s = myCells.get(m.direction);
-                        if (!s) { s = new Set(); myCells.set(m.direction, s); }
-                        s.add(m.offset);
-                        if (m.offset < myMin) myMin = m.offset;
-                        if (m.offset > myMax) myMax = m.offset;
-                    }
-                    if (myCells.size === 0) return 0;
-
-                    // Cells occupied by OTHER groups on the same helix.
-                    const otherCells = new Map<string, Set<number>>();
-                    let otherMin = Infinity, otherMax = -Infinity;
-                    for (const [ntId, m] of grid) {
-                        if (m.helixId !== helixId) continue;
-                        if (mySet.has(ntId)) continue;
-                        let s = otherCells.get(m.direction);
-                        if (!s) { s = new Set(); otherCells.set(m.direction, s); }
-                        s.add(m.offset);
-                        if (m.offset < otherMin) otherMin = m.offset;
-                        if (m.offset > otherMax) otherMax = m.offset;
-                    }
-                    if (otherCells.size === 0) return 0;
-
-                    const conflictsAt = (delta: number): boolean => {
-                        for (const [dir, myOffs] of myCells) {
-                            const others = otherCells.get(dir);
-                            if (!others) continue;
-                            for (const off of myOffs) {
-                                if (others.has(off + delta)) return true;
-                            }
-                        }
-                        return false;
-                    };
-
-                    if (!conflictsAt(0)) return 0;
-
-                    // Bound: any collision requires (my_off + delta) to
-                    // land on an other-off, so |delta| ≤ (other-span +
-                    // my-span). Add a small pad so we can step JUST past
-                    // the far edge in either direction.
-                    const mySpan = (myMax - myMin) || 0;
-                    const otherSpan = (otherMax - otherMin) || 0;
-                    const maxSearch = Math.max(mySpan + otherSpan + 8, 32);
-
-                    for (let mag = 1; mag <= maxSearch; mag++) {
-                        if (!conflictsAt(mag)) return mag;
-                        if (!conflictsAt(-mag)) return -mag;
-                    }
-                    return null;
-                };
-
-                // Iterate: resolve one group at a time, using the current
-                // grid state (so gi=2 sees where gi=1 landed). Each
-                // successful shift makes that group globally disjoint on
-                // its helix, so the outer loop terminates when a full
-                // pass moves nothing. Guard cap protects against
-                // pathological chains between helices.
-                let movedAny = false;
-                let unresolvable = 0;
-                let sweepGuard = 0;
-                while (sweepGuard++ < 200) {
-                    let didMove = false;
-                    mergedGroups.forEach((groups, helixId) => {
-                        for (let gi = 1; gi < groups.length; gi++) {
-                            const delta = findCleanShift(helixId, gi);
-                            if (delta === null) { unresolvable++; continue; }
-                            if (delta === 0) continue;
-                            shiftGroup(helixId, gi, delta);
-                            didMove = true;
-                            movedAny = true;
-                        }
-                    });
-                    if (!didMove) break;
-                }
-
-                if (movedAny) {
-                    console.warn(
-                        `[setGrid] Merged-helix inter-group overlap resolved by min-|delta| shifts` +
-                        ` (sweeps=${sweepGuard - 1}${unresolvable > 0 ? `, unresolved=${unresolvable}` : ''}).`
-                    );
-                }
-                if (unresolvable > 0) {
-                    console.error(
-                        `[setGrid] ${unresolvable} merged-helix group(s) had no collision-free placement` +
-                        ` within the search bound. Grid will fail validation downstream.`
-                    );
-                }
-            }
-        }
-
+        // Note: The alignment of the merged helices is left upto alignMergedGroups()
         return { grid, binderHelices };
     };
 
     // grid flipper. Great helper function for the final output.
     export function gridFlip(grid: GridMap, helixId: number) {
-        const ranges = new Map<number, { min: number; max: number }>();
+        // Collect the offset range of the helix
+        let min = Infinity;
+        let max = -Infinity;
 
         for (const [, mark] of grid.entries()) {
             if (mark.helixId !== helixId) continue;
-            const range = ranges.get(mark.helixId);
-            if (!range) {
-                ranges.set(mark.helixId, { min: mark.offset, max: mark.offset });
-                continue;
-            }
-            if (mark.offset < range.min) range.min = mark.offset;
-            if (mark.offset > range.max) range.max = mark.offset;
+            if (mark.offset < min) min = mark.offset;
+            if (mark.offset > max) max = mark.offset;
         }
 
+        // Helix has no marks in the grid — nothing to flip.
+        if (min === Infinity) return;
+
         for (const [, mark] of grid.entries()) {
             if (mark.helixId !== helixId) continue;
-            const range = ranges.get(mark.helixId);
-            if (!range) continue;
-            mark.offset = range.max + range.min - mark.offset;
+            mark.offset = max + min - mark.offset;
             mark.direction = mark.direction === 'forward' ? 'backward' : 'forward';
         }
     }
 
-    function getScaffoldStrand() {
-        let maxLen = 0;
-        let scaffold: Strand | null = null;
-        systems.forEach(s => {
-            s.strands.forEach(strand => {
-                if (strand.getLength() > maxLen) {
-                    maxLen = strand.getLength();
-                    scaffold = strand;
-                }
-            });
-        });
-        return scaffold;
-    }
-
-
+    // Collect crossovers between different helices.
+    // returns aggregate crossover info, as opposed to crossoverNts(), which returns detailed info per crossover.
+    // TODO: Allow this to find direction trends between merged helices to flip one helix-part of the merged helix to align with the other merged helix.
     export function collectCrossovers(grid: GridMap) {
+        // collect all nucleotides tht have a grid mark. By design, no nucleotide should be skipped from this, so it should be safe to use all nucleotides as a set instead of doing this...
         const allNtIds = new Set<number>();
         for (const [ntId] of grid.entries()) allNtIds.add(ntId);
 
         const visited = new Set<number>();
 
         // crossovers[fromHelix][toHelix] = { sameWalk: n, diffWalk: n }
-        //   sameWalk  = both runs have same offset trend → need flip
-        //   diffWalk  = runs have opposite offset trend → already correct
+        //   sameWalk  = both runs have same offset trend -> need flip
+        //   diffWalk  = runs have opposite offset trend -> already correct
         const crossovers = new Map<number, Map<number, { sameWalk: number; diffWalk: number }>>();
         const helixIds = new Set<number>();
 
@@ -711,7 +532,7 @@ namespace toscad {
                 fivePrime = prev;
             }
 
-            // Walk 5'→3' and split into runs by helixId
+            // Walk 5' -> 3' and split into runs by helixId
             type Run = { helixId: number; offsets: number[] };
             const runs: Run[] = [];
             let currentRun: Run | null = null;
@@ -743,14 +564,13 @@ namespace toscad {
             }
 
             // Now examine consecutive runs for crossovers
+            // This directly helps directionAlign2 flip the helices to align them properly.
             for (let i = 0; i < runs.length - 1; i++) {
                 const runA = runs[i];
                 const runB = runs[i + 1];
                 if (runA.helixId === runB.helixId) continue;
 
-                // Determine offset trend for each run.
-                // For runs with ≥2 nts, compare first and last offset.
-                // For single-nt runs, skip (can't determine trend).
+                // Skip the ones with <2 nts.
                 if (runA.offsets.length < 2 && runB.offsets.length < 2) continue;
 
                 // Use the trend near the crossover point:
@@ -794,30 +614,18 @@ namespace toscad {
 
         return { crossovers, helixIds };
     };
-    /**
-     * directionAlign2 — propagating BFS helix orientation alignment.
-     *
-     * Uses actual offset trends (increasing vs decreasing along the 5'→3'
-     * walk) to determine strand direction on each helix — NOT grid.direction
-     * labels (which can be wrong).
-     *
-     * At each crossover between consecutive runs on different helices,
-     * checks whether the offset trend is the same or alternates:
-     *   same trend (both increasing or both decreasing) → need to flip one
-     *   opposite trend → already correct
-     *
-     * BFS from helix 0 (anchor). Flip immediately, re-scan, proceed.
-     */
 
+    // Uses collectCrossovers to determine which helices should be flipped to align the directions of all helices in the grid.
     export function directionAlign2(grid: GridMap) {
-
-        // ── Initial scan to discover all helices and crossover stats ────
+        // collect crossover and trend info
         const { crossovers, helixIds } = collectCrossovers(grid);
 
+        // track the "anchored" helices as they get aligned.
         const anchored = new Set<number>();
         const flippedHelices: number[] = [];
         let edgeCount = 0;
 
+        // see which trends don't match
         for (const [fromHelix, neighbors] of crossovers.entries()) {
             for (const [toHelix, stats] of neighbors.entries()) {
                 if (fromHelix >= toHelix) continue;
@@ -826,6 +634,7 @@ namespace toscad {
             }
         }
 
+        // helper to apply the flip to the crossover stats.
         const applyFlipToCrossoverStats = (helixId: number) => {
             const neighbors = crossovers.get(helixId);
             if (!neighbors) return;
@@ -871,8 +680,8 @@ namespace toscad {
                     totalDiffWalk += s.diffWalk;
                 }
 
-                // sameWalk = both sides increase (or both decrease) → flip
-                // diffWalk = they alternate → already correct
+                // sameWalk = both sides increase (or both decrease) -> flip
+                // diffWalk = they alternate -> already correct`
                 const shouldFlip = totalSameWalk > totalDiffWalk;
 
                 if (shouldFlip) {
@@ -886,7 +695,7 @@ namespace toscad {
             }
         }
 
-        // Handle disconnected helices
+        // Handle disconnected helices (by doing a separate BFS for each unanchored helix)
         for (const hId of helixIds) {
             if (anchored.has(hId)) continue;
 
@@ -934,122 +743,19 @@ namespace toscad {
         };
     }
 
-    // Helper function to collect all backbone crossovers with their helix and offset info.
-    // Slightly lengthy but quite useful.
-    export function crossoverNts(
-        grid: GridMap
-    ): Array<{
-        fromHelix: number;
-        toHelix: number;
-        fromOffset: number;
-        toOffset: number;
-        fromNt: Nucleotide;
-        toNt: Nucleotide;
-    }> {
-        const allNtIds = new Set<number>();
-        for (const [ntId] of grid.entries()) allNtIds.add(ntId);
-
-        const visited = new Set<number>();
-        const crossovers: Array<{
-            fromHelix: number;
-            toHelix: number;
-            fromOffset: number;
-            toOffset: number;
-            fromNt: Nucleotide;
-            toNt: Nucleotide;
-        }> = [];
-
-        for (const [ntId] of grid.entries()) {
-            if (visited.has(ntId)) continue;
-
-            const startNt = elements.get(ntId) as Nucleotide | undefined;
-            if (!startNt || !(startNt instanceof Nucleotide)) continue;
-
-            // Find 5' end
-            let fivePrime: Nucleotide = startNt;
-            const walkBack = new Set<number>();
-            walkBack.add(fivePrime.id);
-
-            while (true) {
-                const prev = fivePrime.n5;
-                if (!prev || !(prev instanceof Nucleotide)) break;
-                if (!allNtIds.has(prev.id)) break;
-                if (walkBack.has(prev.id)) break;
-                walkBack.add(prev.id);
-                fivePrime = prev;
-            }
-
-            // Walk 5' -> 3' and record backbone helix transitions
-            let curr: Nucleotide | null = fivePrime;
-            const walkForward = new Set<number>();
-            let prevNt: Nucleotide | null = null;
-            let prevMark: GridMark | null = null;
-
-            while (curr && curr instanceof Nucleotide && allNtIds.has(curr.id)) {
-                if (walkForward.has(curr.id)) break;
-                walkForward.add(curr.id);
-                visited.add(curr.id);
-
-                const mark = grid.get(curr.id);
-
-                if (mark) {
-                    if (prevNt && prevMark && prevMark.helixId !== mark.helixId) {
-                        crossovers.push({
-                            fromHelix: prevMark.helixId,
-                            toHelix: mark.helixId,
-                            fromOffset: prevMark.offset,
-                            toOffset: mark.offset,
-                            fromNt: prevNt,
-                            toNt: curr
-                        });
-                    }
-
-                    prevNt = curr;
-                    prevMark = mark;
-                } else {
-                    prevNt = null;
-                    prevMark = null;
-                }
-
-                const n3ref: any = curr.n3;
-                curr = (n3ref && n3ref instanceof Nucleotide) ? (n3ref as Nucleotide) : null;
-            }
-        }
-
-        return crossovers;
-    }
-    
-    /**
-     * The intent is for the export to track grid edits (combine, move,
-     * flip) faithfully — every coordinate read goes through grid.get(),
-     * so post-construction edits propagate to the export for free.
-     * Topology pointers (n3) are used only to decide "where does this
-     * strand go next"; everything emitted is read off the grid.
-     *
-     *  Domain split rules (close current domain, open a new one) on each
-     *  step from currNt to currNt.n3 = nextNt:
-     *    - nextNt has no grid mark             → close, skip until placed
-     *    - nextNt is on a different helixId    → close + open (crossover)
-     *    - nextNt has a different direction    → close + open (reversal)
-     *    - nextNt offset != prevOffset + step  → close + open (gap)
-     *  Otherwise the open domain extends by one slot.
-     *
-     *  Same gap example (offsets 1..5, _, _, 8..10 on one helix forward,
-     *  then crossover) emits three domains: [1,6), [8,11), and one on
-     *  the destination helix.
-     */
+    // Now that the grid is in place, we can convert to the scadnano format.
     export function buildScadnano3(
         grid: GridMap,
         helices: Nucleotide[][],
         gridType?: string,
         helixPositions?: Map<number, [number, number]>
     ) {
-        // ── Scaffold detection ──────────────────────────────────────────
-        const scaffoldStrand: Strand | null = getScaffoldStrand();
+        // scaffold stuff. Also need to assign colors, so scaffold is blue and the staples are red/green/black.
+        const scaffoldStrand: Strand | null = helix.getScaffoldStrand();
         const SCAFFOLD_COLOR = '#0066cc';
         const STAPLE_COLORS = ['#f74308', '#57bb00', '#000000'];
 
-        // ── Helix metadata ──────────────────────────────────────────────
+        // helix info.
         const helixCount = helices.length || Math.max(0, ...Array.from(grid.values()).map(m => m.helixId + 1));
         const helixMaxOffsets = new Map<number, number>();
         for (const [, mark] of grid.entries()) {
@@ -1061,8 +767,9 @@ namespace toscad {
             grid_position: helixPositions?.get(i) ?? [0, i]
         }));
 
-        // ── Strand iteration ────────────────────────────────────────────
+        // 1 full domain = 1 helix
         type Domain = { helix: number; forward: boolean; start: number; end: number };
+        // Every strand would have to satisfy the following type:
         type ScadStrand = {
             color: string;
             sequence: string;
@@ -1070,6 +777,7 @@ namespace toscad {
             is_scaffold?: boolean;
             circular?: boolean;
         };
+        // in-progress "counter", for use while generating a ScadStrand.
         type OpenDomain = {
             helixId: number;
             direction: 'forward' | 'backward';
@@ -1088,18 +796,21 @@ namespace toscad {
             for (const s of tmpSystems) if (s) allSystems.push(s);
         }
 
+        // walker to build the scadnano strands. This is a 5' -> 3' walker, so it starts at end5 and walks via n3.
         for (const sys of allSystems) {
             const sysStrands = (sys && Array.isArray((sys as any).strands)) ? (sys as any).strands as Strand[] : [];
 
             for (const strand of sysStrands) {
                 if (!strand) continue;
 
+                // Start at the 5' end of the strand
                 const start: any = (strand as any).end5;
                 if (!(start instanceof Nucleotide)) continue;
 
-                // ── Walk this strand 5' → 3' via n3 ─────────────────────
+                // Walk this strand 5' -> 3' via n3
                 let sequence = '';
                 const domains: Domain[] = [];
+                // in this case, isCircular is indicating circularity within strand, not the helix. 
                 let isCircular = false;
                 let openDomain: OpenDomain | null = null;
                 const visited = new Set<number>();
@@ -1130,9 +841,10 @@ namespace toscad {
 
                 let curr: Nucleotide | null = start;
 
+                // Walker loop.
                 while (curr instanceof Nucleotide) {
                     if (visited.has(curr.id)) {
-                        // Walked back to a node we already emitted — circular.
+                        // Walked back to a node we already emitted => circular.
                         isCircular = true;
                         break;
                     }
@@ -1141,8 +853,7 @@ namespace toscad {
                     const mark = grid.get(curr.id);
 
                     if (!mark) {
-                        // Unplaced nt — close any open domain, skip until we
-                        // land on a placed nt again.
+                        // Unplaced nt — close any open domain, skip until we land on a placed nt again.
                         closeDomain();
                     } else if (!openDomain) {
                         openAt(curr, mark);
@@ -1197,7 +908,7 @@ namespace toscad {
         };
     };
 
-    // Confirms whether every offset -> direction is unique. 
+    // Confirms whether every offset and its direction is unique. 
     export function validateGrid(grid: Map<number, GridMark>) {
         // Structure: Map<HelixID, { forward: Map<Offset, NtID>, backward: Map<Offset, NtID> }>
         const checkMap = new Map<number, {

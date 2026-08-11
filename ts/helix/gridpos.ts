@@ -207,6 +207,91 @@ namespace toscad {
         return result;
     }
 
+        // Helper function to collect all backbone crossovers with their helix and offset info.
+    export function crossoverNts(
+        grid: GridMap
+    ): Array<{
+        fromHelix: number;
+        toHelix: number;
+        fromOffset: number;
+        toOffset: number;
+        fromNt: Nucleotide;
+        toNt: Nucleotide;
+    }> {
+        const allNtIds = new Set<number>();
+        for (const [ntId] of grid.entries()) allNtIds.add(ntId);
+
+        const visited = new Set<number>();
+        const crossovers: Array<{
+            fromHelix: number;
+            toHelix: number;
+            fromOffset: number;
+            toOffset: number;
+            fromNt: Nucleotide;
+            toNt: Nucleotide;
+        }> = [];
+
+        for (const [ntId] of grid.entries()) {
+            if (visited.has(ntId)) continue;
+
+            const startNt = elements.get(ntId) as Nucleotide | undefined;
+            if (!startNt || !(startNt instanceof Nucleotide)) continue;
+
+            // Find 5' end
+            let fivePrime: Nucleotide = startNt;
+            const walkBack = new Set<number>();
+            walkBack.add(fivePrime.id);
+
+            while (true) {
+                const prev = fivePrime.n5;
+                if (!prev || !(prev instanceof Nucleotide)) break;
+                if (!allNtIds.has(prev.id)) break;
+                if (walkBack.has(prev.id)) break;
+                walkBack.add(prev.id);
+                fivePrime = prev;
+            }
+
+            // Walk 5' -> 3' and record backbone helix transitions
+            let curr: Nucleotide | null = fivePrime;
+            const walkForward = new Set<number>();
+            let prevNt: Nucleotide | null = null;
+            let prevMark: GridMark | null = null;
+
+            while (curr && curr instanceof Nucleotide && allNtIds.has(curr.id)) {
+                if (walkForward.has(curr.id)) break;
+                walkForward.add(curr.id);
+                visited.add(curr.id);
+
+                const mark = grid.get(curr.id);
+
+                if (mark) {
+                    if (prevNt && prevMark && prevMark.helixId !== mark.helixId) {
+                        crossovers.push({
+                            fromHelix: prevMark.helixId,
+                            toHelix: mark.helixId,
+                            fromOffset: prevMark.offset,
+                            toOffset: mark.offset,
+                            fromNt: prevNt,
+                            toNt: curr
+                        });
+                    }
+
+                    prevNt = curr;
+                    prevMark = mark;
+                } else {
+                    prevNt = null;
+                    prevMark = null;
+                }
+
+                const n3ref: any = curr.n3;
+                curr = (n3ref && n3ref instanceof Nucleotide) ? (n3ref as Nucleotide) : null;
+            }
+        }
+
+        return crossovers;
+    }
+    
+
     // Auto-detect whether a structure was built on a honeycomb or square lattice.
     //
     // Per-helix, sort crossover-endpoint nucleotides by offset, then for every
@@ -2582,6 +2667,202 @@ namespace toscad {
         }
 
         return { shifts: cumulativeShift };
+    }
+
+    /**
+     * alignMergedGroups — merged-helix group alignment pass.
+     *
+     * Companion to alignGridPrim, and the only place that knows about merge
+     * provenance. setGrid is responsible purely for *placement*: it copies
+     * each merged helix's origin-groups into the grid with their pre-merge
+     * (separate-helix) offsets, which is collision-free but unaligned. This
+     * function performs the alignment.
+     *
+     * Each merged helix is temporarily split into pseudo-helices — one per
+     * origin-group — and alignGridPrim is run over the whole grid, so each
+     * group is anchored by its own crossovers to the full (already-placed)
+     * lattice. The groups were mutually disjoint on the offset axis at merge
+     * time (disjointness is a merge precondition), so once aligned they can be
+     * folded back under the real helixId without overlap. Afterwards,
+     * crossovers into the merged helix observe ~0 shift, so the pipeline's own
+     * alignGridPrim pass leaves the merged helix in place instead of shifting
+     * it as a unit and misaligning one of the groups.
+     *
+     * Must be called immediately after setGrid and BEFORE directionAlign2:
+     * directionAlign2 flips helices and rewrites offsets, which changes what
+     * collectShiftObservations sees.
+     *
+     * No-op unless at least one merged helix has 2+ origin-groups, so it is
+     * safe to call unconditionally on every pipeline iteration.
+     */
+    export function alignMergedGroups(
+        grid: GridMap,
+        mergedGroups: Map<number, number[][]> | undefined,
+        binderHelices: number[]
+    ): void {
+        if (!mergedGroups || mergedGroups.size === 0) return;
+
+        let maxHelixId = -1;
+        for (const [, m] of grid) {
+            if (m.helixId > maxHelixId) maxHelixId = m.helixId;
+        }
+
+        // pseudo helixId -> real (merged) helixId
+        const pseudoToReal = new Map<number, number>();
+        let nextPseudo = maxHelixId + 1;
+        mergedGroups.forEach((groups, helixId) => {
+            if (groups.length < 2) return;
+            // Group 0 keeps the real helixId; the rest become pseudo-helices.
+            for (let gi = 1; gi < groups.length; gi++) {
+                const pseudo = nextPseudo++;
+                pseudoToReal.set(pseudo, helixId);
+                for (const ntId of groups[gi]) {
+                    const m = grid.get(ntId);
+                    if (m) m.helixId = pseudo;
+                }
+            }
+        });
+
+        // Every merged helix has a single origin-group: nothing to align, and
+        // no pseudo-helices were created, so leave the grid untouched.
+        if (pseudoToReal.size === 0) return;
+
+        alignGridPrim(grid, binderHelices);
+        for (const [, m] of grid) {
+            const real = pseudoToReal.get(m.helixId);
+            if (real !== undefined) m.helixId = real;
+        }
+
+        // Inter-group conflict resolution: NEVER distort a helix.
+        // An origin-group is moved ONLY as a whole unit, and ONLY
+        // its offsets change — direction/orientation is never
+        // touched. For every group that overlaps others on the
+        // same helix, compute the minimum-|delta| shift (searching
+        // BOTH +/- directions) that leaves it disjoint from every
+        // other group on that helix, then apply it in a single
+        // step. Searching both directions matters: alignGridPrim
+        // can shift a group either way relative to its siblings,
+        // and the "correct" resolution is whichever direction has
+        // the group already close to disjoint. A pure +delta nudge
+        // can either explode (walking a small group through a
+        // large one) or leave the crash-later state where the
+        // required delta exceeds the sweep budget.
+
+        // Shift every mark of one origin-group by delta (offset only).
+        const shiftGroup = (helixId: number, gi: number, delta: number) => {
+            if (delta === 0) return;
+            const group = mergedGroups.get(helixId)?.[gi];
+            if (!group) return;
+            for (const ntId of group) {
+                const m = grid.get(ntId);
+                if (m && m.helixId === helixId) m.offset += delta;
+            }
+        };
+
+        // For (helixId, gi), find the min-|delta| shift such that
+        // no mark of gi collides (same direction + same offset)
+        // with any mark of ANY OTHER group on the same helix.
+        // Returns 0 if already disjoint, or null if no delta
+        // within the search bound resolves the conflict.
+        const findCleanShift = (helixId: number, gi: number): number | null => {
+            const groups = mergedGroups.get(helixId);
+            if (!groups) return 0;
+            const myGroup = groups[gi];
+            if (!myGroup || myGroup.length === 0) return 0;
+            const mySet = new Set<number>(myGroup);
+
+            // My occupied cells, indexed by direction.
+            const myCells = new Map<string, Set<number>>();
+            let myMin = Infinity, myMax = -Infinity;
+            for (const ntId of myGroup) {
+                const m = grid.get(ntId);
+                if (!m || m.helixId !== helixId) continue;
+                let s = myCells.get(m.direction);
+                if (!s) { s = new Set(); myCells.set(m.direction, s); }
+                s.add(m.offset);
+                if (m.offset < myMin) myMin = m.offset;
+                if (m.offset > myMax) myMax = m.offset;
+            }
+            if (myCells.size === 0) return 0;
+
+            // Cells occupied by OTHER groups on the same helix.
+            const otherCells = new Map<string, Set<number>>();
+            let otherMin = Infinity, otherMax = -Infinity;
+            for (const [ntId, m] of grid) {
+                if (m.helixId !== helixId) continue;
+                if (mySet.has(ntId)) continue;
+                let s = otherCells.get(m.direction);
+                if (!s) { s = new Set(); otherCells.set(m.direction, s); }
+                s.add(m.offset);
+                if (m.offset < otherMin) otherMin = m.offset;
+                if (m.offset > otherMax) otherMax = m.offset;
+            }
+            if (otherCells.size === 0) return 0;
+
+            const conflictsAt = (delta: number): boolean => {
+                for (const [dir, myOffs] of myCells) {
+                    const others = otherCells.get(dir);
+                    if (!others) continue;
+                    for (const off of myOffs) {
+                        if (others.has(off + delta)) return true;
+                    }
+                }
+                return false;
+            };
+
+            if (!conflictsAt(0)) return 0;
+
+            // Bound: any collision requires (my_off + delta) to
+            // land on an other-off, so |delta| ≤ (other-span +
+            // my-span). Add a small pad so we can step JUST past
+            // the far edge in either direction.
+            const mySpan = (myMax - myMin) || 0;
+            const otherSpan = (otherMax - otherMin) || 0;
+            const maxSearch = Math.max(mySpan + otherSpan + 8, 32);
+
+            for (let mag = 1; mag <= maxSearch; mag++) {
+                if (!conflictsAt(mag)) return mag;
+                if (!conflictsAt(-mag)) return -mag;
+            }
+            return null;
+        };
+
+        // Iterate: resolve one group at a time, using the current
+        // grid state (so gi=2 sees where gi=1 landed). Each
+        // successful shift makes that group globally disjoint on
+        // its helix, so the outer loop terminates when a full
+        // pass moves nothing. Guard cap protects against
+        // pathological chains between helices.
+        let movedAny = false;
+        let unresolvable = 0;
+        let sweepGuard = 0;
+        while (sweepGuard++ < 200) {
+            let didMove = false;
+            mergedGroups.forEach((groups, helixId) => {
+                for (let gi = 1; gi < groups.length; gi++) {
+                    const delta = findCleanShift(helixId, gi);
+                    if (delta === null) { unresolvable++; continue; }
+                    if (delta === 0) continue;
+                    shiftGroup(helixId, gi, delta);
+                    didMove = true;
+                    movedAny = true;
+                }
+            });
+            if (!didMove) break;
+        }
+
+        if (movedAny) {
+            console.warn(
+                `[alignMergedGroups] Merged-helix inter-group overlap resolved by min-|delta| shifts` +
+                ` (sweeps=${sweepGuard - 1}${unresolvable > 0 ? `, unresolved=${unresolvable}` : ''}).`
+            );
+        }
+        if (unresolvable > 0) {
+            console.error(
+                `[alignMergedGroups] ${unresolvable} merged-helix group(s) had no collision-free placement` +
+                ` within the search bound. Grid will fail validation downstream.`
+            );
+        }
     }
 
     type CrossoverWeightMap = Map<number, Map<number, number>>;

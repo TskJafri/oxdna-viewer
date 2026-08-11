@@ -1477,6 +1477,13 @@ class ScadnanoExportManager {
             grid = freshGrid;
             binderHelices = freshBinders ?? [];
 
+            // setGrid only places nucleotides; a merged helix's origin-groups
+            // land at their collision-free pre-merge offsets, unaligned. Align
+            // them to the lattice here, BEFORE directionAlign2 — that pass
+            // flips helices and rewrites offsets, which would change what the
+            // shift observations see. No-op when nothing was merged.
+            toscad.alignMergedGroups(grid, mergedGroups, binderHelices);
+
             toscad.directionAlign2(grid);
             toscad.alignGridPrim(grid, binderHelices);
 
