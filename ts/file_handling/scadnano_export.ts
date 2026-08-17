@@ -287,7 +287,7 @@ class ScadnanoExportManager {
                 // Remap locked helix ids through the new numbering using nucleotide anchors.
                 const newLocked = new Set<number>();
                 lockedNtAnchors.forEach(ntId => {
-                    const newHelixId = toscad.findHelixID(ntId, newLayout.helices);
+                    const newHelixId = api.helix.findHelixID(ntId, newLayout.helices);
                     if (newHelixId !== null) newLocked.add(newHelixId);
                 });
 
@@ -1140,7 +1140,7 @@ class ScadnanoExportManager {
         const helices = this.ensureScadnanoHelicesCache();
         if (!helices) return;
 
-        const helixId = toscad.findHelixID(nucleotide.id, helices);
+        const helixId = api.helix.findHelixID(nucleotide.id, helices);
         if (helixId === null) return;
 
         this.suppressNodeSelectedCallback = true;

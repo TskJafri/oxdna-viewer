@@ -6,14 +6,17 @@ namespace toscad {
 
     type LatticeKind = 'honeycomb' | 'square';
     type PhaseParity = 0 | 1;
+    type GrooveBucket = 145 | 215;
 
-    interface LatticePhaseConfig {
+interface LatticePhaseConfig {
         basesPerTurn: number;
-        phases: Record<PhaseParity, number[]>;
+        phases: {
+            0: number[];
+            1: {145: number[], 215: number[]};
+        };
         voidPhase: number | null;
         tieEpsilon: number;
     }
-
 
     // easy to use constant for later reference.
     const resolveLatticeKind = (lattice: string): LatticeKind =>
@@ -24,10 +27,11 @@ namespace toscad {
             basesPerTurn: 10.5,
             phases: {
                 0: [0.0, 3.5, 7.0, 10.5],
-                // 1: [1.75, 5.25, 8.75]
-                // 1: [2.77, 6.27, 9.77]
                 // numbers found by using 215/145 asymmetry in major/minor groove and allowing void phase to break ties.
-                1: [0.7292, 4.229, 7.7292]
+                1: {
+                    145: [0.7292, 4.229, 7.7292],
+                    215: [2.7708, 6.2708, 9.7708]
+                }
             },
             voidPhase: 5.25,
             tieEpsilon: 0.01
@@ -35,28 +39,20 @@ namespace toscad {
         square: {
             basesPerTurn: 32 / 3,
             phases: {
-                // Symmetric and therefore simple.
                 0: [0.0, 8 / 3, 16 / 3, 8.0, 32 / 3],
-                1: [4 / 3, 4.0, 20 / 3, 28 / 3]
+                1:  {
+                    145: [4.2963, 6.9629, 9.6296],
+                    215: [6.3704, 9.0370, 11.7037]
+                }
             },
             voidPhase: null,
             tieEpsilon: 0.01
         }
     };
 
-    export function findHelixID(targetId: number, helices: Nucleotide[][]): number | null {
-        for (let i = 0; i < helices.length; i++) {
-            const helix = helices[i];
-            for (const nt of helix) {
-                if (nt.id === targetId) return i;
-            }
-        }
-        return null;
-    }
-
     // helper function
     // Finds the local angle distribution of a given helix relative to its neighbors.
-    // Uses crossover offsets defined by LATTICE_CONFIG to determine ideal angle buckets. 
+    // TODO: Potentially allow it to output more than 1 angle per neighbor...
     function getAngleHelix(
         grid: GridMap,
         helices: Nucleotide[][],
@@ -78,21 +74,33 @@ namespace toscad {
         const latticeType = resolveLatticeKind(lattice);
         const latticeConfig = LATTICE_CONFIG[latticeType];
 
-        const nearestPhase = (value: number, parity: PhaseParity) => {
-            const candidates = latticeConfig.phases[parity] ?? [];
-            if (!candidates.length) return value;
+        type PhaseMatch = { value: number; bucket: GrooveBucket };
 
-            return candidates.reduce((prev, curr) => {
-                const distPrev = Math.abs(prev - value);
-                const distCurr = Math.abs(curr - value);
+        const nearestPhase = (value: number, parity: PhaseParity): PhaseMatch => {
+            const phaseEntry = latticeConfig.phases[parity];
+            let candidates: PhaseMatch[];
+            
+            if (parity === 0) {
+                candidates = (phaseEntry as number[]).map(v => ({ value: v, bucket: 215 as GrooveBucket }));
+            } else {
+                const split = phaseEntry as { 145: number[]; 215: number[] };
+                candidates = [
+                    ...split[145].map(v => ({ value: v, bucket: 145 as GrooveBucket })),
+                    ...split[215].map(v => ({ value: v, bucket: 215 as GrooveBucket }))
+                ];
+            }
+
+            return candidates.reduce<PhaseMatch>((prev, curr) => {
+                const distPrev = Math.abs(prev.value - value);
+                const distCurr = Math.abs(curr.value - value);
 
                 if (
                     parity === 1
                     && latticeConfig.voidPhase !== null
                     && Math.abs(distPrev - distCurr) < latticeConfig.tieEpsilon
                 ) {
-                    if (prev === latticeConfig.voidPhase && curr !== latticeConfig.voidPhase) return curr;
-                    if (curr === latticeConfig.voidPhase && prev !== latticeConfig.voidPhase) return prev;
+                    if (prev.value === latticeConfig.voidPhase && curr.value !== latticeConfig.voidPhase) return curr;
+                    if (curr.value === latticeConfig.voidPhase && prev.value !== latticeConfig.voidPhase) return prev;
                 }
 
                 return distCurr < distPrev ? curr : prev;
@@ -105,6 +113,7 @@ namespace toscad {
             direction: 'forward' | 'backward';
         };
 
+        // collect crossover informations, where it happens and which direction -> direction tells us whether crossover is going to be at current strand or it's pair.
         const hubCrossovers: HubCrossover[] = [];
         for (const crossover of crossoverNts(grid)) {
             if (crossover.fromHelix === helixId) {
@@ -128,6 +137,7 @@ namespace toscad {
 
         if (!hubCrossovers.length) return result;
 
+        // local map for crossovers between current helix to adjacent helix. This is used to find the most common angle between two helices.
         const groupedByNeighbor = new Map<number, HubCrossover[]>();
         for (const crossover of hubCrossovers) {
             if (!groupedByNeighbor.has(crossover.adj_helix)) {
@@ -137,9 +147,11 @@ namespace toscad {
         }
 
         const neighbors = Array.from(groupedByNeighbor.keys()).sort((a, b) => a - b);
+        // should always have at least one neighbor... this is just a sanity check.
         if (!neighbors.length) return result;
 
         const pairTallies = new Map<string, Map<number, number>>();
+        // iterate over all unique pairs to find the most common angle between them.
         for (let i = 0; i < neighbors.length; i++) {
             const neighborA = neighbors[i];
             const groupA = groupedByNeighbor.get(neighborA) ?? [];
@@ -162,11 +174,12 @@ namespace toscad {
                         const y: PhaseParity = dirA === dirB ? 0 : 1;
 
                         const phase = ((rawX % latticeConfig.basesPerTurn) + latticeConfig.basesPerTurn) % latticeConfig.basesPerTurn;
-                        const idealPhase = nearestPhase(phase, y);
+                        const matchedPhase = nearestPhase(phase, y);
 
-                        const angleRaw = (360 / latticeConfig.basesPerTurn) * idealPhase + (y * 215);
+                        const angleRaw = (360 / latticeConfig.basesPerTurn) * matchedPhase.value + (y * matchedPhase.bucket);
                         const relativeAngle = (Math.round(angleRaw % 360) + 360) % 360;
 
+                        // bucket that contains all angles, such as 90, 120, 215, etc. It is lattice-agnostic.
                         bucket.set(relativeAngle, (bucket.get(relativeAngle) ?? 0) + 1);
                     }
                 }
@@ -175,6 +188,7 @@ namespace toscad {
             }
         }
 
+        // the mode angle for each pair of neighbors.
         const pairConsensus = new Map<string, number>();
         for (const [pairKey, bucket] of pairTallies.entries()) {
             if (!bucket.size) continue;
@@ -207,7 +221,7 @@ namespace toscad {
         return result;
     }
 
-        // Helper function to collect all backbone crossovers with their helix and offset info.
+    // Helper function to collect all backbone crossovers with their helix and offset info.
     export function crossoverNts(
         grid: GridMap
     ): Array<{
@@ -290,27 +304,15 @@ namespace toscad {
 
         return crossovers;
     }
-    
 
-    // Auto-detect whether a structure was built on a honeycomb or square lattice.
-    //
-    // Per-helix, sort crossover-endpoint nucleotides by offset, then for every
-    // consecutive pair compute the gap and test:
-    //     fitsHC = (gap mod 28) ∈ {6, 13, 20, 27}
-    //     fitsSQ = (gap mod 32) ∈ {7, 15, 23, 31}
-    // Exactly one match → +1 vote for that lattice. Matches both → ambiguous
-    // (skip). Matches neither → reject. Whichever lattice has more votes wins;
-    // ties (including zero votes) fall back to honeycomb.
-    //
-    // Binder helices (passed from setGrid) attach outside the main lattice, so
-    // any crossover with either endpoint on a binder helix is excluded.
+    // TODO: Theres a todo inside, go look for it.
     export function detectLatticeKind(grid: GridMap, binderHelices: number[] = []): LatticeKind {
         type CrossoverPoint = { offset: number; direction: 'forward' | 'backward' };
 
+        // add binders into a set so we can ignore them.
         const binderSet = new Set<number>(binderHelices);
 
-        // helixId -> ntId -> point. Map-by-ntId dedupes nucleotides that appear
-        // as both the "to" of one crossover and the "from" of another.
+        // helixId -> ntId -> point. Map-by-ntId dedupes nucleotides that appear as both the "to" of one crossover and the "from" of another.
         const pointsByHelix = new Map<number, Map<number, CrossoverPoint>>();
         const addPoint = (helixId: number, ntId: number, offset: number, direction: 'forward' | 'backward') => {
             let inner = pointsByHelix.get(helixId);
@@ -330,12 +332,8 @@ namespace toscad {
             }
             const fromMark = grid.get(crossover.fromNt.id);
             const toMark = grid.get(crossover.toNt.id);
-            if (fromMark) {
-                addPoint(crossover.fromHelix, crossover.fromNt.id, crossover.fromOffset, fromMark.direction);
-            }
-            if (toMark) {
-                addPoint(crossover.toHelix, crossover.toNt.id, crossover.toOffset, toMark.direction);
-            }
+            if (fromMark) {addPoint(crossover.fromHelix, crossover.fromNt.id, crossover.fromOffset, fromMark.direction)}
+            if (toMark) {addPoint(crossover.toHelix, crossover.toNt.id, crossover.toOffset, toMark.direction)}
         }
 
         const HC_PERIOD = 28;
@@ -361,21 +359,12 @@ namespace toscad {
             entry[kind]++;
         };
 
-        console.log(
-            `[detectLatticeKind] starting; helices with crossover endpoints=${pointsByHelix.size}, ` +
-            `binder helices=${binderHelices.length} (${binderHelices.join(',') || 'none'}), ` +
-            `binder-touching crossovers skipped=${skippedBinderCrossovers}`
-        );
-
-        for (const [helixId, inner] of pointsByHelix.entries()) {
+        for (const [, inner] of pointsByHelix.entries()) {
             if (inner.size < 2) {
-                console.log(`[detectLatticeKind]   helix=${helixId} has ${inner.size} crossover endpoint(s) — skipping`);
                 continue;
             }
 
             const sorted = Array.from(inner.values()).sort((a, b) => a.offset - b.offset);
-            const summary = sorted.map(p => `${p.offset}${p.direction === 'forward' ? 'f' : 'b'}`).join(', ');
-            console.log(`[detectLatticeKind]   helix=${helixId} endpoints (offset+dir, sorted): ${summary}`);
 
             for (let i = 1; i < sorted.length; i++) {
                 const a = sorted[i - 1];
@@ -409,29 +398,15 @@ namespace toscad {
                 } else {
                     verdict = 'rejected';
                 }
-
-                console.log(
-                    `[detectLatticeKind]     helix=${helixId} gap=${rawX} (offsets ${a.offset}->${b.offset}) ` +
-                    `parity=${parity} | gap%28=${hcResid} (HC ${fitsHC ? 'yes' : 'no'}) ` +
-                    `gap%32=${sqResid} (SQ ${fitsSQ ? 'yes' : 'no'}) -> ${verdict}`
-                );
             }
         }
 
-        console.log(`[detectLatticeKind] total gaps inspected (post gap=0,1 skip): ${totalGaps}`);
-
         const acceptedSizes = Array.from(acceptedByGap.keys()).sort((a, b) => a - b);
-        if (acceptedSizes.length === 0) {
-            console.log(`[detectLatticeKind] accepted gap-size breakdown: none`);
-        } else {
-            console.log(`[detectLatticeKind] accepted gap-size breakdown:`);
-            for (const size of acceptedSizes) {
-                const { hc, sq } = acceptedByGap.get(size)!;
-                const parts: string[] = [];
-                if (hc) parts.push(`HC=${hc}`);
-                if (sq) parts.push(`SQ=${sq}`);
-                console.log(`[detectLatticeKind]   gap=${size}: ${parts.join(', ')}`);
-            }
+        for (const size of acceptedSizes) {
+            const { hc, sq } = acceptedByGap.get(size)!;
+            const parts: string[] = [];
+            if (hc) parts.push(`HC=${hc}`);
+            if (sq) parts.push(`SQ=${sq}`);
         }
 
         const detected: LatticeKind = squareVotes > honeycombVotes ? 'square' : 'honeycomb';
@@ -484,6 +459,7 @@ namespace toscad {
         grid: GridMap,
         lattice: string = 'honeycomb'
     ): Map<number, HelixPrediction[]> {
+        // even/odd for honeycomb lattice only - the grid positioning system can be decided using (col+row)
         type Parity = 'even' | 'odd';
         type HoneycombAngle = 0 | 120 | 240;
         type SquareAngle = 0 | 90 | 180 | 270;
@@ -767,42 +743,6 @@ namespace toscad {
         if (sumSqA === 0 || sumSqB === 0) return 0;
         const raw = dot / (Math.sqrt(sumSqA) * Math.sqrt(sumSqB));
         return Math.max(0, Math.min(1, raw));
-    }
-
-    // helper function to check for angle collisions in the map.
-    export function angleCollisions(networkMap: Map<number, Map<number, number>>) {
-        const overlappingHelices = [];
-
-        for (const [helixId, angleMap] of networkMap.entries()) {
-            if (!angleMap || angleMap.size === 0) continue;
-
-            const anglesToNeighbors = new Map<number, number[]>();
-            for (const [adjHelix, angle] of angleMap.entries()) {
-                if (!anglesToNeighbors.has(angle)) anglesToNeighbors.set(angle, []);
-                anglesToNeighbors.get(angle)!.push(adjHelix);
-            }
-
-            const localConflicts = [];
-            for (const [angle, collidedHelices] of anglesToNeighbors.entries()) {
-                const uniqueCollided = Array.from(new Set(collidedHelices)).sort((a, b) => a - b);
-                if (uniqueCollided.length < 2) continue;
-                localConflicts.push({
-                    angle,
-                    colliding_adj_helices: uniqueCollided
-                });
-            }
-
-            if (localConflicts.length > 0) {
-                localConflicts.sort((a, b) => a.angle - b.angle);
-                overlappingHelices.push({
-                    helixId,
-                    conflicts: localConflicts
-                });
-            }
-        }
-
-        overlappingHelices.sort((a, b) => a.helixId - b.helixId);
-        return overlappingHelices;
     }
 
     // helper function. Checks if 2 helices are mutually disjoint (through offsets in the grid). 
@@ -2206,27 +2146,6 @@ namespace toscad {
         for (const [, m] of grid.entries()) if (m.offset < globalMin) globalMin = m.offset;
         if (globalMin !== 0 && globalMin !== Infinity) {
             for (const [, m] of grid.entries()) m.offset -= globalMin;
-        }
-    }
-
-    // ── Helper: apply shift to every nt on a helix, then normalize ──
-    function applyHelixShifts(grid: GridMap, shiftMap: Map<number, number>) {
-        for (const [, mark] of grid.entries()) {
-            const s = shiftMap.get(mark.helixId);
-            if (s !== undefined && s !== 0) {
-                mark.offset += s;
-            }
-        }
-
-        // Normalize: find global minimum, shift everything so min = 0
-        let globalMin = Infinity;
-        for (const [, mark] of grid.entries()) {
-            if (mark.offset < globalMin) globalMin = mark.offset;
-        }
-        if (globalMin !== 0 && globalMin !== Infinity) {
-            for (const [, mark] of grid.entries()) {
-                mark.offset -= globalMin;
-            }
         }
     }
 

@@ -119,7 +119,7 @@ canvas.addEventListener('mousedown', event => {
                     break;
                 case "Helix": {
                     const helices = window.scadnanoGetHelices?.();
-                    const helixId = helices ? toscad.findHelixID(nucleotide.id, helices) : null;
+                    const helixId = helices ? api.helix.findHelixID(nucleotide.id, helices) : null;
                     if (helixId !== null && helices) {
                         const helixIds = new Set(helices[helixId].map(n => n.id));
                         sys.strands.forEach(strand => strand.forEach(e => {

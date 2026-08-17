@@ -7,18 +7,6 @@ Very important to know the following before you read the code further:
 - scadnano files use strands, not individual nucleotides, and each strand requires a direction. Thus, we use "fwd" and "bwd" for directions.
 - 'forward'-labeled nt has offsets that increase along its own 5'->3'.
 - buildScadnano3 builds strands from 5'->3', and is fully and only influenced by topology and setGrid.
-
-The full canonical pipeline lives in ScadnanoExportManager.prepareScadnanoLayout
-(ts/file_handling/scadnano_export.ts). If you need to drive the stages by hand
-from the console, the shape is roughly:
-
-    const { helices } = helix.findHelices(elements, 3);
-    const { grid, binderHelices } = toscad.setGrid(helices);
-    toscad.directionAlign2(grid);
-    toscad.alignGridPrim(grid, binderHelices);
-    const angles = toscad.getAngles(grid, helices, 'honeycomb');
-    // ... anglecomb3 (needs partials + hashMergePairs) → anglecorr2 → ...
-    // see prepareScadnanoLayout for the current wiring.
 */
 
 namespace toscad {
@@ -99,6 +87,7 @@ namespace toscad {
     export type GridMap = Map<number, GridMark>;
     export type Direction = 'n3' | 'n5';
 
+    // TODO: Allow merged helices to be flipped relative to each other...
     export function setGrid(
         helices: Nucleotide[][],
         preserveGrid?: GridMap,
