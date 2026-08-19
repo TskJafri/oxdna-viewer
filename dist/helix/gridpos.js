@@ -2,6 +2,14 @@
 /// <reference path="../typescript_definitions/index.d.ts" />
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
+/*
+    We use "Col" and "Row" to refer to the 2D grid coordinates of a helix in the lattice. Refer to the honeycomb and square lattice diagrams in
+    https://github.com/UC-Davis-molecular-computing/scadnano.
+    Note that (col, row) == (x,y). The following codebase uses (col, row) simply to follow the scadnano convention.
+
+    Ideas that are not yet implemented:
+    - Use major/minor groove asymmetries as a gate for helices, or deterministically labelling helix directions.
+*/
 var toscad;
 (function (toscad) {
     // easy to use constant for later reference.
@@ -228,6 +236,24 @@ var toscad;
         return crossovers;
     }
     toscad.crossoverNts = crossoverNts;
+    // For every helix, count how many backbone crossovers it shares with each neighbor. Useful to remove bad combinations (such as end-only, which happens when a helix is broken in 2 pieces)
+    function getConnectionCounts(grid) {
+        const counts = new Map();
+        const bump = (a, b) => {
+            if (!counts.has(a))
+                counts.set(a, new Map());
+            const inner = counts.get(a);
+            inner.set(b, (inner.get(b) ?? 0) + 1);
+        };
+        for (const crossover of crossoverNts(grid)) {
+            if (crossover.fromHelix === crossover.toHelix)
+                continue;
+            bump(crossover.fromHelix, crossover.toHelix);
+            bump(crossover.toHelix, crossover.fromHelix);
+        }
+        return counts;
+    }
+    toscad.getConnectionCounts = getConnectionCounts;
     // TODO: Theres a todo inside, go look for it.
     function detectLatticeKind(grid, binderHelices = []) {
         // add binders into a set so we can ignore them.
@@ -384,13 +410,14 @@ var toscad;
             const diff = Math.abs(normalizeAngle(a) - normalizeAngle(b));
             return Math.min(diff, 360 - diff);
         };
-        // checks the parity, based on row
+        // checks the parity, based on row & col
         const parityAt = (col, row) => (((col + row) & 1) === 0 ? 'even' : 'odd');
         const getStep = (col, row, angle) => {
             if (latticeType === 'square')
                 return SQUARE_STEPS[angle];
             return HONEYCOMB_STEP_BY_PARITY[parityAt(col, row)][angle];
         };
+        // Given an angle, returns the closest valid lattice angle - tie-breaks by choosing the smaller angle.
         const snapToLatticeAngle = (angle) => {
             let best = ANGLES[0];
             let bestDist = Number.POSITIVE_INFINITY;
@@ -403,6 +430,7 @@ var toscad;
             }
             return best;
         };
+        // get angle from the step.
         const latticeAngleFromDelta = (col, row, dCol, dRow) => {
             for (const a of ANGLES) {
                 const s = getStep(col, row, a);
@@ -452,8 +480,11 @@ var toscad;
             const rootCol = rootId === 0 ? 0 : nextRootCol;
             canonicalCoord.set(rootId, [rootCol, 0]);
             canonicalOrient.set(rootId, 0);
-            if (rootId !== 0)
+            if (rootId !== 0) {
+                if (rootId > 1)
+                    console.log(`disconnected component root: rootId=${rootId}, placed at rootCol=${rootCol}`);
                 nextRootCol += ROOT_SEPARATION;
+            }
             const queue = [rootId];
             // BFS manual instead of Array.shift() for performance
             let qi = 0;
@@ -487,6 +518,7 @@ var toscad;
                     queue.push(c.nid);
                 }
             }
+            // End of canonical BFS for this root
         }
         // record every edge's prediction for the far endpoint
         // So far, we only have the tree edges (i.e., canonical edges). But sometimes, there are non-tree edges, caused by 2 helices giving different angles for the same helix.
@@ -553,24 +585,6 @@ var toscad;
         return predictions;
     }
     toscad.tempGlobalPos = tempGlobalPos;
-    // For every helix, count how many backbone crossovers it shares with each neighbor. Useful to remove bad combinations (such as end-only, which happens when a helix is broken in 2 pieces)
-    function getConnectionCounts(grid) {
-        const counts = new Map();
-        const bump = (a, b) => {
-            if (!counts.has(a))
-                counts.set(a, new Map());
-            const inner = counts.get(a);
-            inner.set(b, (inner.get(b) ?? 0) + 1);
-        };
-        for (const crossover of crossoverNts(grid)) {
-            if (crossover.fromHelix === crossover.toHelix)
-                continue;
-            bump(crossover.fromHelix, crossover.toHelix);
-            bump(crossover.toHelix, crossover.fromHelix);
-        }
-        return counts;
-    }
-    toscad.getConnectionCounts = getConnectionCounts;
     // Cosine similarity between the crossover-count vectors of two helices.
     //
     //   cos(A, B) = Σ_i (w_{A,i} · w_{B,i})  /  ( ||w_A|| · ||w_B|| )

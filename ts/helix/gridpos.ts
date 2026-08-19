@@ -2,6 +2,14 @@
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
 
+/*
+    We use "Col" and "Row" to refer to the 2D grid coordinates of a helix in the lattice. Refer to the honeycomb and square lattice diagrams in
+    https://github.com/UC-Davis-molecular-computing/scadnano.
+    Note that (col, row) == (x,y). The following codebase uses (col, row) simply to follow the scadnano convention.
+
+    Ideas that are not yet implemented:
+    - Use major/minor groove asymmetries as a gate for helices, or deterministically labelling helix directions.
+*/
 namespace toscad {
 
     type LatticeKind = 'honeycomb' | 'square';
@@ -305,6 +313,25 @@ interface LatticePhaseConfig {
         return crossovers;
     }
 
+    // For every helix, count how many backbone crossovers it shares with each neighbor. Useful to remove bad combinations (such as end-only, which happens when a helix is broken in 2 pieces)
+    export function getConnectionCounts(grid: GridMap): Map<number, Map<number, number>> {
+        const counts = new Map<number, Map<number, number>>();
+
+        const bump = (a: number, b: number) => {
+            if (!counts.has(a)) counts.set(a, new Map<number, number>());
+            const inner = counts.get(a)!;
+            inner.set(b, (inner.get(b) ?? 0) + 1);
+        };
+
+        for (const crossover of crossoverNts(grid)) {
+            if (crossover.fromHelix === crossover.toHelix) continue;
+            bump(crossover.fromHelix, crossover.toHelix);
+            bump(crossover.toHelix, crossover.fromHelix);
+        }
+
+        return counts;
+    }
+
     // TODO: Theres a todo inside, go look for it.
     export function detectLatticeKind(grid: GridMap, binderHelices: number[] = []): LatticeKind {
         type CrossoverPoint = { offset: number; direction: 'forward' | 'backward' };
@@ -494,12 +521,13 @@ interface LatticePhaseConfig {
             const diff = Math.abs(normalizeAngle(a) - normalizeAngle(b));
             return Math.min(diff, 360 - diff);
         };
-        // checks the parity, based on row
+        // checks the parity, based on row & col
         const parityAt = (col: number, row: number): Parity => (((col + row) & 1) === 0 ? 'even' : 'odd');
         const getStep = (col: number, row: number, angle: LatticeAngle) => {
             if (latticeType === 'square') return SQUARE_STEPS[angle as SquareAngle];
             return HONEYCOMB_STEP_BY_PARITY[parityAt(col, row)][angle as HoneycombAngle];
         };
+        // Given an angle, returns the closest valid lattice angle - tie-breaks by choosing the smaller angle.
         const snapToLatticeAngle = (angle: number): LatticeAngle => {
             let best = ANGLES[0];
             let bestDist = Number.POSITIVE_INFINITY;
@@ -512,6 +540,7 @@ interface LatticePhaseConfig {
             }
             return best;
         };
+        // get angle from the step.
         const latticeAngleFromDelta = (col: number, row: number, dCol: number, dRow: number): LatticeAngle | null => {
             for (const a of ANGLES) {
                 const s = getStep(col, row, a);
@@ -522,8 +551,7 @@ interface LatticePhaseConfig {
 
         // Get number of crossovers
         const connectionCounts = getConnectionCounts(grid);
-        const getWeight = (a: number, b: number): number =>
-            connectionCounts.get(a)?.get(b) ?? 1;
+        const getWeight = (a: number, b: number): number => connectionCounts.get(a)?.get(b) ?? 1;
 
         // Collect every helix referenced by the network map
         const allHelixIds = new Set<number>();
@@ -573,7 +601,10 @@ interface LatticePhaseConfig {
             const rootCol = rootId === 0 ? 0 : nextRootCol;
             canonicalCoord.set(rootId, [rootCol, 0]);
             canonicalOrient.set(rootId, 0);
-            if (rootId !== 0) nextRootCol += ROOT_SEPARATION;
+            if (rootId !== 0) {
+                if (rootId > 1) console.log(`disconnected component root: rootId=${rootId}, placed at rootCol=${rootCol}`);
+                nextRootCol += ROOT_SEPARATION;
+            }
 
             const queue: number[] = [rootId];
             // BFS manual instead of Array.shift() for performance
@@ -618,6 +649,7 @@ interface LatticePhaseConfig {
                     queue.push(c.nid);
                 }
             }
+            // End of canonical BFS for this root
         }
 
         // record every edge's prediction for the far endpoint
@@ -682,25 +714,6 @@ interface LatticePhaseConfig {
         }
 
         return predictions;
-    }
-
-    // For every helix, count how many backbone crossovers it shares with each neighbor. Useful to remove bad combinations (such as end-only, which happens when a helix is broken in 2 pieces)
-    export function getConnectionCounts(grid: GridMap): Map<number, Map<number, number>> {
-        const counts = new Map<number, Map<number, number>>();
-
-        const bump = (a: number, b: number) => {
-            if (!counts.has(a)) counts.set(a, new Map<number, number>());
-            const inner = counts.get(a)!;
-            inner.set(b, (inner.get(b) ?? 0) + 1);
-        };
-
-        for (const crossover of crossoverNts(grid)) {
-            if (crossover.fromHelix === crossover.toHelix) continue;
-            bump(crossover.fromHelix, crossover.toHelix);
-            bump(crossover.toHelix, crossover.fromHelix);
-        }
-
-        return counts;
     }
 
     // Cosine similarity between the crossover-count vectors of two helices.

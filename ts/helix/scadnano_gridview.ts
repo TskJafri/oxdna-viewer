@@ -179,6 +179,9 @@ namespace scadnano {
         private ghostMat: THREE.MeshBasicMaterial;
         private ghostMeshes: Map<string, THREE.Mesh> = new Map();
 
+        // DEBUG: (col, row) text labels for each ghost grid dot
+        private ghostLabels: Map<string, THREE.Sprite> = new Map();
+
         // Shared geometry/material for user-placed nodes
         private nodeGeo: THREE.CircleGeometry;
 
@@ -758,6 +761,12 @@ namespace scadnano {
                     mesh.userData.key = key;
                     this.scene.add(mesh);
                     this.ghostMeshes.set(key, mesh);
+
+                    // DEBUG: small (col, row) label per ghost dot
+                    const label = this._createGhostLabelSprite(`${col},${row}`);
+                    label.position.set(p.x, p.y, 0);
+                    this.scene.add(label);
+                    this.ghostLabels.set(key, label);
                 }
             }
         }
@@ -809,6 +818,37 @@ namespace scadnano {
             });
             const sprite = new THREE.Sprite(material);
             sprite.scale.set(1.5, 0.75, 1);
+            return sprite;
+        }
+
+        // DEBUG: small gray label sprite used for ghost (col, row) markers
+        private _createGhostLabelSprite(text: string): THREE.Sprite {
+            const canvas = document.createElement('canvas');
+            canvas.width = 128;
+            canvas.height = 48;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+                const fallbackMat = new THREE.SpriteMaterial({ color: 0x888888 });
+                return new THREE.Sprite(fallbackMat);
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.font = '18px Arial';
+            ctx.fillStyle = '#888888';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.needsUpdate = true;
+
+            const material = new THREE.SpriteMaterial({
+                map: texture,
+                transparent: true,
+                depthTest: false,
+            });
+            const sprite = new THREE.Sprite(material);
+            sprite.scale.set(0.7, 0.26, 1);
             return sprite;
         }
 
