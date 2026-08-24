@@ -87,6 +87,18 @@ var toscad;
     }
     toscad.helixEndpoints = helixEndpoints;
     ;
+    // helper function, finds and outputs the least ntId for each helix.
+    // TODO: Remove dependence in gridpos and thus make it local to alignGridPrim2
+    function helixKeyMap(grid) {
+        const minNtByHelix = new Map();
+        for (const [ntId, mark] of grid.entries()) {
+            const cur = minNtByHelix.get(mark.helixId);
+            if (cur === undefined || ntId < cur)
+                minNtByHelix.set(mark.helixId, ntId);
+        }
+        return minNtByHelix;
+    }
+    toscad.helixKeyMap = helixKeyMap;
     // TODO: Allow merged helices to be flipped relative to each other...
     function setGrid(helices, preserveGrid, preservedNtIds, mergedGroups) {
         // Initialize the map
@@ -613,81 +625,106 @@ var toscad;
                 reverseStats.diffWalk = reverseSame;
             }
         };
-        // Anchor helix 0
-        anchored.add(0);
-        const queue = [0];
-        let qIdx = 0;
-        while (qIdx < queue.length) {
-            const currHelix = queue[qIdx++];
-            const neighbors = crossovers.get(currHelix);
-            if (!neighbors)
-                continue;
-            for (const [neighborHelix] of neighbors.entries()) {
-                if (anchored.has(neighborHelix))
-                    continue;
-                // Collect votes from ALL anchored helices to this neighbor
-                let totalSameWalk = 0;
-                let totalDiffWalk = 0;
-                for (const anchoredHelix of anchored) {
-                    const anchoredNeighbors = crossovers.get(anchoredHelix);
-                    if (!anchoredNeighbors)
+        const helixKeys = helixKeyMap(grid);
+        // save a key for each helix, where the key is the lowest nucleotide id in that helix
+        const keyOf = (helixId) => helixKeys.get(helixId) ?? Number.MAX_SAFE_INTEGER;
+        // Number of crossovers
+        const voteMass = new Map();
+        for (const [helixId, neighbors] of crossovers.entries()) {
+            let mass = 0;
+            for (const stats of neighbors.values())
+                mass += stats.sameWalk + stats.diffWalk;
+            voteMass.set(helixId, mass);
+        }
+        const crossoverCount = (helixId) => voteMass.get(helixId) ?? 0;
+        // Flip evidence for `helixId` against the currently anchored set
+        const evidenceFor = (helixId) => {
+            let same = 0;
+            let diff = 0;
+            const neighbors = crossovers.get(helixId);
+            if (neighbors) {
+                for (const [other, stats] of neighbors.entries()) {
+                    if (!anchored.has(other))
                         continue;
-                    const s = anchoredNeighbors.get(neighborHelix);
-                    if (!s)
-                        continue;
-                    totalSameWalk += s.sameWalk;
-                    totalDiffWalk += s.diffWalk;
+                    same += stats.sameWalk;
+                    diff += stats.diffWalk;
                 }
-                // sameWalk = both sides increase (or both decrease) -> flip
-                // diffWalk = they alternate -> already correct`
-                const shouldFlip = totalSameWalk > totalDiffWalk;
+            }
+            return { same, diff, total: same + diff };
+        };
+        const remaining = new Set(helixIds);
+        const seeds = [];
+        // Loop for disconnected helices. Each iteration seeds a component of a connected system.
+        while (remaining.size > 0) {
+            // seeding so that the flipping stays consistent over the multiple iterations (if any)
+            let seed = -1;
+            let seedCrossoverCt = -1;
+            let seedKey = Number.MAX_SAFE_INTEGER;
+            for (const helixId of remaining) {
+                const mass = crossoverCount(helixId);
+                if (mass > seedCrossoverCt)
+                    seedCrossoverCt = mass;
+            }
+            for (const helixId of remaining) {
+                if (crossoverCount(helixId) !== seedCrossoverCt)
+                    continue;
+                const k = keyOf(helixId);
+                if (k < seedKey) {
+                    seedKey = k;
+                    seed = helixId;
+                }
+            }
+            if (seed < 0)
+                break;
+            anchored.add(seed);
+            remaining.delete(seed);
+            seeds.push(seed);
+            // Now for the seed for this connected system, walk iteratively to figure out which ones to flip.
+            while (true) {
+                let best = -1;
+                let bestScore = -1;
+                let bestTotal = -1;
+                let bestKey = Number.MAX_SAFE_INTEGER;
+                let bestEv = null;
+                for (const helixId of remaining) {
+                    const ev = evidenceFor(helixId);
+                    if (ev.total <= 0)
+                        continue; // not adjacent to the anchored set yet
+                    const score = Math.abs(ev.same - ev.diff);
+                    const k = keyOf(helixId);
+                    let better;
+                    if (score !== bestScore)
+                        better = score > bestScore;
+                    else if (ev.total !== bestTotal)
+                        better = ev.total > bestTotal;
+                    else
+                        better = k < bestKey;
+                    if (better) {
+                        best = helixId;
+                        bestScore = score;
+                        bestTotal = ev.total;
+                        bestKey = k;
+                        bestEv = ev;
+                    }
+                }
+                if (best < 0 || !bestEv)
+                    break; // component exhausted
+                // sameWalk = both sides trend the same way -> flip this helix
+                // diffWalk = they alternate -> already correct
+                const shouldFlip = bestEv.same > bestEv.diff;
                 if (shouldFlip) {
-                    gridFlip(grid, neighborHelix);
-                    flippedHelices.push(neighborHelix);
-                    applyFlipToCrossoverStats(neighborHelix);
+                    gridFlip(grid, best);
+                    flippedHelices.push(best);
+                    applyFlipToCrossoverStats(best);
                 }
-                anchored.add(neighborHelix);
-                queue.push(neighborHelix);
+                anchored.add(best);
+                remaining.delete(best);
             }
         }
-        // Handle disconnected helices (by doing a separate BFS for each unanchored helix)
-        for (const hId of helixIds) {
-            if (anchored.has(hId))
-                continue;
-            anchored.add(hId);
-            const subQueue = [hId];
-            let subIdx = 0;
-            while (subIdx < subQueue.length) {
-                const currHelix = subQueue[subIdx++];
-                const neighbors = crossovers.get(currHelix);
-                if (!neighbors)
-                    continue;
-                for (const [neighborHelix] of neighbors.entries()) {
-                    if (anchored.has(neighborHelix))
-                        continue;
-                    let totalSameWalk = 0;
-                    let totalDiffWalk = 0;
-                    for (const anchoredHelix of anchored) {
-                        const anchoredNeighbors = crossovers.get(anchoredHelix);
-                        if (!anchoredNeighbors)
-                            continue;
-                        const s = anchoredNeighbors.get(neighborHelix);
-                        if (!s)
-                            continue;
-                        totalSameWalk += s.sameWalk;
-                        totalDiffWalk += s.diffWalk;
-                    }
-                    if (totalSameWalk > totalDiffWalk) {
-                        gridFlip(grid, neighborHelix);
-                        flippedHelices.push(neighborHelix);
-                        applyFlipToCrossoverStats(neighborHelix);
-                    }
-                    anchored.add(neighborHelix);
-                    subQueue.push(neighborHelix);
-                }
-            }
-        }
-        console.log(`[directionAlign2] Flipped ${flippedHelices.length} helices: [${flippedHelices.sort((a, b) => a - b).join(', ')}]`);
+        console.log(`[directionAlign2] Flipped ${flippedHelices.length} helices: ` +
+            `[${flippedHelices.slice().sort((a, b) => a - b).join(', ')}] ` +
+            `| components=${seeds.length} seeds=[${seeds.join(',')}] ` +
+            `seedKeys=[${seeds.map(s => keyOf(s)).join(',')}]`);
         return {
             flippedHelices: flippedHelices.sort((a, b) => a - b),
             edgeCount
