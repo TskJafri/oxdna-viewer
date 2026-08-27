@@ -44,6 +44,8 @@ interface Window {
     scadnanoGridUndo?: () => void;
     scadnanoGridRedo?: () => void;
     scadnanoGridGetHistory?: () => any;
+    // DEBUG: relabeling probe. See ScadnanoExportManager.runLabelInvarianceTest.
+    scadnanoLabelInvarianceTest?: (trials?: unknown, gridType?: unknown, seed?: unknown) => any;
 }
 
 // ── Edit-history journal types ───────────────────────────────────────────────
@@ -90,6 +92,13 @@ type ScadnanoHistoryJournal = {
 };
 
 class ScadnanoExportManager {
+    // DEBUG: emit a canonical (label-invariant) fingerprint after every pipeline
+    // stage inside convergeLayout. Used to localize which stage first diverges
+    // between two runs that differ only by helix numbering.
+    private static DEBUG_STAGE_FINGERPRINTS = false;
+    // DEBUG: dump the tie-break counters (toscad.tiestats) after each iteration.
+    private static DEBUG_TIESTATS = true;
+
     private currentScadnanoHelices: Nucleotide[][] | null = null;
     private currentScadnanoConnections: Array<[number, number]> = [];
     private currentScadnanoLayout: ScadnanoPreparedLayout | null = null;
@@ -1323,13 +1332,15 @@ class ScadnanoExportManager {
     }
 
     // Deterministic fingerprint of every mutable field the pipeline touches on
-    // the grid, plus the current helix count. `convergeLayout` compares
-    // fingerprints across iterations to decide when the pipeline has reached a
-    // fixed point — this is more reliable than checking return counts from
-    // individual stages because it catches ALL mutations (directionAlign2 flips,
-    // alignGridPrim offset shifts, anglecomb/anglecorr/axisOverlap changes)
-    // in a single signal.
-    private gridFingerprint(grid: Map<number, any>, helicesLength: number): string {
+    // the grid, plus the current helix count. Catches ALL mutations
+    // (directionAlign2 flips, alignGridPrim offset shifts,
+    // anglecomb/anglecorr/axisOverlap changes) in a single signal.
+    //
+    // LABEL-SENSITIVE: this embeds m.helixId literally, so a pure renumber
+    // changes the string even when nothing physical moved. Kept only for
+    // logging / comparison against the canonical form; the convergence test
+    // uses gridFingerprintCanonical instead. See toscad.canonicalGridFingerprint.
+    private gridFingerprintLabeled(grid: Map<number, any>, helicesLength: number): string {
         const ntIds = Array.from(grid.keys()).sort((a, b) => a - b);
         const parts: string[] = [`h=${helicesLength}`];
         for (const ntId of ntIds) {
@@ -1337,6 +1348,86 @@ class ScadnanoExportManager {
             parts.push(`${ntId}:${m.helixId}:${m.offset}:${m.direction === 'forward' ? 'f' : 'b'}`);
         }
         return parts.join('|');
+    }
+
+    // Label-INVARIANT fingerprint: same information as above, but each helix is
+    // named by its content (min nucleotide id) instead of by its array index, and
+    // helices are ordered by that key. Two runs that differ only by a relabeling
+    // produce the same string; any real change to the partition, the offsets, or
+    // the directions still changes it.
+    //
+    // This is what the fixed-point loop must compare, otherwise renumbering alone
+    // guarantees the loop never converges regardless of whether the layout settled.
+    private gridFingerprintCanonical(grid: Map<number, any>, helicesLength: number): string {
+        return toscad.canonicalGridFingerprint(grid as toscad.GridMap, helicesLength);
+    }
+
+    // Label-invariant fingerprint of the resulting coordinates, translation
+    // normalized so a rigid shift of the whole layout does not read as a change.
+    private helixPosFingerprintCanonical(
+        grid: Map<number, any>,
+        helixPos: HelixPosMap,
+        lattice: string
+    ): string {
+        const canon = toscad.canonicalHelixPos(grid as toscad.GridMap, helixPos);
+        return toscad.fingerprintCanonicalPos(toscad.normalizeCanonicalPos(canon, lattice));
+    }
+
+    // Label-invariant fingerprint of the angle network: directed helix pairs
+    // re-keyed by content key. Lets us tell whether getAngles itself produced
+    // different angles under a relabeling, which is the suspected entry point
+    // (getAngleHelix anchors each helix's angle frame on its lowest-numbered
+    // neighbor, so relabeling rotates the whole row).
+    private networkMapFingerprintCanonical(
+        grid: Map<number, any>,
+        networkMap: Map<number, Map<number, number>>
+    ): string {
+        const keys = toscad.helixKeyMap(grid as toscad.GridMap);
+        const rows: string[] = [];
+        for (const [from, inner] of networkMap.entries()) {
+            const kf = keys.get(from);
+            if (kf === undefined) continue;
+            const cells: Array<{ k: number; a: number }> = [];
+            for (const [to, angle] of inner.entries()) {
+                const kt = keys.get(to);
+                if (kt === undefined) continue;
+                cells.push({ k: kt, a: angle });
+            }
+            cells.sort((x, y) => x.k - y.k);
+            rows.push(`K${kf}>${cells.map(c => `${c.k}:${c.a}`).join(',')}`);
+        }
+        rows.sort();
+        return rows.join('|');
+    }
+
+    // Per-stage canonical fingerprint trace for the current convergeLayout run.
+    // Non-null while the label-invariance harness is driving, so traces from two
+    // runs can be compared element-wise to find the FIRST stage that diverges.
+    private stageTrace: Array<{ iter: number; tag: string; hash: string; len: number }> | null = null;
+
+    private static shortHashOf(s: string): string {
+        let h = 0;
+        for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+        return (h >>> 0).toString(16).padStart(8, '0');
+    }
+
+    // Record one stage fingerprint. Logged when DEBUG_STAGE_FINGERPRINTS is on,
+    // and always appended to stageTrace when the harness is collecting.
+    private stageFpRecord(tag: string, iter: number, fp: string): void {
+        if (!ScadnanoExportManager.DEBUG_STAGE_FINGERPRINTS && !this.stageTrace) return;
+        const hash = ScadnanoExportManager.shortHashOf(fp);
+        if (this.stageTrace) this.stageTrace.push({ iter, tag, hash, len: fp.length });
+        if (ScadnanoExportManager.DEBUG_STAGE_FINGERPRINTS) {
+            console.log(`[stagefp] iter=${iter} ${tag.padEnd(22)} ${hash} len=${fp.length}`);
+        }
+    }
+
+    // Per-stage canonical fingerprints inside one iteration. Diff these between
+    // two runs to find the FIRST stage whose output differs, instead of only
+    // learning that the end result differed.
+    private stageFp(tag: string, iter: number, grid: Map<number, any>, helicesLength: number): void {
+        if (!ScadnanoExportManager.DEBUG_STAGE_FINGERPRINTS && !this.stageTrace) return;
+        this.stageFpRecord(tag, iter, this.gridFingerprintCanonical(grid, helicesLength));
     }
 
     private convergeLayout(
@@ -1372,12 +1463,15 @@ class ScadnanoExportManager {
             networkMap = toscad.getAngles(grid, helices, latticeType);
             helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
 
-            const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType, binderHelices);
-            const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
-            helices = renumbered.helices;
-            helixPos = renumbered.helixPos;
+            // DEBUG: renumbering disabled globally to test layout determinism /
+            // stability across iterations. Helix ids stay in their pre-layout
+            // numbering, so nothing downstream sees an id remap.
+            // const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType, binderHelices);
+            // const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
+            // helices = renumbered.helices;
+            // helixPos = renumbered.helixPos;
 
-            console.log(`[scadnano] convergeLayout (wireframe) — single pass, no iteration`);
+            console.log(`[scadnano] convergeLayout (wireframe) — single pass, no iteration, renumber DISABLED`);
             return { helices, grid, helixPos, latticeType, networkMap };
         }
 
@@ -1396,6 +1490,12 @@ class ScadnanoExportManager {
         networkMap = new Map();
         helixPos = new Map();
         let prevFp = '';
+        // Companion fingerprints, logged only. prevFpLabeled is the old
+        // (helixId-embedding) signal; prevFpGeom is the resulting coordinates.
+        // Comparing all three tells you whether a change was physical, purely a
+        // relabeling, or a coordinate change with an unchanged grid.
+        let prevFpLabeled = '';
+        let prevFpGeom = '';
         // Initialize prevGrid from the input grid parameter. This allows
         // callers (like recalculateGridFromScratch) to pass a stored grid
         // so the first iteration can preserve marks from it.
@@ -1473,9 +1573,12 @@ class ScadnanoExportManager {
                 if (mergedGroups.size === 0) mergedGroups = undefined;
             }
 
+            if (ScadnanoExportManager.DEBUG_TIESTATS) toscad.tiestats.reset();
+
             const { grid: freshGrid, binderHelices: freshBinders } = toscad.setGrid(helices, prevGrid, preservedNtIds, mergedGroups);
             grid = freshGrid;
             binderHelices = freshBinders ?? [];
+            this.stageFp('setGrid', iter, grid, helices.length);
 
             // setGrid only places nucleotides; a merged helix's origin-groups
             // land at their collision-free pre-merge offsets, unaligned. Align
@@ -1483,9 +1586,12 @@ class ScadnanoExportManager {
             // flips helices and rewrites offsets, which would change what the
             // shift observations see. No-op when nothing was merged.
             toscad.alignMergedGroups(grid, mergedGroups, binderHelices);
+            this.stageFp('alignMergedGroups', iter, grid, helices.length);
 
             toscad.directionAlign2(grid);
+            this.stageFp('directionAlign2', iter, grid, helices.length);
             toscad.alignGridPrim(grid, binderHelices);
+            this.stageFp('alignGridPrim', iter, grid, helices.length);
 
             // Resolve 'automatic' once, after the first alignment (detection
             // reads helixId / offset / direction off the aligned grid). Freeze
@@ -1506,6 +1612,7 @@ class ScadnanoExportManager {
             // stays correct even after anglecomb2's mergeHelixInto remaps
             // helixIds and splices the helices array.
             networkMap = toscad.getAngles(grid, helices, latticeTypeSet);
+            this.stageFpRecord('getAngles', iter, this.networkMapFingerprintCanonical(grid, networkMap));
 
             // Snapshot binder nucleotide IDs ONCE. These survive any merge/
             // renumber because nucleotide ids are assigned at creation and
@@ -1585,8 +1692,11 @@ class ScadnanoExportManager {
             // anglecorr2 call.
             networkMap = filterBinderEntries(combResult.networkMap);
 
+            this.stageFp('anglecomb3', iter, grid, helices.length);
+
             const corrResult = toscad.anglecorr2(grid, helices, latticeTypeSet, networkMap);
             networkMap = corrResult.networkMap;
+            this.stageFp('anglecorr2', iter, grid, helices.length);
 
             // ── Phase 2: reintroduce binder helices ──────────────────────────
             // Grid and helices array have stayed self-consistent through the
@@ -1595,11 +1705,18 @@ class ScadnanoExportManager {
             // Run getAngles on the full grid to bring binders back into the
             // network map, then anglecorr2 to resolve their angles.
             networkMap = toscad.getAngles(grid, helices, latticeTypeSet);
+            this.stageFpRecord('getAngles-binders', iter, this.networkMapFingerprintCanonical(grid, networkMap));
 
             const corrResult2 = toscad.anglecorr2(grid, helices, latticeTypeSet, networkMap);
             networkMap = corrResult2.networkMap;
+            this.stageFp('anglecorr2-binders', iter, grid, helices.length);
+            this.stageFpRecord('networkMap-final', iter, this.networkMapFingerprintCanonical(grid, networkMap));
 
             helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeTypeSet);
+            this.stageFpRecord(
+                'calcGlobalPositions', iter,
+                this.helixPosFingerprintCanonical(grid, helixPos, latticeTypeSet)
+            );
 
             // Renumber inside the loop. Each pass' renumber rewrites helix ids
             // on the grid; the next pass' directionAlign2 / alignGridPrim then
@@ -1613,13 +1730,33 @@ class ScadnanoExportManager {
             // Helix 0 seeds calculateGlobalPositions and directionAlign2 on
             // the next iteration; a binder anchor there misroots the whole
             // lattice.
-            const currentBinderHelices = Array.from(deriveBinderHelixSet());
-            const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeTypeSet, currentBinderHelices);
-            const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
-            helices = renumbered.helices;
-            helixPos = renumbered.helixPos;
+            //
+            // DEBUG: renumbering disabled globally to test layout determinism /
+            // stability across iterations. With no remap, helix 0 is whatever it
+            // was coming into the loop, so directionAlign2 / alignGridPrim /
+            // calculateGlobalPositions anchor on the same helix every pass.
+            // const currentBinderHelices = Array.from(deriveBinderHelixSet());
+            // const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeTypeSet, currentBinderHelices);
+            // const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
+            // helices = renumbered.helices;
+            // helixPos = renumbered.helixPos;
 
-            const fp = this.gridFingerprint(grid, helices.length);
+            // Convergence is tested on the LABEL-INVARIANT fingerprint. The
+            // labeled one is logged alongside it: when the two disagree about
+            // whether anything changed, the difference is pure renumbering and
+            // not a real layout change.
+            const fp = this.gridFingerprintCanonical(grid, helices.length);
+            const fpLabeled = this.gridFingerprintLabeled(grid, helices.length);
+            const fpGeom = this.helixPosFingerprintCanonical(grid, helixPos, latticeTypeSet);
+            console.log(
+                `[scadnano] iter=${iter} canonical=${fp === prevFp ? 'SAME' : 'changed'} ` +
+                `labeled=${fpLabeled === prevFpLabeled ? 'SAME' : 'changed'} ` +
+                `geom=${fpGeom === prevFpGeom ? 'SAME' : 'changed'}`
+            );
+            if (ScadnanoExportManager.DEBUG_TIESTATS) toscad.tiestats.report(`iter=${iter}`);
+            prevFpLabeled = fpLabeled;
+            prevFpGeom = fpGeom;
+
             if (fp === prevFp) {
                 console.log(`[scadnano] convergeLayout converged in ${iter} pass${iter === 1 ? '' : 'es'}`);
                 return { helices, grid, helixPos, latticeType: latticeTypeSet, networkMap };
@@ -1641,6 +1778,246 @@ class ScadnanoExportManager {
 
         console.warn(`[scadnano] convergeLayout hit iteration cap ${MAX_ITER}; using last state.`);
         return { helices, grid, helixPos, latticeType: latticeTypeSet ?? 'honeycomb', networkMap };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Label-invariance test harness
+    //
+    //  The property under test: relabeling the input helices must permute the
+    //  output and change nothing else. A relabeling is physically meaningless —
+    //  same nucleotides, same offsets, same directions, same partition — so any
+    //  difference in the canonical (label-free) output is a bug.
+    //
+    //  This deliberately does NOT use the convergence loop as its instrument.
+    //  Each trial is an independent run from the same starting state, so the two
+    //  runs being compared are physically identical by construction and any
+    //  difference is unambiguously label leakage. That breaks the circular
+    //  dependency of "can't fix the tie-breaks without logs, can't get useful
+    //  logs until the loop converges".
+    //
+    //  Console:  window.scadnanoLabelInvarianceTest(8)
+    //            window.scadnanoLabelInvarianceTest(8, 'honeycomb', 12345)
+    //
+    //  Reads: distinctLayouts === 1 means label-invariant on this structure.
+    //  Anything higher is the number of different layouts the SAME structure
+    //  produces depending only on how its helices happened to be numbered.
+    // ─────────────────────────────────────────────────────────────────────
+    public runLabelInvarianceTest(
+        trialsInput?: unknown,
+        gridTypeInput?: unknown,
+        seedInput?: unknown
+    ): {
+        trials: number;
+        distinctLayouts: number;
+        distinctGrids: number;
+        latticeType: ScadnanoGridType | null;
+        labelDecisionsPerTrial: number[];
+        details: Array<{ trial: number; seed: number; gridHash: string; geomHash: string; helixCount: number }>;
+    } {
+        const trials = Math.max(2, Math.min(50, Math.floor(Number(trialsInput)) || 8));
+        const requested: ScadnanoRequestedGridType =
+            (gridTypeInput === 'square' || gridTypeInput === 'honeycomb' || gridTypeInput === 'automatic')
+                ? gridTypeInput
+                : 'automatic';
+        const baseSeed = Number.isFinite(Number(seedInput)) ? (Number(seedInput) >>> 0) : 0xC0FFEE;
+
+        // The harness runs the real pipeline, which writes to the manager's
+        // caches. Snapshot and restore so a test run cannot poison a later export.
+        const saved = {
+            helices: this.currentScadnanoHelices,
+            connections: this.currentScadnanoConnections,
+            layout: this.currentScadnanoLayout,
+            original: this.originalScadnanoHelices,
+            partials: this.currentScadnanoPartials,
+            usedSides: this.currentScadnanoUsedSides
+        };
+        // Let tiestats accumulate across all iterations of one trial instead of
+        // being reset per iteration inside convergeLayout.
+        const savedTiestatsFlag = ScadnanoExportManager.DEBUG_TIESTATS;
+        ScadnanoExportManager.DEBUG_TIESTATS = false;
+
+        type TrialResult = {
+            trial: number;
+            seed: number;
+            perm: number[];
+            gridFp: string;
+            geomFp: string;
+            coords: Map<number, [number, number]>;
+            latticeType: ScadnanoGridType;
+            helixCount: number;
+            labelDecisions: number;
+            trace: Array<{ iter: number; tag: string; hash: string; len: number }>;
+        };
+        const results: TrialResult[] = [];
+        // Detection is resolved on trial 0 and frozen, so lattice choice cannot
+        // vary between trials and confound the comparison.
+        let frozenLattice: ScadnanoRequestedGridType = requested;
+
+        const shortHash = (s: string): string => {
+            let h = 0;
+            for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+            return (h >>> 0).toString(16).padStart(8, '0');
+        };
+
+        try {
+            for (let t = 0; t < trials; t++) {
+                // Fresh start state every trial: re-derive helices from the scene
+                // and rebuild the grid, so nothing carries over from trial t-1.
+                const helices0 = this.calculateScadnanoHelices();
+                this.currentScadnanoHelices = helices0;
+                const { grid, binderHelices } = toscad.setGrid(helices0);
+
+                const seed = (baseSeed + t * 0x9E3779B1) >>> 0;
+                // Trial 0 is the identity permutation: it is the baseline, and it
+                // also proves the pipeline is deterministic at all. If trial 0
+                // ever disagrees with a repeat of trial 0, the nondeterminism is
+                // NOT about labels and must be fixed first.
+                const perm = t === 0
+                    ? toscad.identityHelixPermutation(helices0.length)
+                    : toscad.randomHelixPermutation(helices0.length, toscad.makeRng(seed));
+                const permuted = toscad.permuteHelixLabels(helices0, grid, perm, binderHelices);
+
+                toscad.tiestats.reset();
+                this.stageTrace = [];
+                const res = this.convergeLayout(
+                    permuted.helices, grid, permuted.binderHelices, frozenLattice, false
+                );
+                const trace = this.stageTrace;
+                this.stageTrace = null;
+                if (t === 0) frozenLattice = res.latticeType;
+
+                const coords = toscad.normalizeCanonicalPos(
+                    toscad.canonicalHelixPos(res.grid, res.helixPos),
+                    res.latticeType
+                );
+                const gridFp = toscad.canonicalGridFingerprint(res.grid, res.helices.length);
+                const geomFp = toscad.fingerprintCanonicalPos(coords);
+
+                results.push({
+                    trial: t,
+                    seed: t === 0 ? 0 : seed,
+                    perm,
+                    gridFp,
+                    geomFp,
+                    coords,
+                    latticeType: res.latticeType,
+                    helixCount: res.helices.length,
+                    labelDecisions: toscad.tiestats.totalByLabel(),
+                    trace
+                });
+
+                console.log(
+                    `[label-invariance] trial=${t} ${t === 0 ? '(identity)' : `seed=${seed}`} ` +
+                    `helices=${res.helices.length} grid=${shortHash(gridFp)} geom=${shortHash(geomFp)} ` +
+                    `labelDecisions=${toscad.tiestats.totalByLabel()}`
+                );
+                toscad.tiestats.report(`trial=${t}`);
+            }
+        } finally {
+            this.stageTrace = null;
+            ScadnanoExportManager.DEBUG_TIESTATS = savedTiestatsFlag;
+            this.currentScadnanoHelices = saved.helices;
+            this.currentScadnanoConnections = saved.connections;
+            this.currentScadnanoLayout = saved.layout;
+            this.originalScadnanoHelices = saved.original;
+            this.currentScadnanoPartials = saved.partials;
+            this.currentScadnanoUsedSides = saved.usedSides;
+        }
+
+        const distinctGrids = new Set(results.map(r => r.gridFp)).size;
+        const distinctLayouts = new Set(results.map(r => r.geomFp)).size;
+
+        console.log(
+            `%c[label-invariance] ${trials} trials -> ${distinctLayouts} distinct layout(s), ` +
+            `${distinctGrids} distinct grid(s)`,
+            distinctLayouts === 1 && distinctGrids === 1 ? 'color:#2a2' : 'color:#c22;font-weight:bold'
+        );
+
+        if (distinctLayouts > 1 || distinctGrids > 1) {
+            const base = results[0];
+            const firstBad = results.find(r => r.geomFp !== base.geomFp || r.gridFp !== base.gridFp);
+            if (firstBad) {
+                console.log(
+                    `[label-invariance] first divergence: trial=${firstBad.trial} seed=${firstBad.seed} ` +
+                    `(grid ${firstBad.gridFp === base.gridFp ? 'same' : 'DIFFERENT'}, ` +
+                    `geom ${firstBad.geomFp === base.geomFp ? 'same' : 'DIFFERENT'})`
+                );
+                if (firstBad.helixCount !== base.helixCount) {
+                    console.log(
+                        `[label-invariance] helix COUNT differs: ${base.helixCount} vs ${firstBad.helixCount} ` +
+                        `— merge decisions changed under relabeling, look at anglecomb3 first`
+                    );
+                }
+                // Walk the two stage traces side by side. The first stage whose
+                // canonical hash differs is where label dependence ENTERS the
+                // pipeline; every later difference is downstream fallout.
+                const n = Math.min(base.trace.length, firstBad.trace.length);
+                let firstDivergentStage = -1;
+                for (let i = 0; i < n; i++) {
+                    if (base.trace[i].tag !== firstBad.trace[i].tag ||
+                        base.trace[i].hash !== firstBad.trace[i].hash) {
+                        firstDivergentStage = i;
+                        break;
+                    }
+                }
+                if (firstDivergentStage === -1 && base.trace.length !== firstBad.trace.length) {
+                    firstDivergentStage = n;
+                }
+
+                if (firstDivergentStage >= 0) {
+                    const a = base.trace[firstDivergentStage];
+                    const b = firstBad.trace[firstDivergentStage];
+                    console.log(
+                        `%c[label-invariance] label dependence ENTERS at stage #${firstDivergentStage}: ` +
+                        `iter=${a ? a.iter : '?'} ${a ? a.tag : '(end of trace)'} ` +
+                        `(${a ? a.hash : '-'} vs ${b ? b.hash : '-'})`,
+                        'color:#c22;font-weight:bold'
+                    );
+                    const from = Math.max(0, firstDivergentStage - 3);
+                    console.log(`[label-invariance] stage trace around the divergence:`);
+                    for (let i = from; i < Math.min(n, firstDivergentStage + 3); i++) {
+                        const mark = i === firstDivergentStage ? ' <== FIRST DIFF' : '';
+                        console.log(
+                            `    #${String(i).padStart(3)} iter=${base.trace[i].iter} ` +
+                            `${base.trace[i].tag.padEnd(22)} ${base.trace[i].hash} vs ${firstBad.trace[i].hash}${mark}`
+                        );
+                    }
+                } else if (base.trace.length > 0) {
+                    console.log(
+                        `[label-invariance] stage traces are identical — divergence appeared only in a ` +
+                        `stage that is not fingerprinted. Add a stageFpRecord call to narrow it.`
+                    );
+                }
+
+                const lines = toscad.diffCanonicalPos(base.coords, firstBad.coords, 30);
+                if (lines.length === 0) {
+                    console.log(`[label-invariance] coordinates identical; divergence is in the grid (offsets/directions/partition)`);
+                } else {
+                    console.log(`[label-invariance] helices that moved (key = min nucleotide id):`);
+                    for (const line of lines) console.log(`    ${line}`);
+                }
+                console.log(
+                    `[label-invariance] replay this case with: ` +
+                    `window.scadnanoLabelInvarianceTest(1, '${base.latticeType}', ${firstBad.seed})  ` +
+                    `— and set DEBUG_STAGE_FINGERPRINTS = true to see which stage diverges`
+                );
+            }
+        }
+
+        return {
+            trials,
+            distinctLayouts,
+            distinctGrids,
+            latticeType: results.length ? results[0].latticeType : null,
+            labelDecisionsPerTrial: results.map(r => r.labelDecisions),
+            details: results.map(r => ({
+                trial: r.trial,
+                seed: r.seed,
+                gridHash: shortHash(r.gridFp),
+                geomHash: shortHash(r.geomFp),
+                helixCount: r.helixCount
+            }))
+        };
     }
 
     // Fold an iteration's ordered merge events into "products": for every helix
@@ -2187,6 +2564,10 @@ function registerScadnanoWindowApi(): void {
     window.scadnanoFocusOnHelixToggle = (chkBox: HTMLInputElement) => {
         scadnanoManager.focusOnHelixToggleFromGridView(Boolean(chkBox?.checked));
     };
+
+    // DEBUG: window.scadnanoLabelInvarianceTest(8) — see runLabelInvarianceTest.
+    window.scadnanoLabelInvarianceTest = (trials?: unknown, gridType?: unknown, seed?: unknown) =>
+        scadnanoManager.runLabelInvarianceTest(trials, gridType, seed);
 
     window.scadnanoGridUndo = () => scadnanoManager.undoFromGridView();
     window.scadnanoGridRedo = () => scadnanoManager.redoFromGridView();
