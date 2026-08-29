@@ -1132,6 +1132,7 @@ var helix;
             // ids.length === 0: a binder2 entry whose classifier produced no helix ids (shouldn't happen, but skipped silently).
             // ids.length > 2: currently unreachable.
         });
+        const binderHelices = [];
         const materializeBinderHelix = (segments) => {
             if (!segments.length)
                 return;
@@ -1145,8 +1146,10 @@ var helix;
                     newHelix.push(nt);
                 });
             });
-            if (newHelix.length)
+            if (newHelix.length) {
                 helices.push(newHelix);
+                binderHelices.push(newHelix);
+            }
         };
         binderGroups.forEach(segments => materializeBinderHelix(segments));
         binderPairGroups.forEach(segments => materializeBinderHelix(segments));
@@ -1240,7 +1243,7 @@ var helix;
             lastScraps.push(...remaining);
         }
         // const finalHelices = helices.filter(h => h.length > 0);
-        return { helices, lastScraps, binders, binder2, disconnected, unhandled, usedSides };
+        return { helices, binderHelices, lastScraps, binders, binder2, disconnected, unhandled, usedSides };
     }
     helix_1.generateHelix = generateHelix;
     // One ring to rule them all...
@@ -1251,10 +1254,10 @@ var helix;
         let { partials, unpaired } = findHelixPartials2(inputMap, tolerance);
         let { ssdna, stubs, longssScaffold } = sortUnpaired(unpaired);
         let ssScaffold = longssScaffoldfunc(longssScaffold, stubs);
-        let { helices, lastScraps, binders, binder2, disconnected, unhandled, usedSides } = generateHelix(partials, ssdna, ssScaffold, stubs);
+        let { helices, binderHelices, lastScraps, binders, binder2, disconnected, unhandled, usedSides } = generateHelix(partials, ssdna, ssScaffold, stubs);
         console.log("Helices size:", helices.flat().length);
         console.log("Total elements:", inputMap.size);
-        return { helices, partials, usedSides };
+        return { helices, partials, usedSides, binderHelices };
     }
     helix_1.findHelices = findHelices;
     // Merge two or more helices into the one with the lowest index.

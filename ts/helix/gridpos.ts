@@ -65,8 +65,7 @@ interface LatticePhaseConfig {
         grid: GridMap,
         helices: Nucleotide[][],
         helixId: number,
-        lattice: string,
-        helixKeys?: Map<number, number>
+        lattice: string
     ): Map<number, {
         helixId: number;
         adj_helix: number;
@@ -165,8 +164,7 @@ interface LatticePhaseConfig {
             const neighborA = neighbors[i];
             const groupA = groupedByNeighbor.get(neighborA) ?? [];
 
-            for (let j = 0; j < neighbors.length; j++) {
-                if (i === j) continue;
+            for (let j = i + 1; j < neighbors.length; j++) {
                 const neighborB = neighbors[j];
                 const groupB = groupedByNeighbor.get(neighborB) ?? [];
                 const pairKey = `${neighborA}|${neighborB}`;
@@ -198,20 +196,14 @@ interface LatticePhaseConfig {
             }
         }
 
-        // the mode angle for each pair of neighbors, plus how dominant that mode
-        // was. Purity = modeCount / totalVotes, in (0, 1]: 1.0 means every
-        // crossover pair at this hub agreed on the angle, low values mean the
-        // measurement is contested and the consensus is a coin flip.
+        // the mode angle for each pair of neighbors.
         const pairConsensus = new Map<string, number>();
-        const pairPurity = new Map<string, number>();
         for (const [pairKey, bucket] of pairTallies.entries()) {
             if (!bucket.size) continue;
 
             let modeAngle = 0;
             let modeCount = -1;
-            let totalVotes = 0;
             for (const [angle, count] of bucket.entries()) {
-                totalVotes += count;
                 if (count > modeCount || (count === modeCount && angle < modeAngle)) {
                     modeAngle = angle;
                     modeCount = count;
@@ -219,77 +211,9 @@ interface LatticePhaseConfig {
             }
 
             pairConsensus.set(pairKey, modeAngle);
-            pairPurity.set(pairKey, totalVotes > 0 ? modeCount / totalVotes : 0);
         }
 
-        // ── Label-free choice of angle frame ────────────────────────────────
-        //
-        //  Every angle in this helix's row is expressed relative to one chosen
-        //  neighbour, so that neighbour defines the gauge for the whole row. The
-        //  choice used to be `neighbors[0]`, i.e. the lowest-numbered neighbour —
-        //  a pure array-index artefact. Relabeling picked a different reference,
-        //  rotating every angle in the row by a constant, and since those angles
-        //  are later pushed through snapToLatticeAngle a rotated gauge can snap
-        //  to a DIFFERENT lattice direction. That made getAngles the first stage
-        //  to leak label dependence once directionAlign2 was fixed.
-        //
-        //  Replacement criteria, all physical:
-        //    1. Most crossovers at this hub. The reference's own crossover set is
-        //       what every entry in the row is measured against, so the
-        //       best-sampled neighbour makes the least noisy frame.
-        //    2. Highest mean consensus purity across its pairs. Among equally
-        //       well-connected candidates, prefer the one whose pair angles
-        //       actually agree with themselves.
-        //    3. Smallest content key (min nucleotide id), immutable under
-        //       renumbering, purely to make the result reproducible.
-        const meanPurityVia = (ref: number): number => {
-            let sum = 0;
-            let count = 0;
-            for (const other of neighbors) {
-                if (other === ref) continue;
-                const p = pairPurity.get(`${ref}|${other}`);
-                if (p === undefined) continue;
-                sum += p;
-                count++;
-            }
-            return count > 0 ? sum / count : 0;
-        };
-        const keyOfHelix = (hid: number): number =>
-            helixKeys ? (helixKeys.get(hid) ?? Number.MAX_SAFE_INTEGER) : hid;
-
-        let baseReference = neighbors[0];
-        let bestCrossovers = -1;
-        let bestPurity = -1;
-        let bestKey = Number.MAX_SAFE_INTEGER;
-        let refTies = 0;
-        for (const cand of neighbors) {
-            const crossoverCount = (groupedByNeighbor.get(cand) ?? []).length;
-            const purity = meanPurityVia(cand);
-            const key = keyOfHelix(cand);
-
-            let better: boolean;
-            if (crossoverCount !== bestCrossovers) better = crossoverCount > bestCrossovers;
-            else if (purity !== bestPurity) better = purity > bestPurity;
-            else better = key < bestKey;
-
-            if (crossoverCount === bestCrossovers && purity === bestPurity) refTies++;
-            else if (crossoverCount > bestCrossovers) refTies = 1;
-
-            if (better) {
-                baseReference = cand;
-                bestCrossovers = crossoverCount;
-                bestPurity = purity;
-                bestKey = key;
-            }
-        }
-
-        tiestats.record('getAngleHelix:baseReference', {
-            tie: refTies > 1,
-            byLabel: false,       // resolved by crossover count, purity, then content key
-            detail: refTies > 1
-                ? `hid=${helixId} ref=${baseReference} cx=${bestCrossovers} purity=${bestPurity.toFixed(2)} of[${neighbors.join(',')}]`
-                : undefined
-        });
+        const baseReference = neighbors[0];
         for (const neighbor of neighbors) {
             const angle = neighbor === baseReference
                 ? 0
@@ -406,199 +330,6 @@ interface LatticePhaseConfig {
         }
 
         return counts;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    //  Kruskal maximum-spanning-forest machinery
-    //
-    //  Both tempGlobalPos and calculateGlobalPositions need a spanning tree
-    //  of the helix graph to turn *relative* helix-to-helix angles into
-    //  absolute grid coordinates. Kruskal picks the globally heaviest set of
-    //  independent edges (heaviest = most crossovers = most trustworthy
-    //  angle), instead of a weighted BFS which only ever compares edges that
-    //  happen to be incident on the frontier node it is currently expanding.
-    //
-    //  Kruskal only decides WHICH edges are tree edges. Coordinates still
-    //  have to be laid down parent → child, so each caller roots the
-    //  resulting tree(s) and walks them afterwards.
-    // ─────────────────────────────────────────────────────────────────────
-
-    // Union-Find with union-by-size + path compression.
-    class DisjointSet {
-        private parent = new Map<number, number>();
-        private size = new Map<number, number>();
-
-        add(x: number): void {
-            if (!this.parent.has(x)) {
-                this.parent.set(x, x);
-                this.size.set(x, 1);
-            }
-        }
-
-        find(x: number): number {
-            this.add(x);
-            let root = x;
-            while (this.parent.get(root)! !== root) root = this.parent.get(root)!;
-            let cur = x;
-            while (this.parent.get(cur)! !== cur) {
-                const next = this.parent.get(cur)!;
-                this.parent.set(cur, root);
-                cur = next;
-            }
-            return root;
-        }
-
-        // Returns false when a and b were already in the same component
-        // (i.e. the edge would close a cycle and must be rejected).
-        union(a: number, b: number): boolean {
-            const ra = this.find(a);
-            const rb = this.find(b);
-            if (ra === rb) return false;
-            const sa = this.size.get(ra)!;
-            const sb = this.size.get(rb)!;
-            if (sa < sb) {
-                this.parent.set(ra, rb);
-                this.size.set(rb, sa + sb);
-            } else {
-                this.parent.set(rb, ra);
-                this.size.set(ra, sa + sb);
-            }
-            return true;
-        }
-    }
-
-    export interface SpanningEdge {
-        a: number;
-        b: number;
-        weight: number;
-    }
-
-    export interface SpanningForest {
-        // Undirected tree adjacency: node → accepted tree neighbors, sorted
-        // by descending weight then ascending id.
-        adjacency: Map<number, Array<{ id: number; weight: number }>>;
-        // One representative per connected component: the smallest helix id
-        // in that component. Sorted ascending, so helix 0 is always the
-        // representative (and therefore the layout root) of its component.
-        roots: number[];
-        treeEdges: SpanningEdge[];
-    }
-
-    export function kruskalMaxSpanningForest(
-        nodes: Iterable<number>,
-        edges: SpanningEdge[]
-    ): SpanningForest {
-        const dsu = new DisjointSet();
-        const allNodes: number[] = [];
-        for (const n of nodes) {
-            dsu.add(n);
-            allNodes.push(n);
-        }
-        allNodes.sort((a, b) => a - b);
-
-        // Heaviest edge first. Ties broken by endpoint ids so the forest is
-        // reproducible across runs (the layout pipeline iterates to a
-        // fingerprint fixed point and needs deterministic input).
-        const sorted = edges.slice().sort((e1, e2) => {
-            if (e2.weight !== e1.weight) return e2.weight - e1.weight;
-            const lo1 = Math.min(e1.a, e1.b);
-            const lo2 = Math.min(e2.a, e2.b);
-            if (lo1 !== lo2) return lo1 - lo2;
-            return Math.max(e1.a, e1.b) - Math.max(e2.a, e2.b);
-        });
-
-        const adjacency = new Map<number, Array<{ id: number; weight: number }>>();
-        const link = (u: number, v: number, w: number) => {
-            let list = adjacency.get(u);
-            if (!list) { list = []; adjacency.set(u, list); }
-            list.push({ id: v, weight: w });
-        };
-
-        // DEBUG(label-invariance): how many edges share each weight. A weight
-        // group larger than 1 means the sort order inside it — and therefore
-        // which of those edges survives a cycle — was decided by helix ids.
-        const weightGroupSize = new Map<number, number>();
-        for (const e of sorted) {
-            if (e.a === e.b) continue;
-            weightGroupSize.set(e.weight, (weightGroupSize.get(e.weight) ?? 0) + 1);
-        }
-
-        const treeEdges: SpanningEdge[] = [];
-        for (const edge of sorted) {
-            if (edge.a === edge.b) continue;
-            const inTieGroup = (weightGroupSize.get(edge.weight) ?? 0) > 1;
-            const accepted = dsu.union(edge.a, edge.b);
-            // Every edge inside a tie group owes its position in `sorted` to the
-            // id-based comparator, so its accept/reject outcome is label-decided.
-            tiestats.record('kruskal:edge-order', {
-                tie: inTieGroup,
-                byLabel: inTieGroup,
-                detail: inTieGroup && !accepted ? `rej ${edge.a}-${edge.b} w=${edge.weight}` : undefined
-            });
-            if (!accepted) {
-                // Cycle rejection inside a tie group is the consequential case:
-                // an equally-supported edge was dropped purely on id order.
-                tiestats.record('kruskal:cycle-reject-in-tie', {
-                    tie: inTieGroup,
-                    byLabel: inTieGroup,
-                    detail: `${edge.a}-${edge.b} w=${edge.weight}`
-                });
-                continue;
-            }
-            treeEdges.push(edge);
-            link(edge.a, edge.b, edge.weight);
-            link(edge.b, edge.a, edge.weight);
-        }
-
-        const repByComponent = new Map<number, number>();
-        const componentSize = new Map<number, number>();
-        for (const n of allNodes) {
-            const root = dsu.find(n);
-            if (!repByComponent.has(root)) repByComponent.set(root, n);
-            componentSize.set(root, (componentSize.get(root) ?? 0) + 1);
-        }
-        const roots = Array.from(repByComponent.values()).sort((a, b) => a - b);
-        // DEBUG(label-invariance): the representative is "smallest helix id in
-        // the component", which is a label. Callers use it as the layout origin,
-        // so relabeling moves the coordinate frame even with perfect tie-breaks.
-        for (const [root, rep] of repByComponent.entries()) {
-            const size = componentSize.get(root) ?? 1;
-            tiestats.record('kruskal:root-choice', {
-                tie: size > 1,
-                byLabel: size > 1,
-                detail: `rep=${rep} size=${size}`
-            });
-        }
-
-        for (const list of adjacency.values()) {
-            list.sort((x, y) => y.weight - x.weight || x.id - y.id);
-        }
-
-        return { adjacency, roots, treeEdges };
-    }
-
-    // Collapses a directed angle map into undirected weighted edges, one per
-    // helix pair, ready for kruskalMaxSpanningForest.
-    function collectSpanningEdges(
-        networkMap: Map<number, Map<number, number>>,
-        getWeight: (a: number, b: number) => number
-    ): SpanningEdge[] {
-        const edges: SpanningEdge[] = [];
-        const seen = new Set<string>();
-
-        for (const [from, row] of networkMap.entries()) {
-            for (const to of row.keys()) {
-                if (from === to) continue;
-                const lo = Math.min(from, to);
-                const hi = Math.max(from, to);
-                const key = `${lo}|${hi}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                edges.push({ a: lo, b: hi, weight: Math.max(getWeight(lo, hi), getWeight(hi, lo)) });
-            }
-        }
-
-        return edges;
     }
 
     // TODO: Theres a todo inside, go look for it.
@@ -723,13 +454,9 @@ interface LatticePhaseConfig {
             helixIds.add(mark.helixId);
         }
 
-        // Computed once and shared with every getAngleHelix call: the label-free
-        // identity of each helix, used as the final tie-break for the angle frame.
-        const helixKeys = helixKeyMap(grid);
-
         const sortedhids = Array.from(helixIds).sort((a, b) => a - b);
         for (const currentHID of sortedhids) {
-            const helixAngles = getAngleHelix(grid, helices, currentHID, lattice, helixKeys);
+            const helixAngles = getAngleHelix(grid, helices, currentHID, lattice);
             const angleMap = new Map<number, number>();
 
             for (const [adjHelixId, angleInfo] of helixAngles.entries()) {
@@ -740,42 +467,6 @@ interface LatticePhaseConfig {
         }
 
         return networkMap;
-    }
-
-
-    // Removes binder helices from a networkMap. Binder identity is tracked
-    // by nucleotide IDs (immutable across merges/renumbering) so the filter
-    // stays correct even after anglecomb3 remaps helixIds.
-    export function filterBindersFromNetworkMap(
-        networkMap: Map<number, Map<number, number>>,
-        grid: GridMap,
-        helices: Nucleotide[][],
-        binderHelices: number[]
-    ): Map<number, Map<number, number>> {
-        const binderNtIds = new Set<number>();
-        for (const bHid of binderHelices) {
-            const slot = helices[bHid];
-            if (Array.isArray(slot)) {
-                for (const nt of slot) binderNtIds.add(nt.id);
-            }
-        }
-
-        // Re-derive binder helixIds from the grid (stays correct after remaps)
-        const binderHids = new Set<number>();
-        for (const [ntId, m] of grid.entries()) {
-            if (binderNtIds.has(ntId)) binderHids.add(m.helixId);
-        }
-
-        const out = new Map<number, Map<number, number>>();
-        for (const [hid, neighbors] of networkMap.entries()) {
-            if (binderHids.has(hid)) continue;
-            const filtered = new Map<number, number>();
-            for (const [nid, angle] of neighbors.entries()) {
-                if (!binderHids.has(nid)) filtered.set(nid, angle);
-            }
-            out.set(hid, filtered);
-        }
-        return out;
     }
 
     // Convert the local output from getAngles to global coordinates, including those which can have mismatches
@@ -894,38 +585,17 @@ interface LatticePhaseConfig {
             return normalizeAngle(desiredBack - inferredBackLocal);
         };
 
-        // Local angle for a tree edge as seen FROM parent. Kruskal hands back
-        // undirected edges, so an edge may only be recorded in the child→parent
-        // direction in networkMap; in that case flip it by 180°.
-        const localAngleFor = (parentId: number, childId: number): number => {
-            const forward = networkMap.get(parentId)?.get(childId);
-            if (typeof forward === 'number') return normalizeAngle(forward);
-            const backward = networkMap.get(childId)?.get(parentId);
-            if (typeof backward === 'number') return normalizeAngle(backward + 180);
-            return 0;
-        };
-
-        // Kruskal: maximum spanning forest over the crossover-weighted helix
-        // graph. Edge weight = number of backbone crossovers shared by the two
-        // helices, so the tree keeps the best-supported angles and drops the
-        // weak ones (which then show up as non-canonical predictions below).
-        const forest = kruskalMaxSpanningForest(
-            allHelixIds,
-            collectSpanningEdges(networkMap, getWeight)
-        );
-
-        // Initialize these. "Canonical" means derived from the Kruskal spanning
-        // tree. Thus, non-canonical means the helix is not where the MST placed it.
+        // Initialize these. In this case, "canonical" means BFS-derived. Thus, non-canonical mean that the helix is not where the MST placed it.
         const canonicalCoord = new Map<number, [number, number]>();
         const canonicalOrient = new Map<number, number>();
         // if there are 2 totally disconnected structures, they will be placed at (ROOT_SEPARATION,0). It is just a safegaurd.
         // The first root is always placed at (0,0)
         const ROOT_SEPARATION = 1000;
+        const sortedHelixIds = [...allHelixIds].sort((a, b) => a - b);
         let nextRootCol = ROOT_SEPARATION;
 
-        // Walk each Kruskal component from its root (smallest helix id, so
-        // helix 0 roots its own component) to lay coordinates down parent→child.
-        for (const rootId of forest.roots) {
+        // BFS from every root
+        for (const rootId of sortedHelixIds) {
             if (canonicalCoord.has(rootId)) continue;
 
             const rootCol = rootId === 0 ? 0 : nextRootCol;
@@ -937,7 +607,7 @@ interface LatticePhaseConfig {
             }
 
             const queue: number[] = [rootId];
-            // manual index instead of Array.shift() for performance
+            // BFS manual instead of Array.shift() for performance
             let qi = 0;
             while (qi < queue.length) {
                 const parentId = queue[qi++];
@@ -945,34 +615,41 @@ interface LatticePhaseConfig {
                 const parentOrient = canonicalOrient.get(parentId)!;
                 const [pCol, pRow] = parentCoord;
 
-                // Tree children only; adjacency is already sorted by descending
-                // weight then ascending id.
-                const children = (forest.adjacency.get(parentId) ?? [])
-                    .filter(({ id }) => id !== parentId && !canonicalCoord.has(id));
+                const edges = networkMap.get(parentId);
+                if (!edges || edges.size === 0) continue;
 
-                for (const { id: childId } of children) {
-                    if (canonicalCoord.has(childId)) continue;
+                // Sort candidates by crossover weight, then by ascending id.
+                const candidates = [...edges.entries()]
+                    .filter(([nid]) => nid !== parentId && !canonicalCoord.has(nid))
+                    .map(([nid, localAngle]) => ({
+                        nid,
+                        localAngle: normalizeAngle(localAngle),
+                        weight: getWeight(parentId, nid)
+                    }))
+                    .sort((a, b) => b.weight - a.weight || a.nid - b.nid);
 
-                    const localAngle = localAngleFor(parentId, childId);
-                    const predictedGlobal = normalizeAngle(localAngle + parentOrient);
+                for (const c of candidates) {
+                    if (canonicalCoord.has(c.nid)) continue;
+
+                    const predictedGlobal = normalizeAngle(c.localAngle + parentOrient);
                     const snapped = snapToLatticeAngle(predictedGlobal);
                     const step = getStep(pCol, pRow, snapped);
                     const childCol = pCol + step.dCol;
                     const childRow = pRow + step.dRow;
 
-                    canonicalCoord.set(childId, [childCol, childRow]);
+                    canonicalCoord.set(c.nid, [childCol, childRow]);
                     canonicalOrient.set(
-                        childId,
+                        c.nid,
                         deriveChildOrientation(
-                            parentId, childId,
+                            parentId, c.nid,
                             pCol, pRow, childCol, childRow,
-                            localAngle, snapped
+                            c.localAngle, snapped
                         )
                     );
-                    queue.push(childId);
+                    queue.push(c.nid);
                 }
             }
-            // End of canonical MST walk for this root
+            // End of canonical BFS for this root
         }
 
         // record every edge's prediction for the far endpoint
@@ -2950,7 +2627,6 @@ interface LatticePhaseConfig {
      * No-op unless at least one merged helix has 2+ origin-groups, so it is
      * safe to call unconditionally on every pipeline iteration.
      */
-    // TODO: Get rid of this function entirely; directionAlign2 should be able to handle these eventually.
     export function alignMergedGroups(
         grid: GridMap,
         mergedGroups: Map<number, number[][]> | undefined,
@@ -3129,11 +2805,8 @@ interface LatticePhaseConfig {
     /**
      * Calculates absolute grid coordinates from local helix-to-helix angles.
      *
-     * Phase 1: Build a maximum spanning forest with Kruskal (heaviest
-     * crossover edges first, union-find rejecting cycles), then walk the
-     * component containing helix 0 from helix 0 to lay down lattice
-     * coordinates. Children beyond the lattice's degree (3 honeycomb /
-     * 4 square) and children whose target cell is taken are deferred.
+     * Phase 1: Build a strict lattice spanning tree from helix 0 using
+     * weighted BFS (top-3 children only at each node).
      *
      * Phase 2: Place deferred/artefact helices in nearest open coordinates
      * around their parent once the phase-1 core is locked.
@@ -3271,28 +2944,6 @@ interface LatticePhaseConfig {
             for (const to of row.keys()) allHelixIds.add(to);
         }
 
-        // Kruskal maximum spanning forest over the crossover-weighted helix
-        // graph. This replaces the old weighted BFS: instead of greedily
-        // expanding whichever frontier node came off the queue first, the
-        // heaviest edges in the WHOLE graph are committed first, so the
-        // spanning tree that carries the angle propagation is the
-        // best-supported one available. Non-tree edges are cycle-closing
-        // edges and carry no positional information.
-        const spanningForest = kruskalMaxSpanningForest(
-            allHelixIds,
-            collectSpanningEdges(networkMap, getWeight)
-        );
-
-        // Local angle as seen FROM parent. Tree edges are undirected, so fall
-        // back to the reverse entry flipped by 180° when needed.
-        const localAngleFor = (parentId: number, childId: number): number => {
-            const forward = networkMap.get(parentId)?.get(childId);
-            if (typeof forward === 'number') return normalizeAngle(forward);
-            const backward = networkMap.get(childId)?.get(parentId);
-            if (typeof backward === 'number') return normalizeAngle(backward + 180);
-            return 0;
-        };
-
         const positions = new Map<number, GridCoord>();
         const occupied = new Map<string, number>();
         const globalRotationOffsets = new Map<number, number>();
@@ -3387,48 +3038,24 @@ interface LatticePhaseConfig {
             const parentCoord = positions.get(node.helixId);
             if (!parentCoord) return;
 
-            // Children come from the Kruskal spanning tree, not from the raw
-            // adjacency: cycle-closing edges were already rejected by
-            // union-find, so nothing here can contradict an existing placement.
-            const treeNeighbors = spanningForest.adjacency.get(node.helixId);
-            if (!treeNeighbors || treeNeighbors.length === 0) return;
+            const localEdges = networkMap.get(node.helixId);
+            if (!localEdges || localEdges.size === 0) return;
 
-            const candidates = treeNeighbors
-                .filter(({ id }) => id !== node.helixId && !positions.has(id))
-                .map(({ id, weight }) => ({
-                    neighborId: id,
-                    localAngle: localAngleFor(node.helixId, id),
-                    weight
+            const candidates = Array.from(localEdges.entries())
+                .filter(([neighborId]) => neighborId !== node.helixId && !positions.has(neighborId))
+                .map(([neighborId, localAngle]) => ({
+                    neighborId,
+                    localAngle: normalizeAngle(localAngle),
+                    weight: getWeight(node.helixId, neighborId)
                 }))
                 .sort((a, b) => {
                     if (b.weight !== a.weight) return b.weight - a.weight;
                     return a.neighborId - b.neighborId;
                 });
 
-            // DEBUG(label-invariance): candidates were sorted by weight then by
-            // ascending neighborId, and only the first `maxChildrenPerNode` get a
-            // real lattice cell. When the weight at the cut boundary equals the
-            // weight just past it, WHICH helix gets exiled to findNearestOpen was
-            // decided by helix id — a label directly choosing geometry.
-            if (candidates.length > maxChildrenPerNode) {
-                const lastIn = candidates[maxChildrenPerNode - 1];
-                const firstOut = candidates[maxChildrenPerNode];
-                const boundaryTie = lastIn.weight === firstOut.weight;
-                tiestats.record('layout:child-cut', {
-                    tie: boundaryTie,
-                    byLabel: boundaryTie,
-                    detail: `parent=${node.helixId} in=${lastIn.neighborId} out=${firstOut.neighborId} w=${lastIn.weight}`
-                });
-            }
-
             const selected = candidates.slice(0, maxChildrenPerNode);
             const overflow = candidates.slice(maxChildrenPerNode);
             for (const item of overflow) {
-                tiestats.record('layout:defer-degree-overflow', {
-                    tie: true,
-                    byLabel: true,
-                    detail: `parent=${node.helixId} child=${item.neighborId} w=${item.weight}`
-                });
                 enqueueDeferred(node.helixId, item.neighborId, node.offset);
             }
 
@@ -3448,14 +3075,6 @@ interface LatticePhaseConfig {
                 const occupant = occupied.get(cellKey);
 
                 if (occupant !== undefined && occupant !== item.neighborId) {
-                    // DEBUG(label-invariance): whoever reached this cell first
-                    // wins it, and arrival order follows the BFS queue, which
-                    // follows helix ids.
-                    tiestats.record('layout:defer-cell-occupied', {
-                        tie: true,
-                        byLabel: true,
-                        detail: `parent=${node.helixId} child=${item.neighborId} cell=${cellKey} heldBy=${occupant}`
-                    });
                     enqueueDeferred(node.helixId, item.neighborId, node.offset);
                     continue;
                 }
@@ -3477,8 +3096,7 @@ interface LatticePhaseConfig {
             }
         };
 
-        // Phase 1: walk the Kruskal spanning tree of helix 0's component,
-        // rooted at helix 0, laying coordinates down parent → child.
+        // Phase 1: strict weighted BFS spanning tree from helix 0.
         positions.set(0, { col: 0, row: 0 });
         occupied.set('0,0', 0);
         globalRotationOffsets.set(0, 0);
@@ -3682,20 +3300,6 @@ interface LatticePhaseConfig {
                 : '')
         );
 
-        // DEBUG(label-invariance): the anchor itself is geometric (lowest row,
-        // then lowest col), which IS label-free — but only if no two helices
-        // share a cell. Count exact (row,col) ties so we know.
-        if (posOrder.length > 1) {
-            const p0 = helixPos.get(nodes[posOrder[0]]) ?? [0, 0];
-            const p1 = helixPos.get(nodes[posOrder[1]]) ?? [0, 0];
-            const anchorTie = p0[0] === p1[0] && p0[1] === p1[1];
-            tiestats.record('renumberGNN:anchor', {
-                tie: anchorTie,
-                byLabel: anchorTie,
-                detail: anchorTie ? `cell=(${p0[0]},${p0[1]}) between ${nodes[posOrder[0]]} and ${nodes[posOrder[1]]}` : undefined
-            });
-        }
-
         const dist = (a: number, b: number): number => {
             const [ax, ay] = world[a];
             const [bx, by] = world[b];
@@ -3759,7 +3363,6 @@ interface LatticePhaseConfig {
         visited[startNode] = true;
         let current = startNode;
 
-        const GNN_TIE_EPS = 1e-9;
         for (let step = 1; step < n; step++) {
             let bestV = -1;
             let bestCost = Infinity;
@@ -3769,31 +3372,6 @@ interface LatticePhaseConfig {
                 if (c < bestCost) { bestCost = c; bestV = v; }
             }
             if (bestV === -1) break;  // disconnected universe; shouldn't happen
-
-            // DEBUG(label-invariance): `c < bestCost` is strict, so among equal
-            // costs the FIRST v in scan order wins — and scan order is ascending
-            // helix id. Costs are jump penalty + Euclidean distance over integer
-            // lattice cells, so exact ties are routine (all lattice neighbours at
-            // distance 1 tie exactly). This is the self-referential loop: the tour
-            // that decides the new numbering is itself decided by the old numbering.
-            {
-                let tied = 0;
-                const tiedIds: number[] = [];
-                for (let v = 0; v < n; v++) {
-                    if (visited[v]) continue;
-                    if (Math.abs(edgeCost(current, v) - bestCost) <= GNN_TIE_EPS) {
-                        tied++;
-                        if (tiedIds.length < 4) tiedIds.push(nodes[v]);
-                    }
-                }
-                tiestats.record('renumberGNN:greedy-step', {
-                    tie: tied > 1,
-                    byLabel: tied > 1,
-                    detail: tied > 1
-                        ? `step=${step} from=${nodes[current]} chose=${nodes[bestV]} tied=[${tiedIds.join(',')}]`
-                        : undefined
-                });
-            }
             visited[bestV] = true;
             path.push(bestV);
             current = bestV;
@@ -3833,265 +3411,5 @@ interface LatticePhaseConfig {
         );
 
         return { order, remap, stats };
-    }
-
-
-    // Label-free fingerprint of the grid.
-    //
-    // Compare with the labeled fingerprint used by convergeLayout, which emits
-    //     ntId:helixId:offset:direction
-    // per nucleotide. That embeds helixId literally, so a pure relabeling
-    // changes the string even though nothing physical moved.
-    //
-    // This version emits the same information with helixId replaced by the
-    // content-derived key, and with helices ordered by key rather than by id:
-    //     h=<count>|K<key>{ntId:offset:dir,...}|K<key>{...}
-    //
-    // What it still distinguishes (correctly):
-    //   - a different PARTITION of nucleotides into helices (keys change),
-    //   - any offset change, any direction flip.
-    // What it now ignores (correctly):
-    //   - which integer each helix happens to be called.
-    export function canonicalGridFingerprint(grid: GridMap, helicesLength: number): string {
-        const groups = new Map<number, Array<{ ntId: number; offset: number; dir: string }>>();
-        for (const [ntId, mark] of grid.entries()) {
-            let arr = groups.get(mark.helixId);
-            if (!arr) { arr = []; groups.set(mark.helixId, arr); }
-            arr.push({ ntId, offset: mark.offset, dir: mark.direction === 'forward' ? 'f' : 'b' });
-        }
-
-        const keyed: Array<{ key: number; body: string }> = [];
-        for (const [, arr] of groups.entries()) {
-            arr.sort((a, b) => a.ntId - b.ntId);
-            const key = arr[0].ntId;          // == min nt id, array is sorted
-            keyed.push({
-                key,
-                body: arr.map(e => `${e.ntId}:${e.offset}:${e.dir}`).join(',')
-            });
-        }
-        keyed.sort((a, b) => a.key - b.key);
-
-        const parts: string[] = [`h=${helicesLength}`, `n=${keyed.length}`];
-        for (const g of keyed) parts.push(`K${g.key}{${g.body}}`);
-        return parts.join('|');
-    }
-
-    // helixPos re-keyed by content key instead of helixId. Helices missing from
-    // the grid (no marks) are dropped, since they have no stable identity.
-    export function canonicalHelixPos(
-        grid: GridMap,
-        helixPos: Map<number, [number, number]>
-    ): Map<number, [number, number]> {
-        const keys = helixKeyMap(grid);
-        const out = new Map<number, [number, number]>();
-        for (const [helixId, coord] of helixPos.entries()) {
-            const key = keys.get(helixId);
-            if (key === undefined) continue;
-            out.set(key, [coord[0], coord[1]]);
-        }
-        return out;
-    }
-
-    // Translate a canonical coordinate map so its bounding box starts at the
-    // origin, which makes two layouts that differ only by a rigid shift compare
-    // equal. On honeycomb the (col+row) parity selects which step table applies,
-    // so the shift is nudged to keep the sum even and preserve parity.
-    export function normalizeCanonicalPos(
-        coords: Map<number, [number, number]>,
-        lattice: string = 'honeycomb'
-    ): Map<number, [number, number]> {
-        if (coords.size === 0) return new Map();
-
-        let minCol = Infinity;
-        let minRow = Infinity;
-        for (const [, [col, row]] of coords.entries()) {
-            if (col < minCol) minCol = col;
-            if (row < minRow) minRow = row;
-        }
-
-        let dCol = minCol;
-        const dRow = minRow;
-        if (resolveLatticeKind(lattice) === 'honeycomb' && (((dCol + dRow) % 2) + 2) % 2 === 1) {
-            dCol -= 1;   // keep the shift parity-even so honeycomb steps stay valid
-        }
-
-        const out = new Map<number, [number, number]>();
-        for (const [key, [col, row]] of coords.entries()) {
-            out.set(key, [col - dCol, row - dRow]);
-        }
-        return out;
-    }
-
-    export function fingerprintCanonicalPos(coords: Map<number, [number, number]>): string {
-        const keys = Array.from(coords.keys()).sort((a, b) => a - b);
-        return keys.map(k => {
-            const c = coords.get(k)!;
-            return `K${k}@${c[0]},${c[1]}`;
-        }).join('|');
-    }
-
-    // Human-readable diff of two canonical coordinate maps. Used to report WHICH
-    // helices moved between two runs instead of just that the hash changed.
-    export function diffCanonicalPos(
-        a: Map<number, [number, number]>,
-        b: Map<number, [number, number]>,
-        limit: number = 20
-    ): string[] {
-        const lines: string[] = [];
-        const allKeys = new Set<number>([...a.keys(), ...b.keys()]);
-        for (const key of Array.from(allKeys).sort((x, y) => x - y)) {
-            const ca = a.get(key);
-            const cb = b.get(key);
-            if (!ca) { lines.push(`K${key}: absent -> (${cb[0]},${cb[1]})`); continue; }
-            if (!cb) { lines.push(`K${key}: (${ca[0]},${ca[1]}) -> absent`); continue; }
-            if (ca[0] !== cb[0] || ca[1] !== cb[1]) {
-                lines.push(`K${key}: (${ca[0]},${ca[1]}) -> (${cb[0]},${cb[1]})`);
-            }
-            if (lines.length >= limit) { lines.push(`... (truncated at ${limit})`); break; }
-        }
-        return lines;
-    }
-
-    // ── 2. Relabeling probe ──────────────────────────────────────────────
-
-    // mulberry32. Seeded so a failing permutation can be replayed exactly by
-    // re-running with the logged seed; Math.random cannot be replayed.
-    export function makeRng(seed: number): () => number {
-        let a = seed >>> 0;
-        return () => {
-            a = (a + 0x6D2B79F5) >>> 0;
-            let t = a;
-            t = Math.imul(t ^ (t >>> 15), t | 1);
-            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-        };
-    }
-
-    // Fisher-Yates over [0, n). Returns perm where perm[oldId] = newId.
-    export function randomHelixPermutation(n: number, rng: () => number): number[] {
-        const perm = Array.from({ length: n }, (_, i) => i);
-        for (let i = n - 1; i > 0; i--) {
-            const j = Math.floor(rng() * (i + 1));
-            const tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp;
-        }
-        return perm;
-    }
-
-    export function identityHelixPermutation(n: number): number[] {
-        return Array.from({ length: n }, (_, i) => i);
-    }
-
-    // Apply a pure relabeling: helix that was `oldId` becomes `perm[oldId]`.
-    // Nothing physical changes — same nucleotides, same offsets, same
-    // directions, same partition. Only the integer names move.
-    //
-    // Mutates `grid` in place (helixId only) and returns a fresh helices array.
-    // A correct pipeline must produce a layout that differs from the
-    // un-permuted run by exactly this permutation and nothing else.
-    export function permuteHelixLabels(
-        helices: Nucleotide[][],
-        grid: GridMap,
-        perm: number[],
-        binderHelices?: number[]
-    ): { helices: Nucleotide[][]; binderHelices: number[] } {
-        const n = helices.length;
-        if (perm.length !== n) {
-            console.warn(`[permuteHelixLabels] perm length ${perm.length} != helices.length ${n}; skipping.`);
-            return { helices, binderHelices: binderHelices ?? [] };
-        }
-
-        const newHelices: Nucleotide[][] = new Array(n);
-        for (let oldId = 0; oldId < n; oldId++) {
-            newHelices[perm[oldId]] = helices[oldId];
-        }
-
-        let unmapped = 0;
-        for (const mark of grid.values()) {
-            const newId = perm[mark.helixId];
-            if (newId === undefined) { unmapped++; continue; }
-            mark.helixId = newId;
-        }
-        if (unmapped > 0) {
-            console.warn(`[permuteHelixLabels] ${unmapped} grid mark(s) had a helixId outside [0,${n}); left untouched.`);
-        }
-
-        const newBinders = (binderHelices ?? [])
-            .map(hid => (perm[hid] !== undefined ? perm[hid] : hid))
-            .sort((a, b) => a - b);
-
-        return { helices: newHelices, binderHelices: newBinders };
-    }
-
-    // ── 3. Tie-break counters ────────────────────────────────────────────
-    //
-    //  Every site that currently resolves a decision by comparing helix IDs is
-    //  a place where a relabeling can change the output. These counters make
-    //  that exposure measurable per structure in a SINGLE pass — no need to run
-    //  the convergence loop and watch it fail.
-    //
-    //  Read the report as: `byLabel` is the number of decisions in that site
-    //  whose outcome was determined by helix ID values. Target is zero.
-    export namespace tiestats {
-        type SiteStat = {
-            decisions: number;      // times this site made a choice
-            ties: number;           // times the primary criterion was inconclusive
-            byLabel: number;        // times the outcome was settled by helix id
-            examples: string[];     // first few, for eyeballing
-        };
-
-        const sites = new Map<string, SiteStat>();
-        const MAX_EXAMPLES = 8;
-
-        export let enabled = true;
-
-        export function reset(): void {
-            sites.clear();
-        }
-
-        export function record(
-            site: string,
-            opts: { tie?: boolean; byLabel?: boolean; detail?: string }
-        ): void {
-            if (!enabled) return;
-            let s = sites.get(site);
-            if (!s) { s = { decisions: 0, ties: 0, byLabel: 0, examples: [] }; sites.set(site, s); }
-            s.decisions++;
-            if (opts.tie) s.ties++;
-            if (opts.byLabel) {
-                s.byLabel++;
-                if (opts.detail && s.examples.length < MAX_EXAMPLES) s.examples.push(opts.detail);
-            }
-        }
-
-        export function totalByLabel(): number {
-            let total = 0;
-            for (const s of sites.values()) total += s.byLabel;
-            return total;
-        }
-
-        export function snapshot(): Array<{ site: string; decisions: number; ties: number; byLabel: number }> {
-            return Array.from(sites.entries())
-                .map(([site, s]) => ({ site, decisions: s.decisions, ties: s.ties, byLabel: s.byLabel }))
-                .sort((a, b) => b.byLabel - a.byLabel || a.site.localeCompare(b.site));
-        }
-
-        export function report(tag: string = ''): void {
-            const rows = snapshot();
-            if (rows.length === 0) {
-                console.log(`[tiestats${tag ? ' ' + tag : ''}] no decisions recorded`);
-                return;
-            }
-            console.log(
-                `[tiestats${tag ? ' ' + tag : ''}] label-decided total = ${totalByLabel()}`
-            );
-            for (const r of rows) {
-                const s = sites.get(r.site)!;
-                console.log(
-                    `  ${r.site.padEnd(34)} decisions=${String(r.decisions).padStart(5)} ` +
-                    `ties=${String(r.ties).padStart(5)} byLabel=${String(r.byLabel).padStart(5)}` +
-                    (s.examples.length ? `  e.g. ${s.examples.join(' ; ')}` : '')
-                );
-            }
-        }
     }
 }

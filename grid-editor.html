@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Grid Editor — Standalone</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; height: 100vh; overflow: hidden; }
+
+/* ── Left panel ─────────────────────────────────────────────────────────── */
+#sidebar {
+    width: 320px; min-width: 280px; background: #16213e; padding: 16px;
+    display: flex; flex-direction: column; gap: 12px; overflow-y: auto;
+    border-right: 1px solid #0f3460;
+}
+#sidebar h2 { font-size: 15px; color: #e94560; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+#sidebar label { font-size: 12px; color: #a0a0c0; display: block; margin-bottom: 4px; }
+#sidebar select, #sidebar textarea, #sidebar button, #sidebar input[type="number"] {
+    width: 100%; padding: 6px 8px; border: 1px solid #0f3460; border-radius: 4px;
+    background: #1a1a2e; color: #e0e0e0; font-size: 13px; font-family: inherit;
+}
+#sidebar textarea { resize: vertical; min-height: 80px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11px; }
+#sidebar button {
+    cursor: pointer; background: #0f3460; border-color: #e94560; color: #e94560;
+    font-weight: 600; transition: background 0.15s, color 0.15s;
+}
+#sidebar button:hover { background: #e94560; color: #fff; }
+#sidebar button.danger { border-color: #ff6b6b; color: #ff6b6b; }
+#sidebar button.danger:hover { background: #ff6b6b; color: #fff; }
+#sidebar button:disabled { opacity: 0.4; cursor: default; }
+.mode-btn { display: inline-block; width: auto; padding: 4px 10px; margin: 2px; font-size: 11px; }
+.mode-btn.active { background: #e94560; color: #fff; border-color: #e94560; }
+.info-box {
+    background: #1a1a2e; border: 1px solid #0f3460; border-radius: 4px;
+    padding: 8px; font-size: 11px; line-height: 1.5; color: #a0a0c0;
+    max-height: 120px; overflow-y: auto;
+}
+.info-box strong { color: #e0e0e0; }
+.section { border-bottom: 1px solid #0f3460; padding-bottom: 10px; }
+#statusBar {
+    position: fixed; bottom: 0; left: 0; right: 0; height: 24px;
+    background: #0f3460; color: #a0a0c0; font-size: 11px;
+    display: flex; align-items: center; padding: 0 12px; z-index: 10;
+}
+
+/* ── Canvas ─────────────────────────────────────────────────────────────── */
+#canvasWrap { flex: 1; position: relative; }
+canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+</style>
+</head>
+<body>
+
+<!-- ── Sidebar ──────────────────────────────────────────────────────────── -->
+<div id="sidebar">
+    <div class="section">
+        <h2>Grid Type</h2>
+        <select id="gridTypeSelect">
+            <option value="honeycomb" selected>Honeycomb</option>
+            <option value="square">Square</option>
+        </select>
+    </div>
+
+    <div class="section">
+        <h2>Mode</h2>
+        <div>
+            <button class="mode-btn active" data-mode="add" id="modeAddBtn">Add / Select</button>
+            <button class="mode-btn" data-mode="connect" id="modeConnectBtn">Connect</button>
+        </div>
+        <div class="info-box" style="margin-top:6px">
+            <strong>Add/Select:</strong> Click empty cell → add node (33→66→100%). Click node → select. Drag selected → move.<br>
+            <strong>Connect:</strong> Click two nodes to draw a connection line.
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Selection</h2>
+        <div class="info-box" id="selectionInfo">No node selected.</div>
+        <button id="deleteNodeBtn" class="danger" disabled>Delete Selected Node</button>
+        <button id="clearSelectionBtn" disabled>Clear Selection</button>
+    </div>
+
+    <div class="section">
+        <h2>Connections</h2>
+        <div class="info-box" id="connectionInfo">No connections.</div>
+        <button id="clearConnectionsBtn" class="danger" disabled>Clear All Connections</button>
+    </div>
+
+    <div class="section">
+        <h2>Network Map (JSON)</h2>
+        <label>Paste a network map to load nodes &amp; connections:</label>
+        <textarea id="networkMapInput" placeholder='{"0":{"1":0},"1":{"0":180,"2":120},"2":{"1":240}}'></textarea>
+        <button id="loadNetworkMapBtn">Load Network Map</button>
+        <button id="exportNetworkMapBtn">Export Current as Network Map</button>
+    </div>
+
+    <div class="section">
+        <h2>Helix Positions (JSON)</h2>
+        <label>Paste <code>Map&lt;id, [col, row]&gt;</code> to load positions:</label>
+        <textarea id="helixPosInput" placeholder='[[0,[2,1]],[1,[3,1]],[2,[3,2]]]'></textarea>
+        <button id="loadHelixPosBtn">Load Helix Positions</button>
+    </div>
+
+    <div class="section">
+        <h2>Actions</h2>
+        <button id="fitViewBtn">Fit View</button>
+        <button id="clearAllBtn" class="danger">Clear All</button>
+    </div>
+</div>
+
+<!-- ── Canvas ───────────────────────────────────────────────────────────── -->
+<div id="canvasWrap">
+    <canvas id="gridCanvas"></canvas>
+</div>
+
+<div id="statusBar">Ready — click a grid point to add a node.</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+//  Standalone Grid Editor
+// ═══════════════════════════════════════════════════════════════════════════
+
+(() => {
+'use strict';
+
+// ── Grid geometry constants (matching scadnano_gridview.ts) ────────────────
+const COL_SPACING = 2.5;
+const ROW_SPACING = 1.5 * COL_SPACING;          // 3.75
+const HONEYCOMB_X_SCALE = 0.866025 * COL_SPACING; // ≈2.165
+const HONEYCOMB_PARITY_OFFSET = COL_SPACING / 4;  // 0.625
+const SQUARE_X_SCALE = COL_SPACING;                // 2.5
+const SQUARE_ROW_SPACING = COL_SPACING;            // 2.5
+
+const NODE_RADIUS = 0.55;
+const GHOST_RADIUS = 0.14;
+const DOT_COLOR = '#ffd400';
+const DOT_SELECTED_COLOR = '#ff4da6';
+const DOT_SELECTED_GLOW = 'rgba(255,77,166,0.35)';
+const CONNECTION_COLOR = '#8c8c8c';
+const GHOST_COLOR = 'rgba(255,212,0,0.18)';
+const BG_COLOR = '#fafafa';
+const LABEL_COLOR = '#555';
+
+// ── State ─────────────────────────────────────────────────────────────────
+let gridType = 'honeycomb';
+let mode = 'add'; // 'add' | 'connect'
+let nextNodeId = 0;
+
+// nodes: Map<"col,row", { col, row, id, opacity (0|1|2|3) }>
+const nodes = new Map();
+// connections: Array<{ from: id, to: id }>
+const connections = [];
+
+let selectedKey = null;
+let connectFirstKey = null;
+
+// Drag state
+let isDragging = false;
+let dragKey = null;
+let dragStartCell = null;
+let hasDragged = false;
+
+// Pan / zoom state
+let isPanning = false;
+let panLastX = 0, panLastY = 0;
+
+// Camera (world‐space bounds of the viewport)
+let camLeft = -20, camRight = 20, camTop = 15, camBottom = -15;
+
+// ── DOM refs ──────────────────────────────────────────────────────────────
+const canvas = document.getElementById('gridCanvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('statusBar');
+const selInfoEl = document.getElementById('selectionInfo');
+const connInfoEl = document.getElementById('connectionInfo');
+const deleteBtn = document.getElementById('deleteNodeBtn');
+const clearSelBtn = document.getElementById('clearSelectionBtn');
+const clearConnBtn = document.getElementById('clearConnectionsBtn');
+
+// ── Coordinate helpers ────────────────────────────────────────────────────
+function honeycombToWorld(col, row) {
+    const isEvenParity = (((col + row) & 1) === 0);
+    const offset = isEvenParity ? -HONEYCOMB_PARITY_OFFSET : HONEYCOMB_PARITY_OFFSET;
+    return { x: col * HONEYCOMB_X_SCALE, y: -(row * ROW_SPACING + offset) };
+}
+
+function squareToWorld(col, row) {
+    return { x: col * SQUARE_X_SCALE, y: -(row * SQUARE_ROW_SPACING) };
+}
+
+function gridToWorld(col, row) {
+    return gridType === 'square' ? squareToWorld(col, row) : honeycombToWorld(col, row);
+}
+
+function honeycombNearestCell(wx, wy) {
+    const colEst = Math.round(wx / HONEYCOMB_X_SCALE);
+    const rowEst = Math.round(-wy / ROW_SPACING);
+    let best = null, bestDist = Infinity;
+    for (let dc = -2; dc <= 2; dc++) {
+        for (let dr = -2; dr <= 2; dr++) {
+            const c = colEst + dc, r = rowEst + dr;
+            const p = honeycombToWorld(c, r);
+            const d = Math.hypot(p.x - wx, p.y - wy);
+            if (d < bestDist) { bestDist = d; best = { col: c, row: r }; }
+        }
+    }
+    return bestDist <= COL_SPACING * 0.8 ? best : null;
+}
+
+function squareNearestCell(wx, wy) {
+    return {
+        col: Math.round(wx / SQUARE_X_SCALE),
+        row: Math.round(-wy / SQUARE_ROW_SPACING)
+    };
+}
+
+function nearestCell(wx, wy) {
+    return gridType === 'square' ? squareNearestCell(wx, wy) : honeycombNearestCell(wx, wy);
+}
+
+function key(col, row) { return col + ',' + row; }
+
+// ── Screen ↔ world transforms ─────────────────────────────────────────────
+function screenToWorld(sx, sy) {
+    const w = canvas.width, h = canvas.height;
+    const nx = sx / w, ny = sy / h;
+    return {
+        x: camLeft + nx * (camRight - camLeft),
+        y: camTop + ny * (camBottom - camTop)
+    };
+}
+
+function worldToScreen(wx, wy) {
+    const w = canvas.width, h = canvas.height;
+    return {
+        sx: (wx - camLeft) / (camRight - camLeft) * w,
+        sy: (wy - camTop) / (camBottom - camTop) * h
+    };
+}
+
+// ── Drawing ───────────────────────────────────────────────────────────────
+function draw() {
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = BG_COLOR;
+    ctx.fillRect(0, 0, w, h);
+
+    // Compute visible grid bounds
+    const worldLeft = camLeft, worldRight = camRight;
+    const worldTop = camTop, worldBottom = camBottom;
+
+    let colMin, colMax, rowMin, rowMax;
+    if (gridType === 'square') {
+        colMin = Math.floor(worldLeft / SQUARE_X_SCALE) - 1;
+        colMax = Math.ceil(worldRight / SQUARE_X_SCALE) + 1;
+        rowMin = Math.floor(-worldTop / SQUARE_ROW_SPACING) - 1;
+        rowMax = Math.ceil(-worldBottom / SQUARE_ROW_SPACING) + 1;
+    } else {
+        colMin = Math.floor(worldLeft / HONEYCOMB_X_SCALE) - 1;
+        colMax = Math.ceil(worldRight / HONEYCOMB_X_SCALE) + 1;
+        rowMin = Math.floor(-worldTop / ROW_SPACING) - 1;
+        rowMax = Math.ceil(-worldBottom / ROW_SPACING) + 1;
+    }
+
+    // Draw ghost grid dots
+    const ghostPx = GHOST_RADIUS * (w / (camRight - camLeft));
+    for (let col = colMin; col <= colMax; col++) {
+        for (let row = rowMin; row <= rowMax; row++) {
+            const p = gridToWorld(col, row);
+            const s = worldToScreen(p.x, p.y);
+            ctx.beginPath();
+            ctx.arc(s.sx, s.sy, Math.max(ghostPx, 1.5), 0, Math.PI * 2);
+            ctx.fillStyle = GHOST_COLOR;
+            ctx.fill();
+        }
+    }
+
+    // Draw connections
+    const idToPos = new Map();
+    nodes.forEach(n => { idToPos.set(n.id, gridToWorld(n.col, n.row)); });
+    ctx.strokeStyle = CONNECTION_COLOR;
+    ctx.lineWidth = 2;
+    connections.forEach(conn => {
+        const a = idToPos.get(conn.from), b = idToPos.get(conn.to);
+        if (!a || !b) return;
+        const sa = worldToScreen(a.x, a.y), sb = worldToScreen(b.x, b.y);
+        ctx.beginPath();
+        ctx.moveTo(sa.sx, sa.sy);
+        ctx.lineTo(sb.sx, sb.sy);
+        ctx.stroke();
+    });
+
+    // Draw nodes
+    const nodePx = NODE_RADIUS * (w / (camRight - camLeft));
+    nodes.forEach((n, k) => {
+        const p = gridToWorld(n.col, n.row);
+        const s = worldToScreen(p.x, p.y);
+        const opacity = [0, 0.33, 0.66, 1.0][n.opacity];
+
+        // Glow for selected
+        if (k === selectedKey) {
+            ctx.beginPath();
+            ctx.arc(s.sx, s.sy, nodePx + 6, 0, Math.PI * 2);
+            ctx.fillStyle = DOT_SELECTED_GLOW;
+            ctx.fill();
+        }
+
+        // Node circle
+        ctx.beginPath();
+        ctx.arc(s.sx, s.sy, nodePx, 0, Math.PI * 2);
+        ctx.fillStyle = k === selectedKey
+            ? `rgba(255,77,166,${opacity})`
+            : `rgba(255,212,0,${opacity})`;
+        ctx.fill();
+        ctx.strokeStyle = k === selectedKey ? DOT_SELECTED_COLOR : '#333';
+        ctx.lineWidth = k === selectedKey ? 2.5 : 1;
+        ctx.stroke();
+
+        // Label
+        ctx.fillStyle = LABEL_COLOR;
+        ctx.font = `bold ${Math.max(10, nodePx * 0.55)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(n.id), s.sx, s.sy);
+    });
+
+    // Connect-mode: highlight first pick
+    if (mode === 'connect' && connectFirstKey !== null) {
+        const n = nodes.get(connectFirstKey);
+        if (n) {
+            const p = gridToWorld(n.col, n.row);
+            const s = worldToScreen(p.x, p.y);
+            ctx.beginPath();
+            ctx.arc(s.sx, s.sy, nodePx + 10, 0, Math.PI * 2);
+            ctx.strokeStyle = '#00e5ff';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 4]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+    }
+}
+
+// ── UI updates ────────────────────────────────────────────────────────────
+function updateSelectionInfo() {
+    if (selectedKey === null) {
+        selInfoEl.innerHTML = 'No node selected.';
+        deleteBtn.disabled = true;
+        clearSelBtn.disabled = true;
+        return;
+    }
+    const n = nodes.get(selectedKey);
+    if (!n) { selectedKey = null; updateSelectionInfo(); return; }
+    const opacityPct = [0, 33, 66, 100][n.opacity];
+    selInfoEl.innerHTML = `<strong>Node ${n.id}</strong><br>Grid: (${n.col}, ${n.row})<br>Opacity: ${opacityPct}%`;
+    deleteBtn.disabled = false;
+    clearSelBtn.disabled = false;
+}
+
+function updateConnectionInfo() {
+    if (connections.length === 0) {
+        connInfoEl.innerHTML = 'No connections.';
+        clearConnBtn.disabled = true;
+        return;
+    }
+    connInfoEl.innerHTML = connections.map(c => `${c.from} ↔ ${c.to}`).join('<br>');
+    clearConnBtn.disabled = false;
+}
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+// ── Node operations ───────────────────────────────────────────────────────
+function addNode(col, row) {
+    const k = key(col, row);
+    let n = nodes.get(k);
+    if (n) {
+        // Already exists — bump opacity
+        if (n.opacity < 3) n.opacity++;
+        updateSelectionInfo();
+        draw();
+        return;
+    }
+    // Find a free id
+    const usedIds = new Set();
+    nodes.forEach(v => usedIds.add(v.id));
+    while (usedIds.has(nextNodeId)) nextNodeId++;
+    const id = nextNodeId++;
+    nodes.set(k, { col, row, id, opacity: 1 });
+    setStatus(`Added node ${id} at (${col}, ${row}) — 33%`);
+    draw();
+}
+
+function deleteNode(k) {
+    const n = nodes.get(k);
+    if (!n) return;
+    // Remove connections involving this node
+    for (let i = connections.length - 1; i >= 0; i--) {
+        if (connections[i].from === n.id || connections[i].to === n.id) {
+            connections.splice(i, 1);
+        }
+    }
+    nodes.delete(k);
+    if (selectedKey === k) selectedKey = null;
+    if (connectFirstKey === k) connectFirstKey = null;
+    setStatus(`Deleted node ${n.id}`);
+    updateSelectionInfo();
+    updateConnectionInfo();
+    draw();
+}
+
+function moveNode(fromKey, toCol, toRow) {
+    const toK = key(toCol, toRow);
+    if (fromKey === toK) return fromKey;
+    if (nodes.has(toK)) return fromKey; // occupied
+    const n = nodes.get(fromKey);
+    if (!n) return fromKey;
+    n.col = toCol;
+    n.row = toRow;
+    nodes.delete(fromKey);
+    nodes.set(toK, n);
+    if (selectedKey === fromKey) selectedKey = toK;
+    if (connectFirstKey === fromKey) connectFirstKey = toK;
+    setStatus(`Moved node ${n.id} to (${toCol}, ${toRow})`);
+    updateSelectionInfo();
+    draw();
+    return toK;
+}
+
+// ── Mouse events ──────────────────────────────────────────────────────────
+function getMousePos(e) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+        sx: (e.clientX - rect.left) * (canvas.width / rect.width),
+        sy: (e.clientY - rect.top) * (canvas.height / rect.height)
+    };
+}
+
+canvas.addEventListener('mousedown', e => {
+    const { sx, sy } = getMousePos(e);
+    const w = screenToWorld(sx, sy);
+
+    // Middle or right → pan
+    if (e.button === 1 || e.button === 2) {
+        isPanning = true;
+        panLastX = e.clientX;
+        panLastY = e.clientY;
+        e.preventDefault();
+        return;
+    }
+
+    if (e.button !== 0) return;
+
+    const cell = nearestCell(w.x, w.y);
+    if (!cell) return;
+    const k = key(cell.col, cell.row);
+
+    if (mode === 'add') {
+        if (nodes.has(k)) {
+            // Click on existing node → select + start drag
+            selectedKey = k;
+            dragKey = k;
+            dragStartCell = { col: cell.col, row: cell.row };
+            hasDragged = false;
+            updateSelectionInfo();
+            draw();
+            e.preventDefault();
+        }
+        // Click on empty cell is handled in mouseup (to distinguish from drag/pan)
+    } else if (mode === 'connect') {
+        if (!nodes.has(k)) return;
+        if (connectFirstKey === null) {
+            connectFirstKey = k;
+            const n = nodes.get(k);
+            setStatus(`Connect: selected node ${n.id} — now click a second node.`);
+            draw();
+        } else {
+            if (k === connectFirstKey) {
+                setStatus('Connect: cannot connect a node to itself.');
+                connectFirstKey = null;
+                draw();
+                return;
+            }
+            const a = nodes.get(connectFirstKey), b = nodes.get(k);
+            // Check duplicate
+            const dup = connections.some(c =>
+                (c.from === a.id && c.to === b.id) || (c.from === b.id && c.to === a.id)
+            );
+            if (dup) {
+                setStatus(`Connection ${a.id} ↔ ${b.id} already exists.`);
+            } else {
+                connections.push({ from: a.id, to: b.id });
+                setStatus(`Connected ${a.id} ↔ ${b.id}`);
+            }
+            connectFirstKey = null;
+            updateConnectionInfo();
+            draw();
+        }
+    }
+});
+
+canvas.addEventListener('mousemove', e => {
+    const { sx, sy } = getMousePos(e);
+    const w = screenToWorld(sx, sy);
+
+    if (isPanning) {
+        const dx = e.clientX - panLastX;
+        const dy = e.clientY - panLastY;
+        panLastX = e.clientX;
+        panLastY = e.clientY;
+        const scaleX = (camRight - camLeft) / canvas.clientWidth;
+        const scaleY = (camBottom - camTop) / canvas.clientHeight;
+        camLeft -= dx * scaleX;
+        camRight -= dx * scaleX;
+        camTop += dy * scaleY;
+        camBottom += dy * scaleY;
+        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) hasDragged = true;
+        draw();
+        return;
+    }
+
+    if (dragKey !== null) {
+        const cell = nearestCell(w.x, w.y);
+        if (cell) {
+            const newKey = moveNode(dragKey, cell.col, cell.row);
+            if (newKey !== dragKey) {
+                dragKey = newKey;
+                hasDragged = true;
+            }
+        }
+    }
+});
+
+window.addEventListener('mouseup', e => {
+    if (isPanning) {
+        isPanning = false;
+        setTimeout(() => { hasDragged = false; }, 0);
+        return;
+    }
+
+    if (dragKey !== null) {
+        dragKey = null;
+        dragStartCell = null;
+        setTimeout(() => { hasDragged = false; }, 0);
+        return;
+    }
+
+    // Left-click on empty cell in add mode → add node
+    if (e.button === 0 && mode === 'add' && !hasDragged) {
+        const { sx, sy } = getMousePos(e);
+        const w = screenToWorld(sx, sy);
+        const cell = nearestCell(w.x, w.y);
+        if (cell && !nodes.has(key(cell.col, cell.row))) {
+            addNode(cell.col, cell.row);
+        }
+    }
+});
+
+// ── Zoom ──────────────────────────────────────────────────────────────────
+canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+    const { sx, sy } = getMousePos(e);
+    const w = screenToWorld(sx, sy);
+
+    camLeft   = (camLeft   - w.x) * factor + w.x;
+    camRight  = (camRight  - w.x) * factor + w.x;
+    camTop    = (camTop    - w.y) * factor + w.y;
+    camBottom = (camBottom - w.y) * factor + w.y;
+    draw();
+}, { passive: false });
+
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// ── Resize ────────────────────────────────────────────────────────────────
+function resize() {
+    const wrap = document.getElementById('canvasWrap');
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = wrap.clientWidth * dpr;
+    canvas.height = wrap.clientHeight * dpr;
+    // Maintain aspect ratio of camera
+    const aspect = canvas.width / canvas.height;
+    const halfH = (camTop - camBottom) / 2;
+    const cx = (camLeft + camRight) / 2;
+    camLeft = cx - halfH * aspect;
+    camRight = cx + halfH * aspect;
+    draw();
+}
+window.addEventListener('resize', resize);
+
+// ── Sidebar controls ──────────────────────────────────────────────────────
+document.getElementById('gridTypeSelect').addEventListener('change', e => {
+    gridType = e.target.value;
+    setStatus(`Grid type: ${gridType}`);
+    draw();
+});
+
+// Mode buttons
+document.querySelectorAll('.mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        mode = btn.dataset.mode;
+        document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        connectFirstKey = null;
+        setStatus(mode === 'connect' ? 'Connect mode — click first node.' : 'Add/Select mode.');
+        draw();
+    });
+});
+
+deleteBtn.addEventListener('click', () => {
+    if (selectedKey !== null) deleteNode(selectedKey);
+});
+
+clearSelBtn.addEventListener('click', () => {
+    selectedKey = null;
+    connectFirstKey = null;
+    updateSelectionInfo();
+    draw();
+});
+
+clearConnBtn.addEventListener('click', () => {
+    connections.length = 0;
+    updateConnectionInfo();
+    setStatus('Cleared all connections.');
+    draw();
+});
+
+document.getElementById('clearAllBtn').addEventListener('click', () => {
+    nodes.clear();
+    connections.length = 0;
+    selectedKey = null;
+    connectFirstKey = null;
+    nextNodeId = 0;
+    updateSelectionInfo();
+    updateConnectionInfo();
+    setStatus('Cleared all nodes and connections.');
+    draw();
+});
+
+document.getElementById('fitViewBtn').addEventListener('click', () => {
+    if (nodes.size === 0) return;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    nodes.forEach(n => {
+        const p = gridToWorld(n.col, n.row);
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    });
+    const pad = COL_SPACING * 3;
+    camLeft = minX - pad; camRight = maxX + pad;
+    camTop = maxY + pad; camBottom = minY - pad;
+    resize();
+    setStatus('Fitted view to nodes.');
+});
+
+// ── Network Map import / export ───────────────────────────────────────────
+document.getElementById('loadNetworkMapBtn').addEventListener('click', () => {
+    const raw = document.getElementById('networkMapInput').value.trim();
+    if (!raw) { setStatus('Paste a network map JSON first.'); return; }
+    let obj;
+    try { obj = JSON.parse(raw); } catch (err) {
+        setStatus('Invalid JSON: ' + err.message);
+        return;
+    }
+    // obj is { "fromId": { "toId": angle, ... }, ... }
+    // Collect all unique ids
+    const allIds = new Set();
+    for (const from in obj) {
+        allIds.add(Number(from));
+        for (const to in obj[from]) allIds.add(Number(to));
+    }
+
+    // Clear existing
+    nodes.clear();
+    connections.length = 0;
+    selectedKey = null;
+    connectFirstKey = null;
+    nextNodeId = 0;
+
+    // Place nodes in a simple layout: BFS from smallest id
+    const sorted = [...allIds].sort((a, b) => a - b);
+    const placed = new Map(); // id → { col, row }
+    const queue = [sorted[0]];
+    placed.set(sorted[0], { col: 0, row: 0 });
+
+    // Build adjacency from the network map
+    const adj = new Map();
+    for (const from in obj) {
+        const fid = Number(from);
+        if (!adj.has(fid)) adj.set(fid, new Set());
+        for (const to in obj[from]) {
+            const tid = Number(to);
+            adj.get(fid).add(tid);
+            if (!adj.has(tid)) adj.set(tid, new Set());
+            adj.get(tid).add(fid);
+        }
+    }
+
+    // BFS placement
+    let qi = 0;
+    while (qi < queue.length) {
+        const curId = queue[qi++];
+        const curPos = placed.get(curId);
+        const neighbors = adj.get(curId) || new Set();
+        let dirIdx = 0;
+        const directions = gridType === 'square'
+            ? [[1,0],[0,1],[-1,0],[0,-1]]
+            : [[1,0],[0,1],[-1,0],[0,-1],[1,-1],[-1,1]]; // honeycomb neighbors
+        for (const nid of neighbors) {
+            if (placed.has(nid)) continue;
+            // Find next free direction
+            let placed_child = false;
+            for (let attempt = 0; attempt < directions.length; attempt++) {
+                const [dc, dr] = directions[(dirIdx + attempt) % directions.length];
+                const nc = curPos.col + dc, nr = curPos.row + dr;
+                const nk = key(nc, nr);
+                if (!nodes.has(nk) && !placed.has(nid)) {
+                    placed.set(nid, { col: nc, row: nr });
+                    placed_child = true;
+                    dirIdx = (dirIdx + attempt + 1) % directions.length;
+                    break;
+                }
+            }
+            if (placed_child) queue.push(nid);
+        }
+    }
+
+    // Place any unplaced orphans in a row
+    let orphanCol = 0;
+    for (const id of sorted) {
+        if (!placed.has(id)) {
+            while (nodes.has(key(orphanCol, -2))) orphanCol++;
+            placed.set(id, { col: orphanCol, row: -2 });
+            orphanCol++;
+        }
+    }
+
+    // Create nodes
+    for (const id of sorted) {
+        const pos = placed.get(id);
+        const k = key(pos.col, pos.row);
+        nodes.set(k, { col: pos.col, row: pos.row, id, opacity: 3 });
+        if (id >= nextNodeId) nextNodeId = id + 1;
+    }
+
+    // Create connections (deduplicated)
+    const connSet = new Set();
+    for (const from in obj) {
+        const fid = Number(from);
+        for (const to in obj[from]) {
+            const tid = Number(to);
+            const pairKey = Math.min(fid, tid) + '-' + Math.max(fid, tid);
+            if (!connSet.has(pairKey)) {
+                connSet.add(pairKey);
+                connections.push({ from: fid, to: tid });
+            }
+        }
+    }
+
+    updateSelectionInfo();
+    updateConnectionInfo();
+    document.getElementById('fitViewBtn').click();
+    setStatus(`Loaded network map: ${sorted.length} nodes, ${connections.length} connections.`);
+});
+
+document.getElementById('exportNetworkMapBtn').addEventListener('click', () => {
+    // Build a network map from current connections
+    // Format: { "fromId": { "toId": 0 }, ... }  (angle=0 as placeholder)
+    const map = {};
+    nodes.forEach(n => { map[n.id] = {}; });
+    connections.forEach(c => {
+        if (!map[c.from]) map[c.from] = {};
+        if (!map[c.to]) map[c.to] = {};
+        map[c.from][c.to] = 0;
+        map[c.to][c.from] = 0;
+    });
+    const json = JSON.stringify(map, null, 2);
+    document.getElementById('networkMapInput').value = json;
+    setStatus('Exported network map to textarea.');
+});
+
+// ── Helix Positions import ────────────────────────────────────────────────
+document.getElementById('loadHelixPosBtn').addEventListener('click', () => {
+    const raw = document.getElementById('helixPosInput').value.trim();
+    if (!raw) { setStatus('Paste helix positions JSON first.'); return; }
+    let arr;
+    try { arr = JSON.parse(raw); } catch (err) {
+        setStatus('Invalid JSON: ' + err.message);
+        return;
+    }
+    // Expected: [[id, [col, row]], ...] or { "id": [col, row], ... }
+    nodes.clear();
+    connections.length = 0;
+    selectedKey = null;
+    connectFirstKey = null;
+    nextNodeId = 0;
+
+    const entries = Array.isArray(arr) ? arr : Object.entries(arr).map(([k, v]) => [Number(k), v]);
+    for (const [id, pos] of entries) {
+        const [col, row] = pos;
+        const k = key(col, row);
+        nodes.set(k, { col, row, id: Number(id), opacity: 3 });
+        if (Number(id) >= nextNodeId) nextNodeId = Number(id) + 1;
+    }
+
+    updateSelectionInfo();
+    updateConnectionInfo();
+    document.getElementById('fitViewBtn').click();
+    setStatus(`Loaded ${entries.length} helix positions.`);
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────
+resize();
+setStatus('Ready — click a grid point to add a node.');
+
+})();
+</script>
+</body>
+</html>

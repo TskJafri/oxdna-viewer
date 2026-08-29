@@ -1471,7 +1471,9 @@ class ScadnanoExportManager {
             networkMap = toscad.getAngles(grid, helices, latticeType);
             helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
 
-        const DEBUG_DISABLE_RENUMBER = false;
+        // DEBUG: renumbering disabled globally to test layout determinism /
+        // stability across iterations.
+        const DEBUG_DISABLE_RENUMBER = true;
             if (!DEBUG_DISABLE_RENUMBER) {
                 const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType, binderHelices);
                 const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
@@ -1772,7 +1774,9 @@ class ScadnanoExportManager {
                 `[${roots.join(',')}] ` +
                 `cols=[${rootCols.map(([c, r]) => `(${c},${r})`).join(' ')}]`
             );
-            const DEBUG_DISABLE_RENUMBER = false;
+            // DEBUG: renumbering disabled globally to test layout determinism /
+            // stability across iterations.
+            const DEBUG_DISABLE_RENUMBER = true;
             if (!DEBUG_DISABLE_RENUMBER) {
                 const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeTypeSet, currentBinderHelices);
                 const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);

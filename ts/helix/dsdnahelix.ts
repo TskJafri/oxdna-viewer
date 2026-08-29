@@ -1216,6 +1216,7 @@ namespace helix {
 		// ids.length > 2: currently unreachable.
 		});
 
+		const binderHelices: Nucleotide[][] = [];
 		const materializeBinderHelix = (segments: Nucleotide[][]) => {
 			if (!segments.length) return;
 			const seen = new Set<number>();
@@ -1227,7 +1228,10 @@ namespace helix {
 					newHelix.push(nt);
 				});
 			});
-			if (newHelix.length) helices.push(newHelix);
+			if (newHelix.length) {
+				helices.push(newHelix);
+				binderHelices.push(newHelix);
+			}
 		};
 
 		binderGroups.forEach(segments => materializeBinderHelix(segments));
@@ -1331,7 +1335,7 @@ namespace helix {
 		}
 
 		// const finalHelices = helices.filter(h => h.length > 0);
-		return { helices, lastScraps, binders, binder2, disconnected, unhandled, usedSides };
+		return { helices, binderHelices, lastScraps, binders, binder2, disconnected, unhandled, usedSides };
 	}
 
 	// One ring to rule them all...
@@ -1342,10 +1346,10 @@ namespace helix {
 		let { partials, unpaired } = findHelixPartials2(inputMap, tolerance);
 		let { ssdna, stubs, longssScaffold } = sortUnpaired(unpaired);
 		let ssScaffold = longssScaffoldfunc(longssScaffold, stubs);
-		let { helices, lastScraps, binders, binder2, disconnected, unhandled, usedSides } = generateHelix(partials, ssdna, ssScaffold, stubs);
+		let { helices, binderHelices, lastScraps, binders, binder2, disconnected, unhandled, usedSides } = generateHelix(partials, ssdna, ssScaffold, stubs);
 		console.log("Helices size:", helices.flat().length);
 		console.log("Total elements:", inputMap.size);
-		return { helices, partials, usedSides };
+		return { helices, partials, usedSides , binderHelices };
 	}
 
 	// THE FOLLOWING PIECES ARE SIMPLY HELPER FUNCTIONS FOR OTHER PURPOSES. THEY ARE HERE SIMPLY BECAUSE THEY MUTATE THE helices[][] LIST SPECIFICALLY.
