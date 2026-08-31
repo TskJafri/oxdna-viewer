@@ -797,7 +797,13 @@ document.getElementById('loadHelixPosBtn').addEventListener('click', () => {
     for (const [id, pos] of entries) {
         const [col, row] = pos;
         const k = key(col, row);
-        nodes.set(k, { col, row, id: Number(id), opacity: 3 });
+        const existing = nodes.get(k);
+        if (existing) {
+            // Overlap: bump opacity by 1 (each helix adds 0.33), cap at 3
+            if (existing.opacity < 3) existing.opacity++;
+        } else {
+            nodes.set(k, { col, row, id: Number(id), opacity: 1 });
+        }
         if (Number(id) >= nextNodeId) nextNodeId = Number(id) + 1;
     }
 

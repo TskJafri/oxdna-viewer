@@ -44,6 +44,7 @@
     "./ts/helix/scadnano_gridview.ts",
     "./ts/helix/ssrna.ts",
     "ts/helix/conversion.ts",
+    "./ts/helix/kruskals.ts",
     "./ts/helix/gridpos.ts",
     "./ts/helix/trials.ts",
     "./ts/model/aminoAcid.ts",
