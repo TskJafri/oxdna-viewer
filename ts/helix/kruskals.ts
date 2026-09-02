@@ -546,6 +546,28 @@ namespace toscad {
         );
     }
 
+    // Resolve Kruskal's overlaps by using the findNearestPos()
+    export function posCorr5(
+        kr: ReturnType<typeof kruskals>,
+        helices: Nucleotide[][]
+    ): Map<number, [number, number]> {
+        const pos = new Map<number, [number, number]>();
+        const occupied = new Set<string>();
+        for (const [h, p] of kr.positions) { pos.set(h, [p[0], p[1]]); occupied.add(`${p[0]},${p[1]}`); }
+
+        const size = (h: number) => (helices[h] ?? []).length;
+        for (const ov of kr.overlaps) {
+            // Biggest stays put (ties -> lowest id); everyone else relocates.
+            const [, ...movers] = [...ov.helices].sort((x, y) => size(y) - size(x) || x - y);
+            for (const h of movers) {
+                const p = findNearestOpenPos(ov.cell, occupied);
+                pos.set(h, p);
+                occupied.add(`${p[0]},${p[1]}`);
+            }
+        }
+        return pos;
+    }
+
     interface AxisMergeRecord {
         keepHelix: number;
         mergedHelix: number;

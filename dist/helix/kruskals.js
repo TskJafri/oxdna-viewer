@@ -553,6 +553,27 @@ var toscad;
         return out.sort((p, q) => p.cellOccupancy - q.cellOccupancy || p.a - q.a || p.b - q.b);
     }
     toscad.overlapPairs = overlapPairs;
+    // Resolve Kruskal's overlaps by using the findNearestPos()
+    function posCorr5(kr, helices) {
+        const pos = new Map();
+        const occupied = new Set();
+        for (const [h, p] of kr.positions) {
+            pos.set(h, [p[0], p[1]]);
+            occupied.add(`${p[0]},${p[1]}`);
+        }
+        const size = (h) => (helices[h] ?? []).length;
+        for (const ov of kr.overlaps) {
+            // Biggest stays put (ties -> lowest id); everyone else relocates.
+            const [, ...movers] = [...ov.helices].sort((x, y) => size(y) - size(x) || x - y);
+            for (const h of movers) {
+                const p = toscad.findNearestOpenPos(ov.cell, occupied);
+                pos.set(h, p);
+                occupied.add(`${p[0]},${p[1]}`);
+            }
+        }
+        return pos;
+    }
+    toscad.posCorr5 = posCorr5;
     function axisMerge(grid, helices, partials, usedSides, lattice = 'honeycomb', opts = {}) {
         // Currently, hashAxisOverlap is 100% trusted. enforceGates = true allows the code to reject a merge through the gates, even if hashAxisOverlap allows it.
         const ENFORCE = opts.enforceGates ?? false;
