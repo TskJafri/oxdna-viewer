@@ -89,7 +89,8 @@ namespace toscad {
         grid: GridMap,
         lattice: string = 'honeycomb',
         init?: Map<number, number>,
-        maxSweeps: number = 50
+        maxSweeps: number = 50,
+        paritySeed?: Map<number, 0 | 1>
     ) {
         const lat = resolveLatticeKind(lattice);
         const dirs = latticeDirs(lat);
@@ -98,11 +99,24 @@ namespace toscad {
         const opposite = (dir: number, parity: 0 | 1) => oppositeDir(dir, parity, lat);
 
         // parity based evaluation for honeycomb (a->b is not 180º rotated from b->a; it is rotated either 120º or 240º).
+        //
+        // The 2-coloring is only determined up to a GLOBAL FLIP per component, so seeding every
+        // component at 0 picks the absolute parity arbitrarily -- a structure that should come out
+        // odd-even-odd can just as easily come out even-odd-even. When the caller has pinned helices
+        // at known cells, `paritySeed` fixes that choice, and it has to happen HERE: the compat
+        // tables below call opposite(dir, pa), which differs by parity, so flipping labels after the
+        // vote would invalidate the entire solve.
+        //
+        // Seeded helices are visited first so their component is colored outward from them.
         const parity = new Map<number, 0 | 1>();
         const oddEdges: Array<[number, number]> = [];
-        for (const seed of [...networkMap.keys()].sort((a, b) => a - b)) {
+        const seedOrder = [
+            ...[...(paritySeed?.keys() ?? [])].filter(h => networkMap.has(h)).sort((a, b) => a - b),
+            ...[...networkMap.keys()].sort((a, b) => a - b)
+        ];
+        for (const seed of seedOrder) {
             if (parity.has(seed)) continue;
-            parity.set(seed, 0);
+            parity.set(seed, paritySeed?.get(seed) ?? 0);
             const queue = [seed];
             for (let qi = 0; qi < queue.length; qi++) {
                 const h = queue[qi];
@@ -111,6 +125,26 @@ namespace toscad {
                     if (!parity.has(n)) { parity.set(n, p === 0 ? 1 : 0); queue.push(n); }
                     else if (parity.get(n) === p) oddEdges.push([Math.min(h, n), Math.max(h, n)]);
                 }
+            }
+        }
+
+        // Two seeded helices in the SAME component can demand incompatible parities, since their
+        // relative parity is already forced by the path length between them. The first one wins
+        // (it seeded the colouring); report the rest rather than silently ignoring them.
+        const paritySeedConflicts: Array<{ helix: number; requested: 0 | 1; actual: 0 | 1 }> = [];
+        if (paritySeed) {
+            for (const [h, want] of paritySeed) {
+                const got = parity.get(h);
+                if (got !== undefined && got !== want) {
+                    paritySeedConflicts.push({ helix: h, requested: want, actual: got });
+                }
+            }
+            if (paritySeedConflicts.length) {
+                console.warn(
+                    `[voteOrientations] ${paritySeedConflicts.length} parity seed(s) unsatisfiable ` +
+                    `(relative parity is fixed by path length):`,
+                    paritySeedConflicts.map(c => `h${c.helix} wanted ${c.requested}, got ${c.actual}`).join('; ')
+                );
             }
         }
 
@@ -225,8 +259,15 @@ namespace toscad {
         return {
             slot, orientation, violated, satisfiedWeight,
             totalWeight: edges.reduce((s, e) => s + e.weight, 0),
-            sweeps, converged, parity, oddEdges, edges
+            sweeps, converged, parity, oddEdges, edges, paritySeedConflicts
         };
+    }
+
+    export interface RelativePin {
+        a: number;
+        b: number;
+        dCol: number;
+        dRow: number;
     }
 
     export function kruskals(
@@ -234,7 +275,7 @@ namespace toscad {
         grid: GridMap,
         lattice: string = 'honeycomb',
         vote = voteOrientations(networkMap, grid, lattice),
-        pinnedHelices: number[] = []
+        pins: RelativePin[] = []
     ) {
         const lat = resolveLatticeKind(lattice);
         const dirs = latticeDirs(lat);
@@ -271,23 +312,31 @@ namespace toscad {
         const parityConflicts: Array<[number, number]> = [];
 
         // merging 2 groups (or clumps)... 
-        const tryMerge = (e: OrientEdge) => {
+        const tryMerge = (e: OrientEdge, forceStep?: { dCol: number; dRow: number }, forcePin = false) => {
             const { a, b } = e;
             const ra = find(a), rb = find(b);
             if (ra === rb) { cycleEdges.push([a, b]); return; }
 
-            const step = stepAB(a, b);
+            // forceStep is how a pin injects a user-supplied offset instead of an angle-derived one.
+            const step = forceStep ?? stepAB(a, b);
             if (!step) return;
 
             const pa = pos.get(a)!, pb = pos.get(b)!;
             // Where b must sit relative to a, then the shift that moves b's frame there.
             const T: [number, number] = [pa[0] + step.dCol - pb[0], pa[1] + step.dRow - pb[1]];
 
-            // A parity-flipping shift would invalidate every honeycomb step inside the moved component.
-            // With a valid 2-coloring T is always even, so this firing means the colouring is broken and the edge must not define geometry.
+            // A parity-flipping shift moves the whole component onto the opposite sublattice, so its
+            // helices' actual (col+row)&1 stops matching their 2-coloring labels and every honeycomb
+            // step derived from them afterwards uses the wrong table. Recorded, NOT blocked: a pin the
+            // user got "wrong" is allowed to be wrong, and blocking here would silently fragment the
+            // layout instead. Expect these pairs to render non-adjacent.
             if (lat === 'honeycomb' && (((T[0] + T[1]) & 1) !== 0)) {
                 parityConflicts.push([a, b]);
-                return;
+                // A pin overrides this and is applied verbatim -- pins are sacred. For an ordinary
+                // angle-derived edge we still bail: a parity-violating T there means the 2-coloring
+                // is broken (see vote.oddEdges), and corrupting a whole component's parity alignment
+                // is worse than leaving the two sides unmerged.
+                if (!forcePin) return;
             }
 
             const listA = members.get(ra)!, listB = members.get(rb)!;
@@ -307,7 +356,8 @@ namespace toscad {
             members.delete(dropRoot);
 
             treeEdges.push([a, b]);
-            if (!satisfied(e)) usedViolatedEdges.push([a, b]);
+            if (!forceStep && !satisfied(e)) usedViolatedEdges.push([a, b]);
+            return true;
         };
 
         // order: satisfied > heaviest > helixID (lowest ID wins) > violated
@@ -316,14 +366,165 @@ namespace toscad {
             return sq - sp || q.weight - p.weight || p.a - q.a || p.b - q.b;
         });
 
-        // Pinned helices jump the queue: every edge touching one is processed first, so pinning
-        // h3 pins h3-h2, h3-h5, h3-h8, etc. Pinned helices need not be connected to each other.
-        const pinSet = new Set(pinnedHelices);
-        const isPinned = (e: OrientEdge) => pinSet.has(e.a) || pinSet.has(e.b);
+        // Checks which "graph" the helix belongs to. Used for disconnected components, so parity is kept valid.
+        const graphComponentOf = new Map<number, number>();
+        {
+            let cid = 0;
+            for (const seed of [...networkMap.keys()].sort((x, y) => x - y)) {
+                if (graphComponentOf.has(seed)) continue;
+                graphComponentOf.set(seed, cid);
+                const q = [seed];
+                for (let qi = 0; qi < q.length; qi++) {
+                    for (const n of networkMap.get(q[qi])?.keys() ?? []) {
+                        if (!graphComponentOf.has(n)) { graphComponentOf.set(n, cid); q.push(n); }
+                    }
+                }
+                cid++;
+            }
+        }
+
+        const pinFailures: Array<{ pin: RelativePin; reason: string }> = [];
+        const pinAdjustments: Array<{ pin: RelativePin; applied: [number, number]; reason: string }> = [];
+
+        for (const pin of pins) {
+            const { a, b, dCol, dRow } = pin;
+            if (!pos.has(a) || !pos.has(b)) {
+                pinFailures.push({ pin, reason: 'helix not present in networkMap' });
+                continue;
+            }
+            const useCol = dCol;
+            if (lat === 'honeycomb' && graphComponentOf.get(a) === graphComponentOf.get(b)) {
+                const wantOdd = ((dCol + dRow) & 1) !== 0;
+                const parityDiffers = (parity.get(a) ?? 0) !== (parity.get(b) ?? 0);
+                if (wantOdd !== parityDiffers) {
+                    pinAdjustments.push({
+                        pin,
+                        applied: [dCol, dRow],
+                        reason: `(${dCol},${dRow}) has ${wantOdd ? 'odd' : 'even'} parity but h${a}/h${b} ` +
+                                `are an ${parityDiffers ? 'odd' : 'even'} number of lattice steps apart. ` +
+                                `Applied as requested; h${b} will sit on the opposite sublattice.`
+                    });
+                }
+            }
+
+            const ra = find(a), rb = find(b);
+            if (ra === rb) {
+                // Already related, either by an earlier pin or a chain of them. Verify rather than move.
+                const pa = pos.get(a)!, pb = pos.get(b)!;
+                if (pb[0] - pa[0] !== useCol || pb[1] - pa[1] !== dRow) {
+                    pinFailures.push({
+                        pin,
+                        reason: `conflicts with an earlier pin: already at ` +
+                                `(${pb[0] - pa[0]},${pb[1] - pa[1]}), requested (${useCol},${dRow})`
+                    });
+                }
+                continue;
+            }
+
+            const fake: OrientEdge = { a, b, weight: Infinity, compat: new Uint8Array(K * K) };
+            // forcePin bypasses tryMerge's parity guard so the offset is applied verbatim. fake because it creates a fake edge between pins.
+            if (!tryMerge(fake, { dCol: useCol, dRow }, true)) {
+                pinFailures.push({ pin, reason: 'merge rejected' });
+            }
+        }
+
+        // Helices touching a pin get their remaining edges processed first.
+        const pinSet = new Set<number>();
+        for (const p of pins) { pinSet.add(p.a); pinSet.add(p.b); }
+        const touchesPin = (e: OrientEdge) => pinSet.has(e.a) || pinSet.has(e.b);
+
+        // Parity check. If the user fixes to the wrong parity (wrong as per voteOrientations), then the resulting placement is "impossible" but the algorithm will still try its best.
+        const parityBroken = new Set<number>();
+        if (lat === 'honeycomb') {
+            for (const [h, p] of pos) {
+                if (((p[0] + p[1]) & 1) !== (parity.get(h) ?? 0)) parityBroken.add(h);
+            }
+        }
+        const parityBrokenEdges: Array<[number, number]> = [];
+        const usable = (e: OrientEdge) => {
+            if (!parityBroken.has(e.a) && !parityBroken.has(e.b)) return true;
+            parityBrokenEdges.push([e.a, e.b]);
+            return false;
+        };
 
         // Actual merging...
-        for (const e of ordered) if (isPinned(e)) tryMerge(e);
-        for (const e of ordered) if (!isPinned(e)) tryMerge(e);
+        for (const e of ordered) if (touchesPin(e) && usable(e)) tryMerge(e);
+        for (const e of ordered) if (!touchesPin(e) && usable(e)) tryMerge(e);
+
+        const packedHelices: Array<{ helix: number; near: number; at: [number, number] }> = [];
+        for (let progress = true; progress; ) {
+            progress = false;
+            for (const h of [...networkMap.keys()].sort((x, y) => x - y)) {
+                const rh = find(h);
+                if ((members.get(rh)?.length ?? 0) > 1) continue;          // already in a component
+
+                // Pick the neighbour sitting in the largest placed component.
+                let anchor = -1, anchorSize = 0;
+                for (const n of networkMap.get(h)?.keys() ?? []) {
+                    const size = members.get(find(n))?.length ?? 0;
+                    if (find(n) !== rh && size > anchorSize) { anchor = n; anchorSize = size; }
+                }
+                if (anchor < 0 || anchorSize < 2) continue;
+
+                const rootA = find(anchor);
+                const occupied = new Set<string>();
+                for (const m of members.get(rootA)!) {
+                    const p = pos.get(m)!;
+                    occupied.add(`${p[0]},${p[1]}`);
+                }
+
+                // Ring search, rejecting cells on the wrong parity by marking them occupied and retrying.
+                const want = parity.get(h) ?? 0;
+                let cell = findNearestOpenPos(pos.get(anchor)!, occupied);
+                for (let tries = 0; lat === 'honeycomb' && tries < 64; tries++) {
+                    if (((cell[0] + cell[1]) & 1) === want) break;
+                    occupied.add(`${cell[0]},${cell[1]}`);
+                    cell = findNearestOpenPos(pos.get(anchor)!, occupied);
+                }
+
+                pos.set(h, cell);
+                root.set(h, rootA);
+                members.get(rootA)!.push(h);
+                members.delete(rh);
+                packedHelices.push({ helix: h, near: anchor, at: cell });
+                progress = true;
+            }
+        }
+
+        // Edges that disagree with the pins
+        const pinOverruledEdges: Array<[number, number]> = [];
+        for (const [a, b] of cycleEdges) {
+            const step = stepAB(a, b);
+            const pa = pos.get(a), pb = pos.get(b);
+            if (!step || !pa || !pb) continue;
+            if ((pa[0] + step.dCol !== pb[0] || pa[1] + step.dRow !== pb[1]) &&
+                (pinSet.has(a) || pinSet.has(b))) {
+                pinOverruledEdges.push([a, b]);
+            }
+        }
+
+        if (pinAdjustments.length) {
+            console.warn(`[kruskals] ${pinAdjustments.length} pin(s) applied at a geometrically impossible offset:`);
+            for (const adj of pinAdjustments) {
+                console.warn(`  h${adj.pin.a} -> h${adj.pin.b}: ${adj.reason}`);
+            }
+        }
+        if (pinFailures.length) {
+            console.warn(`[kruskals] ${pinFailures.length} pin(s) could not be applied:`);
+            for (const f of pinFailures) {
+                console.warn(`  h${f.pin.a} -> h${f.pin.b} (${f.pin.dCol},${f.pin.dRow}): ${f.reason}`);
+            }
+        }
+        if (parityBroken.size) {
+            console.warn(
+                `[kruskals] ${parityBroken.size} helix/helices sit on a parity-flipped cell ` +
+                `[${[...parityBroken].join(',')}]; ${parityBrokenEdges.length} incident edge(s) excluded ` +
+                `from the tree, ${packedHelices.length} helix/helices packed by proximity instead.`
+            );
+            for (const p of packedHelices) {
+                console.warn(`  h${p.helix} packed at [${p.at}] near h${p.near}`);
+            }
+        }
 
         // Spread components side by side. Overlaps WITHIN a component are kept but separate components all sit near their own origin and would pile up.
         // The shift is nudged to stay parity-even so honeycomb steps remain valid.
@@ -380,7 +581,8 @@ namespace toscad {
             `[kruskals] ${pos.size} helices, ${components.length} component(s) | ` +
             `tree=${treeEdges.length} cycle=${cycleEdges.length} | ` +
             `usedViolated=${usedViolatedEdges.length} parityConflicts=${parityConflicts.length} | ` +
-            `overlaps=${overlaps.length} translationViolations=${translationViolations.length}`
+            `overlaps=${overlaps.length} translationViolations=${translationViolations.length}` +
+            (pins.length ? ` | pins=${pins.length} failed=${pinFailures.length} overruledEdges=${pinOverruledEdges.length}` : '')
         );
 
         return {
@@ -392,6 +594,12 @@ namespace toscad {
             parityConflicts,
             overlaps,
             translationViolations,
+            pinFailures,
+            pinAdjustments,
+            parityBroken: [...parityBroken],
+            parityBrokenEdges,
+            packedHelices,
+            pinOverruledEdges,
             slot,
             orientation: vote.orientation
         };
@@ -547,9 +755,12 @@ namespace toscad {
     }
 
     // Resolve Kruskal's overlaps by using the findNearestPos()
+    // `keep` holds helices that must not move (pinned/locked ones). Without it a pin could be
+    // honored by kruskals and then quietly relocated here, which would defeat the whole point.
     export function posCorr5(
         kr: ReturnType<typeof kruskals>,
-        helices: Nucleotide[][]
+        helices: Nucleotide[][],
+        keep?: Set<number>
     ): Map<number, [number, number]> {
         const pos = new Map<number, [number, number]>();
         const occupied = new Set<string>();
@@ -557,9 +768,13 @@ namespace toscad {
 
         const size = (h: number) => (helices[h] ?? []).length;
         for (const ov of kr.overlaps) {
-            // Biggest stays put (ties -> lowest id); everyone else relocates.
-            const [, ...movers] = [...ov.helices].sort((x, y) => size(y) - size(x) || x - y);
+            // Pinned helices win outright; otherwise biggest stays put (ties -> lowest id).
+            const [, ...movers] = [...ov.helices].sort((x, y) => {
+                const kx = keep?.has(x) ? 1 : 0, ky = keep?.has(y) ? 1 : 0;
+                return ky - kx || size(y) - size(x) || x - y;
+            });
             for (const h of movers) {
+                if (keep?.has(h)) continue;   // never relocate a pinned helix
                 const p = findNearestOpenPos(ov.cell, occupied);
                 pos.set(h, p);
                 occupied.add(`${p[0]},${p[1]}`);
@@ -952,5 +1167,82 @@ namespace toscad {
         );
 
         return { networkMap, mergedPairs, iterations: iteration };
+    }
+
+
+    // Report-only overlap classifier: takes the angle map plus a finished Kruskal run and says,
+    // per overlapping pair, whether it is a high-confidence must-merge. Merges nothing, moves nothing.
+    //
+    // Zero recursion: only A and B themselves are tested, never anything about their neighbors'
+    // own neighborhoods. A pair (A,B) sharing a cell qualifies when, ignoring each other:
+    //   - A places every one of its crossover neighbors exactly where A's global slot + local angle
+    //     predicts, and B does the same                                                  (cond 2,3)
+    //   - the outward steps are distinct legal lattice slots. stepFor only ever returns the legal
+    //     ones ((1,0),(-1,0),(0,1),(0,-1) on square), so legality is "resolved" + distinctness. (cond 5)
+    //
+    // No independent-confirmation gate: a mostly-tree component often has no free non-tree edge to
+    // validate against, which would veto merges that are perfectly real. Placement agreement alone.
+    //
+    // Physical gates (kmDisjoint, axis parallelism, kmAxisShadowOverlap) are deliberately NOT here.
+    // merge=true means "must-merge in the grid representation"; gate it physically before merging.
+    export function overlapMergeCheck(
+        networkMap: Map<number, Map<number, number>>,
+        kr: ReturnType<typeof kruskals>,
+        lattice: string = 'square'
+    ): Array<{ a: number; b: number; cell: [number, number]; occupancy: number; merge: boolean; reasons: string[] }> {
+        const lat = resolveLatticeKind(lattice);
+        const dirs = latticeDirs(lat);
+        const pos = kr.positions;
+
+        // Parity is recoverable from the cell: kruskals seeds (col+row)&1 to the 2-coloring and every
+        // lattice step flips it, so no need to drag the vote object around.
+        const par = (h: number): 0 | 1 => {
+            const p = pos.get(h);
+            return p ? ((((p[0] + p[1]) & 1) === 0) ? 0 : 1) : 0;
+        };
+        // Same prediction Kruskal's used, so this compares against what actually built pos.
+        const step = (a: number, b: number) => {
+            const raw = networkMap.get(a)?.get(b);
+            if (typeof raw !== 'number') return null;
+            return stepFor(snapDir(raw + dirs[kr.slot.get(a) ?? 0], lat), par(a), lat);
+        };
+        const nbrs = (h: number, skip: Set<number>) =>
+            [...(networkMap.get(h)?.keys() ?? [])].filter(n => n !== h && !skip.has(n)).sort((x, y) => x - y);
+
+        // Everything h predicts must be where h says, on its own distinct legal slot.
+        const placesAll = (h: number, skip: Set<number>): string[] => {
+            const p = pos.get(h);
+            if (!p) return [`${h}:no-cell`];
+            const bad: string[] = [];
+            const used = new Set<string>();
+            for (const n of nbrs(h, skip)) {
+                const s = step(h, n), q = pos.get(n);
+                if (!s || !q) { bad.push(`${h}->${n}:unresolved`); continue; }
+                const k = `${s.dCol},${s.dRow}`;
+                if (used.has(k)) bad.push(`${h}->${n}:slot-taken(${k})`); else used.add(k);
+                if (p[0] + s.dCol !== q[0] || p[1] + s.dRow !== q[1]) bad.push(`${h}->${n}:misplaced`);
+            }
+            return bad;
+        };
+
+        const out: Array<{ a: number; b: number; cell: [number, number]; occupancy: number; merge: boolean; reasons: string[] }> = [];
+
+        for (const { a, b, cell, cellOccupancy } of overlapPairs(kr)) {
+            const skip = new Set([a, b]);
+            const reasons: string[] = [];
+            for (const h of [a, b]) {
+                reasons.push(...placesAll(h, skip));   // h's own outward placements, nothing deeper
+                if (nbrs(h, skip).length === 0) reasons.push(`${h}:no-neighbors`);
+            }
+            const uniq = [...new Set(reasons)];
+            out.push({ a, b, cell, occupancy: cellOccupancy, merge: uniq.length === 0, reasons: uniq });
+            console.log(
+                `[overlapMergeCheck] (${a},${b}) cell=(${cell[0]},${cell[1]}) occ=${cellOccupancy} ` +
+                `${uniq.length === 0 ? 'MUST-MERGE' : 'NO-MERGE'}${uniq.length ? ' | ' + uniq.join(' ') : ''}`
+            );
+        }
+
+        console.log(`[overlapMergeCheck] ${out.filter(o => o.merge).length}/${out.length} pair(s) must-merge (report only)`);
+        return out;
     }
 }
