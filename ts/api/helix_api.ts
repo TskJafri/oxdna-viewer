@@ -69,4 +69,8 @@ module api.helix{
         }
         return null;
     }
+
+    export function positionsToJSON(positions: Map<number, [number, number]>): string {
+        return JSON.stringify([...positions.entries()].sort((a, b) => a[0] - b[0]));
+    }
 }

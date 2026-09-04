@@ -908,32 +908,6 @@ var toscad;
         }
     }
     toscad.validateGrid = validateGrid;
-    function canonicalGridFingerprint(grid, helicesLength) {
-        const ntIds = Array.from(grid.keys()).sort((a, b) => a - b);
-        const parts = [`h=${helicesLength}`];
-        for (const ntId of ntIds) {
-            const m = grid.get(ntId);
-            parts.push(`${ntId}:${m.helixId}:${m.offset}:${m.direction === 'forward' ? 'f' : 'b'}`);
-        }
-        return parts.join('|');
-    }
-    // Filter binder helices out of a network map by helix index.
-    function filterBindersFromNetworkMap(nm, grid, helices, binderHelixIds) {
-        const binderSet = new Set(binderHelixIds);
-        const out = new Map();
-        for (const [hid, neighbors] of nm.entries()) {
-            if (binderSet.has(hid))
-                continue;
-            const filteredNeighbors = new Map();
-            for (const [nid, angle] of neighbors.entries()) {
-                if (binderSet.has(nid))
-                    continue;
-                filteredNeighbors.set(nid, angle);
-            }
-            out.set(hid, filteredNeighbors);
-        }
-        return out;
-    }
     /*
     TODOs:
     - Remove the binderHelices per-function mapping because findHelices now does it by default; just use those and track those.
@@ -942,196 +916,32 @@ var toscad;
     - REMOVE THE "preservedNtIds" LOGIC IN THE PIPELINE. ASAP.
     */
     function layoutPipeline(inputElements, options) {
-        const { tolerance = 3, lattice = 'automatic', maxIterations = 10, wireframe = false } = options || {};
-        const requestedLattice = lattice ?? 'automatic';
-        const MAX_ITER = maxIterations ?? 7;
-        let { helices: initialHelices, partials, usedSides, binderHelices } = helix.findHelices(inputElements, tolerance);
-        let helices = initialHelices;
+        const { tolerance = 3, lattice = 'automatic', wireframe = false, pins = [] } = options || {};
+        let { helices, partials, usedSides, binderHelices } = helix.findHelices(inputElements, tolerance);
         let { grid } = setGrid(helices);
         directionAlign2(grid);
-        // alignGridPrim needs helix indices
-        let binderHelixIds = binderHelices.map(b => helices.indexOf(b)).filter(i => i !== -1);
-        toscad.alignGridPrim(grid, binderHelixIds);
-        let latticeType;
-        if (requestedLattice === 'automatic') {
-            latticeType = toscad.detectLatticeKind(grid, binderHelixIds);
+        // Binder ids are only valid here, before any merge splices the helices array.
+        let binderIds = binderHelices.map(b => helices.indexOf(b)).filter(i => i !== -1);
+        toscad.alignGridPrim(grid, binderIds);
+        const latticeType = lattice === 'automatic'
+            ? toscad.detectLatticeKind(grid, binderIds)
+            : lattice;
+        // Wireframe designs skip merging entirely; their partials are the structure, not artifacts.
+        if (!wireframe) {
+            const am = toscad.axisMerge(grid, helices, partials, usedSides, latticeType);
+            toscad.anglecomb5(grid, helices, latticeType, am.networkMap);
         }
-        else {
-            latticeType = requestedLattice;
+        // Grid is the source of truth after the merges, so re-derive angles from it.
+        const networkMap = toscad.getAngles(grid, helices, latticeType);
+        const kr = toscad.kruskals(networkMap, grid, latticeType, toscad.voteOrientations(networkMap, grid, latticeType), pins);
+        const pinnedIds = new Set();
+        for (const p of pins) {
+            pinnedIds.add(p.a);
+            pinnedIds.add(p.b);
         }
-        // Wireframe: single pass, no iteration
-        if (wireframe) {
-            const networkMap = toscad.getAngles(grid, helices, latticeType);
-            const helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
-            const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType, binderHelixIds);
-            const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
-            helices = renumbered.helices;
-            const finalHelixPos = renumbered.helixPos;
-            console.log(`[layoutPipeline] wireframe — single pass, no iteration`);
-            return { helices, grid, helixPos: finalHelixPos, latticeType, networkMap };
-        }
-        // Non-wireframe: fingerprint fixed-point loop
-        const buildMergeProducts = (mergeLog) => {
-            const products = [];
-            const productIndexByNt = new Map();
-            const retarget = (fromIdx, toIdx) => {
-                if (fromIdx === toIdx)
-                    return;
-                for (const group of products[fromIdx]) {
-                    for (const ntId of group)
-                        productIndexByNt.set(ntId, toIdx);
-                }
-                products[fromIdx] = [];
-            };
-            for (const { keepNtIds, mergedNtIds } of mergeLog) {
-                if (!keepNtIds.length || !mergedNtIds.length)
-                    continue;
-                const keepIdx = productIndexByNt.get(keepNtIds[0]);
-                const mergedIdx = productIndexByNt.get(mergedNtIds[0]);
-                if (keepIdx !== undefined && keepIdx === mergedIdx)
-                    continue;
-                const keepGroups = keepIdx !== undefined ? products[keepIdx] : [keepNtIds.slice()];
-                const mergedGroups = mergedIdx !== undefined ? products[mergedIdx] : [mergedNtIds.slice()];
-                let target;
-                if (keepIdx !== undefined) {
-                    target = keepIdx;
-                    products[target] = [...keepGroups, ...mergedGroups];
-                }
-                else {
-                    target = products.length;
-                    products.push([...keepGroups, ...mergedGroups]);
-                    for (const ntId of keepNtIds)
-                        productIndexByNt.set(ntId, target);
-                }
-                if (mergedIdx !== undefined) {
-                    retarget(mergedIdx, target);
-                }
-                else {
-                    for (const ntId of mergedNtIds)
-                        productIndexByNt.set(ntId, target);
-                }
-            }
-            return products.filter(p => p.length > 1);
-        };
-        let networkMap = new Map();
-        let helixPos = new Map();
-        let prevFp = '';
-        let prevGrid = grid;
-        let prevHelicesSnapshot = helices.map(h => h.slice());
-        let prevMergeProducts = [];
-        for (let iter = 1; iter <= MAX_ITER; iter++) {
-            // Tracks merge products and origins
-            const iterMerges = [];
-            // Detect which helix slots are "stable" (identical nt sets) vs
-            // merged/altered compared to the previous iteration. Stable slots
-            // get their grid marks preserved; altered ones get reassigned.
-            let preservedNtIds;
-            if (prevGrid && prevHelicesSnapshot) {
-                preservedNtIds = new Set();
-                const prevNtsBySlot = prevHelicesSnapshot.map(h => new Set(h.map(nt => nt.id)));
-                for (let i = 0; i < helices.length; i++) {
-                    const currNts = helices[i];
-                    if (!currNts)
-                        continue;
-                    for (let j = 0; j < prevNtsBySlot.length; j++) {
-                        const prevSlot = prevNtsBySlot[j];
-                        if (currNts.length !== prevSlot.size)
-                            continue;
-                        let match = true;
-                        for (const nt of currNts) {
-                            if (!prevSlot.has(nt.id)) {
-                                match = false;
-                                break;
-                            }
-                        }
-                        if (match) {
-                            for (const nt of currNts)
-                                preservedNtIds.add(nt.id);
-                            break;
-                        }
-                    }
-                }
-            }
-            // Map previous merge products onto current helix slots via
-            // nucleotide ids (stable across renumbering).
-            let mergedGroups;
-            if (prevGrid && prevMergeProducts.length > 0) {
-                const productByNt = new Map();
-                for (const groups of prevMergeProducts) {
-                    for (const group of groups) {
-                        for (const ntId of group)
-                            productByNt.set(ntId, groups);
-                    }
-                }
-                mergedGroups = new Map();
-                for (let i = 0; i < helices.length; i++) {
-                    const slot = helices[i];
-                    if (!slot || slot.length === 0)
-                        continue;
-                    const groups = productByNt.get(slot[0].id);
-                    if (groups)
-                        mergedGroups.set(i, groups);
-                }
-                if (mergedGroups.size === 0)
-                    mergedGroups = undefined;
-            }
-            // Rebuild grid, preserving marks for stable helix slots and
-            // reconstructing merged helices from their origin-groups.
-            ({ grid } = setGrid(helices, prevGrid, preservedNtIds, mergedGroups));
-            // Align merged origin-groups to the lattice BEFORE directionAlign2.
-            // No-op when nothing was merged.
-            toscad.alignMergedGroups(grid, mergedGroups, binderHelixIds);
-            // Re-derive binder IDs (indices may have shifted after merges)
-            binderHelixIds = binderHelices.map(b => helices.indexOf(b)).filter(i => i !== -1);
-            directionAlign2(grid);
-            toscad.alignGridPrim(grid, binderHelixIds);
-            // Angle resolution (without binders)
-            networkMap = toscad.getAngles(grid, helices, latticeType);
-            const filtered = filterBindersFromNetworkMap(networkMap, grid, helices, binderHelixIds);
-            // Hash merge pairs from partials
-            let hashMergePairs = [];
-            if (partials.length > 0 && usedSides) {
-                const partialEnds = helix.mapPartialEnds(partials);
-                if (partialEnds.size > 0) {
-                    const partialAxes = helix.partialAxesTowardFreeSide(partials, partialEnds, usedSides);
-                    if (partialAxes.size > 0) {
-                        hashMergePairs = helix.hashAxisOverlap(partials, partialEnds, usedSides, partialAxes);
-                    }
-                }
-            }
-            const combResult = toscad.anglecomb3(grid, helices, latticeType, partials, hashMergePairs, filtered);
-            // Track merge events for provenance
-            for (const mp of combResult.mergedPairs) {
-                iterMerges.push({ keepNtIds: mp.keepNtIds, mergedNtIds: mp.mergedNtIds });
-            }
-            networkMap = filterBindersFromNetworkMap(combResult.networkMap, grid, helices, binderHelixIds);
-            const corrResult = toscad.anglecorr2(grid, helices, latticeType, networkMap);
-            networkMap = corrResult.networkMap;
-            // ── Phase 2: reintroduce binder helices ──────────────────────
-            networkMap = toscad.getAngles(grid, helices, latticeType);
-            const corrResult2 = toscad.anglecorr2(grid, helices, latticeType, networkMap);
-            networkMap = corrResult2.networkMap;
-            helixPos = toscad.calculateGlobalPositions(networkMap, undefined, undefined, latticeType);
-            // Renumber inside the loop. Each pass' renumber rewrites helix ids
-            // on the grid; the next pass' directionAlign2 / alignGridPrim then
-            // anchor on the newly-designated helix 0.
-            const renumber = toscad.renumberHelicesGNN(grid, helixPos, latticeType, binderHelixIds);
-            const renumbered = toscad.applyHelixRenumber(helices, grid, helixPos, renumber.remap);
-            helices = renumbered.helices;
-            helixPos = renumbered.helixPos;
-            // Convergence check
-            const fp = canonicalGridFingerprint(grid, helices.length);
-            console.log(`[layoutPipeline] iter=${iter} ${fp === prevFp ? 'converged' : 'changed'}`);
-            if (fp === prevFp) {
-                console.log(`[layoutPipeline] converged in ${iter} pass${iter === 1 ? '' : 'es'}`);
-                return { helices, grid, helixPos, latticeType, networkMap };
-            }
-            prevFp = fp;
-            // Save state for next iteration's preservation / provenance
-            prevGrid = grid;
-            prevHelicesSnapshot = helices.map(h => h.slice());
-            prevMergeProducts = buildMergeProducts(iterMerges);
-        }
+        const helixPos = toscad.posCorr5(kr, helices, pinnedIds);
+        console.log(`[layoutPipeline] ${helices.length} helices, lattice=${latticeType}, wireframe=${wireframe}` +
+            (pins.length ? `, pins=${pins.length}` : ''));
         return { helices, grid, helixPos, latticeType, networkMap, partials, usedSides };
     }
     toscad.layoutPipeline = layoutPipeline;

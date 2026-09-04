@@ -18,7 +18,7 @@
     "./ts/api/editing_api.ts",
     "./ts/api/scene_api.ts",
     "./ts/api/observable_api.ts",
-    "./ts/api/helper.ts",
+    "ts/api/helix_api.ts",
     "./ts/editing/clustering.ts",
     "./ts/editing/dijkstra.ts",
     "./ts/editing/doUndo.ts",

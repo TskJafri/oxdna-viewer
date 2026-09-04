@@ -605,10 +605,6 @@ namespace toscad {
         };
     }
 
-    export function positionsToJSON(positions: Map<number, [number, number]>): string {
-        return JSON.stringify([...positions.entries()].sort((a, b) => a[0] - b[0]));
-    }
-
     // Helper function to merge 2 helices.
     export function kmMergeHelixInto(
         grid: GridMap,
@@ -1167,82 +1163,5 @@ namespace toscad {
         );
 
         return { networkMap, mergedPairs, iterations: iteration };
-    }
-
-
-    // Report-only overlap classifier: takes the angle map plus a finished Kruskal run and says,
-    // per overlapping pair, whether it is a high-confidence must-merge. Merges nothing, moves nothing.
-    //
-    // Zero recursion: only A and B themselves are tested, never anything about their neighbors'
-    // own neighborhoods. A pair (A,B) sharing a cell qualifies when, ignoring each other:
-    //   - A places every one of its crossover neighbors exactly where A's global slot + local angle
-    //     predicts, and B does the same                                                  (cond 2,3)
-    //   - the outward steps are distinct legal lattice slots. stepFor only ever returns the legal
-    //     ones ((1,0),(-1,0),(0,1),(0,-1) on square), so legality is "resolved" + distinctness. (cond 5)
-    //
-    // No independent-confirmation gate: a mostly-tree component often has no free non-tree edge to
-    // validate against, which would veto merges that are perfectly real. Placement agreement alone.
-    //
-    // Physical gates (kmDisjoint, axis parallelism, kmAxisShadowOverlap) are deliberately NOT here.
-    // merge=true means "must-merge in the grid representation"; gate it physically before merging.
-    export function overlapMergeCheck(
-        networkMap: Map<number, Map<number, number>>,
-        kr: ReturnType<typeof kruskals>,
-        lattice: string = 'square'
-    ): Array<{ a: number; b: number; cell: [number, number]; occupancy: number; merge: boolean; reasons: string[] }> {
-        const lat = resolveLatticeKind(lattice);
-        const dirs = latticeDirs(lat);
-        const pos = kr.positions;
-
-        // Parity is recoverable from the cell: kruskals seeds (col+row)&1 to the 2-coloring and every
-        // lattice step flips it, so no need to drag the vote object around.
-        const par = (h: number): 0 | 1 => {
-            const p = pos.get(h);
-            return p ? ((((p[0] + p[1]) & 1) === 0) ? 0 : 1) : 0;
-        };
-        // Same prediction Kruskal's used, so this compares against what actually built pos.
-        const step = (a: number, b: number) => {
-            const raw = networkMap.get(a)?.get(b);
-            if (typeof raw !== 'number') return null;
-            return stepFor(snapDir(raw + dirs[kr.slot.get(a) ?? 0], lat), par(a), lat);
-        };
-        const nbrs = (h: number, skip: Set<number>) =>
-            [...(networkMap.get(h)?.keys() ?? [])].filter(n => n !== h && !skip.has(n)).sort((x, y) => x - y);
-
-        // Everything h predicts must be where h says, on its own distinct legal slot.
-        const placesAll = (h: number, skip: Set<number>): string[] => {
-            const p = pos.get(h);
-            if (!p) return [`${h}:no-cell`];
-            const bad: string[] = [];
-            const used = new Set<string>();
-            for (const n of nbrs(h, skip)) {
-                const s = step(h, n), q = pos.get(n);
-                if (!s || !q) { bad.push(`${h}->${n}:unresolved`); continue; }
-                const k = `${s.dCol},${s.dRow}`;
-                if (used.has(k)) bad.push(`${h}->${n}:slot-taken(${k})`); else used.add(k);
-                if (p[0] + s.dCol !== q[0] || p[1] + s.dRow !== q[1]) bad.push(`${h}->${n}:misplaced`);
-            }
-            return bad;
-        };
-
-        const out: Array<{ a: number; b: number; cell: [number, number]; occupancy: number; merge: boolean; reasons: string[] }> = [];
-
-        for (const { a, b, cell, cellOccupancy } of overlapPairs(kr)) {
-            const skip = new Set([a, b]);
-            const reasons: string[] = [];
-            for (const h of [a, b]) {
-                reasons.push(...placesAll(h, skip));   // h's own outward placements, nothing deeper
-                if (nbrs(h, skip).length === 0) reasons.push(`${h}:no-neighbors`);
-            }
-            const uniq = [...new Set(reasons)];
-            out.push({ a, b, cell, occupancy: cellOccupancy, merge: uniq.length === 0, reasons: uniq });
-            console.log(
-                `[overlapMergeCheck] (${a},${b}) cell=(${cell[0]},${cell[1]}) occ=${cellOccupancy} ` +
-                `${uniq.length === 0 ? 'MUST-MERGE' : 'NO-MERGE'}${uniq.length ? ' | ' + uniq.join(' ') : ''}`
-            );
-        }
-
-        console.log(`[overlapMergeCheck] ${out.filter(o => o.merge).length}/${out.length} pair(s) must-merge (report only)`);
-        return out;
     }
 }
