@@ -928,8 +928,10 @@ var toscad;
             : lattice;
         // Wireframe designs skip merging entirely; their partials are the structure, not artifacts.
         if (!wireframe) {
-            const am = toscad.axisMerge(grid, helices, partials, usedSides, latticeType);
-            toscad.anglecomb5(grid, helices, latticeType, am.networkMap);
+            // let am = axisMerge(grid, helices, partials, usedSides, latticeType);
+            // anglecomb5(grid, helices, latticeType, am.networkMap);
+            toscad.anglecomb5(grid, helices, latticeType);
+            toscad.axisMerge(grid, helices, partials, usedSides, latticeType);
         }
         // Grid is the source of truth after the merges, so re-derive angles from it.
         const networkMap = toscad.getAngles(grid, helices, latticeType);
@@ -942,6 +944,7 @@ var toscad;
         const helixPos = toscad.posCorr5(kr, helices, pinnedIds);
         console.log(`[layoutPipeline] ${helices.length} helices, lattice=${latticeType}, wireframe=${wireframe}` +
             (pins.length ? `, pins=${pins.length}` : ''));
+        validateGrid(grid);
         return { helices, grid, helixPos, latticeType, networkMap, partials, usedSides };
     }
     toscad.layoutPipeline = layoutPipeline;

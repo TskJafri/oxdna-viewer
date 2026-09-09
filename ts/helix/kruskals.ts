@@ -275,7 +275,8 @@ namespace toscad {
         grid: GridMap,
         lattice: string = 'honeycomb',
         vote = voteOrientations(networkMap, grid, lattice),
-        pins: RelativePin[] = []
+        pins: RelativePin[] = [],
+        anchors: Map<number, [number, number]> = new Map()
     ) {
         const lat = resolveLatticeKind(lattice);
         const dirs = latticeDirs(lat);
@@ -551,6 +552,28 @@ namespace toscad {
             cursor = maxCol + dCol + 3;
         }
 
+        // Locked components are anchored to their exact user-specified cells.
+        if (anchors.size > 0) {
+            for (const list of components) {
+                let anchorId = -1;
+                for (const h of list) {
+                    if (anchors.has(h) && (anchorId < 0 || h < anchorId)) anchorId = h;
+                }
+                if (anchorId < 0) continue;
+
+                const target = anchors.get(anchorId)!;
+                const cur = pos.get(anchorId)!;
+                const dCol = target[0] - cur[0];
+                const dRow = target[1] - cur[1];
+                if (dCol === 0 && dRow === 0) continue;
+
+                for (const h of list) {
+                    const p = pos.get(h)!;
+                    pos.set(h, [p[0] + dCol, p[1] + dRow]);
+                }
+            }
+        }
+
         // Overlaps: reported, not fixed. Note grid-editor.html keys nodes by "col,row", so
         // it will render only ONE helix per cell -- this list is the only place they show up.
         const byCell = new Map<string, number[]>();
@@ -603,26 +626,6 @@ namespace toscad {
             slot,
             orientation: vote.orientation
         };
-    }
-
-    // Helper function to merge 2 helices.
-    export function kmMergeHelixInto(
-        grid: GridMap,
-        helices: Nucleotide[][],
-        keepHelix: number,
-        mergedHelix: number
-    ): { keepNtIds: number[]; mergedNtIds: number[] } {
-        const keepNts = helices[keepHelix] ?? [];
-        const mergedNts = helices[mergedHelix] ?? [];
-        const keepNtIds = keepNts.map(n => n.id);
-        const mergedNtIds = mergedNts.map(n => n.id);
-        for (const [, mark] of grid.entries()) {
-            if (mark.helixId === mergedHelix) mark.helixId = keepHelix;
-            else if (mark.helixId > mergedHelix) mark.helixId = mark.helixId - 1;
-        }
-        helices[keepHelix] = keepNts.concat(mergedNts);
-        helices.splice(mergedHelix, 1);
-        return { keepNtIds, mergedNtIds };
     }
 
     // Cache the output from kmHelixEnds.
@@ -685,6 +688,26 @@ namespace toscad {
         const [small, large] = s1.size <= s2.size ? [s1, s2] : [s2, s1];
         for (const o of small) if (large.has(o)) return false;
         return true;
+    }
+
+    // Number of overlaps in any 2 helices right before they are merged.
+    export function kmOverlapCount(
+        grid: GridMap, helices: Nucleotide[][], a: number, b: number
+    ): number {
+        const offsetsA = new Set<string>();
+        for (const nt of helices[a] ?? []) {
+            const mark = grid.get(nt.id);
+            if (!mark) continue;
+            offsetsA.add(`${mark.direction}|${mark.offset}`);
+        }
+        const shared = new Set<string>();
+        for (const nt of helices[b] ?? []) {
+            const mark = grid.get(nt.id);
+            if (!mark) continue;
+            const key = `${mark.direction}|${mark.offset}`;
+            if (offsetsA.has(key)) shared.add(key);
+        }
+        return shared.size;
     }
 
     // Returns fraction of each helix's axis covered by the other's shadow. 
@@ -870,6 +893,13 @@ namespace toscad {
 
             const gatesPassed = disj && axisDot >= AXIS_DOT && !shadow.overlap;
 
+            // Hard reject if helices overlap by 3+ grid offsets, regardless of ENFORCE.
+            const overlap = kmOverlapCount(grid, helices, hA, hB);
+            if (overlap >= 3) {
+                console.warn(`[axisMerge] REJECT (${hA},${hB}) — grid offset overlap ${overlap} >= 3`);
+                continue;
+            }
+
             // By default, ENFORCE is false.
             if (ENFORCE && !gatesPassed) {
                 console.warn(
@@ -882,11 +912,14 @@ namespace toscad {
 
             const keep = Math.min(hA, hB);
             const merged = Math.max(hA, hB);
-            const ids = kmMergeHelixInto(grid, helices, keep, merged);
+            const keepNtIds = helices[keep].map(n => n.id);
+            const mergedNtIds = helices[merged].map(n => n.id);
+            const mergeResult = helix.combineHelices(helices, [keep, merged], grid, resolveLatticeKind(lattice));
+            if (!mergeResult) continue;
 
             mergedPairs.push({
                 keepHelix: keep, mergedHelix: merged,
-                keepNtIds: ids.keepNtIds, mergedNtIds: ids.mergedNtIds,
+                keepNtIds, mergedNtIds,
                 pIdxA: mp.a, pIdxB: mp.b,
                 hashDot: mp.dot, hashDistAng: mp.dist,
                 axisDot, disjoint: disj, shadowOverlap: shadow.overlap,
@@ -945,7 +978,7 @@ namespace toscad {
         opts: {
             axisDotThreshold?: number;    // default 0.9
             shadowThreshold?: number;     // default 0.3
-            strongWeight?: number;        // default KM_STRONG (2)
+            strongWeight?: number;        // default 2
             minCosine?: number;           // default 0 (off)
             requireConfirmation?: boolean; // default false: 'unknown' passes
             maxIterations?: number;       // default 200
@@ -1126,11 +1159,14 @@ namespace toscad {
 
                 const keep = Math.min(currA, currB);
                 const merged = Math.max(currA, currB);
-                const ids = kmMergeHelixInto(grid, helices, keep, merged);
+                const keepNtIds = helices[keep].map(n => n.id);
+                const mergedNtIds = helices[merged].map(n => n.id);
+                const mergeResult = helix.combineHelices(helices, [keep, merged], grid, lat);
+                if (!mergeResult) continue;
 
                 mergedPairs.push({
                     keepHelix: keep, mergedHelix: merged,
-                    keepNtIds: ids.keepNtIds, mergedNtIds: ids.mergedNtIds,
+                    keepNtIds, mergedNtIds,
                     cell: c.cell, cos: c.cos, axisDot: c.axisDot,
                     covA: c.covA, covB: c.covB,
                     verdictA: c.verdictA, verdictB: c.verdictB,

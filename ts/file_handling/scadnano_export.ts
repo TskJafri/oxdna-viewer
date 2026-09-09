@@ -497,7 +497,7 @@ namespace scadnanoExport {
         const before = snapshot();
 
         // combineHelices mutates layout.helices AND layout.grid in place, returning the id remap.
-        const result = helix.combineHelices(layout.helices, ids, layout.grid);
+        const result = helix.combineHelices(layout.helices, ids, layout.grid, layout.latticeType);
         if (!result) {
             notify('Nothing to combine.', 'warning');
             return;
@@ -647,6 +647,22 @@ namespace scadnanoExport {
         });
     }
 
+    // Absolute (col,row) cells for every locked helix. Pins (above) only carry
+    // relative offsets; these hand kruskals the user's exact placement so the
+    // locked component is anchored on its true cell/parity instead of drifting
+    // to wherever the 2-coloring seed lands it.
+    function anchorsFromLocked(): Map<number, [number, number]> {
+        const anchors = new Map<number, [number, number]>();
+        if (lockedHelices.size < 2) return anchors;
+        const pos = window.currentScadnanoHelixPos;
+        if (!pos) return anchors;
+        for (const id of lockedHelices) {
+            const p = pos.get(id);
+            if (p) anchors.set(id, [p[0], p[1]]);
+        }
+        return anchors;
+    }
+
     // "Recalculate Grid" toolbar button. Re-runs ONLY the positioning stage (angles → kruskals →
     // posCorr5) on the CURRENT layout.helices / layout.grid — never findHelices — so any manual
     // combines or splits the user has made are preserved. Locked helices feed in as pins to hold
@@ -660,6 +676,7 @@ namespace scadnanoExport {
         publishHelixPos();
         const before = snapshot();
         const pins = pinsFromLocked();
+        const anchors = anchorsFromLocked();
         const latticeType = layout.latticeType as ScadnanoGridType;
         let ok = false;
 
@@ -668,7 +685,7 @@ namespace scadnanoExport {
                 try {
                     const networkMap = toscad.getAngles(layout!.grid, layout!.helices, latticeType);
                     const votes = toscad.voteOrientations(networkMap, layout!.grid, latticeType);
-                    const kr = toscad.kruskals(networkMap, layout!.grid, latticeType, votes, pins);
+                    const kr = toscad.kruskals(networkMap, layout!.grid, latticeType, votes, pins, anchors);
                     const pinnedIds = new Set<number>();
                     pins.forEach(p => { pinnedIds.add(p.a); pinnedIds.add(p.b); });
                     layout!.helixPos = toscad.posCorr5(kr, layout!.helices, pinnedIds);

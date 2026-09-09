@@ -668,19 +668,6 @@ document.getElementById('loadNetworkMapBtn').addEventListener('click', () => {
         for (const to in obj[from]) allIds.add(Number(to));
     }
 
-    // Clear existing
-    nodes.clear();
-    connections.length = 0;
-    selectedKey = null;
-    connectFirstKey = null;
-    nextNodeId = 0;
-
-    // Place nodes in a simple layout: BFS from smallest id
-    const sorted = [...allIds].sort((a, b) => a - b);
-    const placed = new Map(); // id → { col, row }
-    const queue = [sorted[0]];
-    placed.set(sorted[0], { col: 0, row: 0 });
-
     // Build adjacency from the network map
     const adj = new Map();
     for (const from in obj) {
@@ -694,50 +681,76 @@ document.getElementById('loadNetworkMapBtn').addEventListener('click', () => {
         }
     }
 
-    // BFS placement
+    // Preserve any nodes already on the grid (e.g. loaded via "Load Helix Positions").
+    // We keep their real positions and only (re)build the connections. Ids referenced by
+    // the map that aren't on the grid yet get placed near their neighbors via BFS.
+    const sorted = [...allIds].sort((a, b) => a - b);
+    const placed = new Map();       // id -> { col, row }
+    const prevOpacity = new Map();  // id -> opacity (to keep existing nodes' look)
+    const occupied = new Set();     // "col,row" cells already taken
+    nodes.forEach(n => {
+        placed.set(n.id, { col: n.col, row: n.row });
+        prevOpacity.set(n.id, n.opacity);
+        occupied.add(key(n.col, n.row));
+    });
+
+    // Only connections are rebuilt from the map; node positions are left intact.
+    connections.length = 0;
+    selectedKey = null;
+    connectFirstKey = null;
+
+    const directions = gridType === 'square'
+        ? [[1,0],[0,1],[-1,0],[0,-1]]
+        : [[1,0],[0,1],[-1,0],[0,-1],[1,-1],[-1,1]]; // honeycomb neighbors
+
+    const placeNear = (anchor) => {
+        for (let d = 1; d < 2000; d++) {
+            for (const [dc, dr] of directions) {
+                const nc = anchor.col + dc * d, nr = anchor.row + dr * d;
+                if (!occupied.has(key(nc, nr))) return { col: nc, row: nr };
+            }
+        }
+        return { col: anchor.col + 1, row: anchor.row };
+    };
+
+    // BFS placement for ids not already on the grid, anchored to placed neighbors.
+    const queue = sorted.filter(id => placed.has(id));
+    if (queue.length === 0 && sorted.length) {
+        placed.set(sorted[0], { col: 0, row: 0 });
+        occupied.add(key(0, 0));
+        queue.push(sorted[0]);
+    }
     let qi = 0;
     while (qi < queue.length) {
         const curId = queue[qi++];
         const curPos = placed.get(curId);
-        const neighbors = adj.get(curId) || new Set();
-        let dirIdx = 0;
-        const directions = gridType === 'square'
-            ? [[1,0],[0,1],[-1,0],[0,-1]]
-            : [[1,0],[0,1],[-1,0],[0,-1],[1,-1],[-1,1]]; // honeycomb neighbors
-        for (const nid of neighbors) {
+        for (const nid of (adj.get(curId) || new Set())) {
             if (placed.has(nid)) continue;
-            // Find next free direction
-            let placed_child = false;
-            for (let attempt = 0; attempt < directions.length; attempt++) {
-                const [dc, dr] = directions[(dirIdx + attempt) % directions.length];
-                const nc = curPos.col + dc, nr = curPos.row + dr;
-                const nk = key(nc, nr);
-                if (!nodes.has(nk) && !placed.has(nid)) {
-                    placed.set(nid, { col: nc, row: nr });
-                    placed_child = true;
-                    dirIdx = (dirIdx + attempt + 1) % directions.length;
-                    break;
-                }
-            }
-            if (placed_child) queue.push(nid);
+            const pos = placeNear(curPos);
+            placed.set(nid, pos);
+            occupied.add(key(pos.col, pos.row));
+            queue.push(nid);
         }
     }
 
-    // Place any unplaced orphans in a row
+    // Place any still-unplaced orphans in a spare row
     let orphanCol = 0;
     for (const id of sorted) {
-        if (!placed.has(id)) {
-            while (nodes.has(key(orphanCol, -2))) orphanCol++;
-            placed.set(id, { col: orphanCol, row: -2 });
-            orphanCol++;
-        }
+        if (placed.has(id)) continue;
+        while (occupied.has(key(orphanCol, -2))) orphanCol++;
+        placed.set(id, { col: orphanCol, row: -2 });
+        occupied.add(key(orphanCol, -2));
+        orphanCol++;
     }
 
-    // Create nodes
+    // Rebuild nodes from `placed`, keeping opacity of pre-existing nodes.
+    nodes.clear();
     for (const id of sorted) {
         const pos = placed.get(id);
-        const k = key(pos.col, pos.row);
-        nodes.set(k, { col: pos.col, row: pos.row, id, opacity: 3 });
+        nodes.set(key(pos.col, pos.row), {
+            col: pos.col, row: pos.row, id,
+            opacity: prevOpacity.has(id) ? prevOpacity.get(id) : 3
+        });
         if (id >= nextNodeId) nextNodeId = id + 1;
     }
 
@@ -787,8 +800,9 @@ document.getElementById('loadHelixPosBtn').addEventListener('click', () => {
         return;
     }
     // Expected: [[id, [col, row]], ...] or { "id": [col, row], ... }
+    // Reposition nodes only; keep any existing connections (they reference ids, which
+    // stay valid) so you can load positions and a network map in either order.
     nodes.clear();
-    connections.length = 0;
     selectedKey = null;
     connectFirstKey = null;
     nextNodeId = 0;

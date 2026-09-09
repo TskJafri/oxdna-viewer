@@ -2,6 +2,9 @@
 /// <reference path="../typescript_definitions/index.d.ts" />
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
+// Alias the global `helix` namespace before entering `api.helix`, where the
+// bare name would shadow it.
+const helixNs = helix;
 var api;
 (function (api) {
     var helix;
@@ -25,7 +28,7 @@ var api;
         ;
         // Just for a visualization and good only for debugging...
         function addPartialAxisToScene(d) {
-            const { planeVector } = helix.getPartialAxis(d);
+            const { planeVector } = helixNs.getPartialAxis(d);
             const origin = d.start1.getInstanceParameter3('bbOffsets')
                 .add(d.end2.getInstanceParameter3('bbOffsets'))
                 .multiplyScalar(0.5);

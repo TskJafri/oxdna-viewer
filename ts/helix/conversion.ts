@@ -1018,8 +1018,11 @@ namespace toscad {
 
         // Wireframe designs skip merging entirely; their partials are the structure, not artifacts.
         if (!wireframe) {
-            const am = axisMerge(grid, helices, partials, usedSides, latticeType);
-            anglecomb5(grid, helices, latticeType, am.networkMap);
+            // let am = axisMerge(grid, helices, partials, usedSides, latticeType);
+            // anglecomb5(grid, helices, latticeType, am.networkMap);
+            
+            anglecomb5(grid, helices, latticeType);
+            axisMerge(grid, helices, partials, usedSides, latticeType);
         }
 
         // Grid is the source of truth after the merges, so re-derive angles from it.
@@ -1033,6 +1036,8 @@ namespace toscad {
             `[layoutPipeline] ${helices.length} helices, lattice=${latticeType}, wireframe=${wireframe}` +
             (pins.length ? `, pins=${pins.length}` : '')
         );
+
+        validateGrid(grid);
 
         return { helices, grid, helixPos, latticeType, networkMap, partials, usedSides };
     }

@@ -1261,7 +1261,10 @@ var helix;
     }
     helix_1.findHelices = findHelices;
     // Merge two or more helices into the one with the lowest index.
-    function combineHelices(helices, indices, grid) {
+    //
+    // `lattice` is the caller-supplied lattice kind and is honored verbatim — this function never
+    // detects or guesses it. It only picks the crossover period used to resolve offset collisions.
+    function combineHelices(helices, indices, grid, lattice) {
         if (!Array.isArray(helices) || !Array.isArray(indices) || !(grid instanceof Map))
             return null;
         const valid = [];
@@ -1282,9 +1285,51 @@ var helix;
         valid.sort((a, b) => a - b);
         const keptIdxOld = valid[0];
         const mergedIdxOld = valid.slice(1);
+        // Resolution rule:
+        //   - If a single-slot nudge (±1) clears every collision, take it.
+        //   - Otherwise slide by whole helical turns by 21 bp on honeycomb (2 turns @ 10.5 bp/turn)
+        //     or 32 bp on square (3 turns @ ~10.67 bp/turn).
+        const TURN_SHIFT = lattice === 'square' ? 32 : 21;
+        const MAX_SHIFT = TURN_SHIFT * 64; // safety cap so a pathological case can't loop forever
+        const offsetKey = (m) => `${m.direction}|${m.offset}`;
+        // True when none of `marks` land on an occupied slot after shifting every offset by `delta`.
+        const clearsAt = (marks, delta) => !marks.some(m => occupied.has(`${m.direction}|${m.offset + delta}`));
+        // (direction, offset) slots already taken on the kept axis. Grows as each merged helix folds in.
+        const occupied = new Set();
+        helices[keptIdxOld].forEach(nt => {
+            const mark = grid.get(nt.id);
+            if (mark)
+                occupied.add(offsetKey(mark));
+        });
         // Move nucleotides into the kept helix, deduping by id
         const seenNts = new Set(helices[keptIdxOld].map(nt => nt.id));
         mergedIdxOld.forEach(idx => {
+            // Grid marks for this helix's nucleotides — the offsets we may need to shift.
+            const marks = helices[idx]
+                .map(nt => grid.get(nt.id))
+                .filter((m) => m !== undefined);
+            // Does this helix land on any slot the kept axis is already using?
+            if (marks.some(m => occupied.has(offsetKey(m)))) {
+                let shift;
+                if (clearsAt(marks, 1)) {
+                    shift = 1; // a single-slot nudge is enough
+                }
+                else if (clearsAt(marks, -1)) {
+                    shift = -1; // ...in either direction
+                }
+                else {
+                    // Needs more than one slot: advance by whole turns to keep the phase intact.
+                    shift = TURN_SHIFT;
+                    while (shift < MAX_SHIFT && !clearsAt(marks, shift)) {
+                        shift += TURN_SHIFT;
+                    }
+                }
+                marks.forEach(m => { m.offset += shift; });
+                console.log(`[combineHelices] helix ${idx} overlapped helix ${keptIdxOld} — ` +
+                    `shifted offsets by ${shift >= 0 ? '+' : ''}${shift} (${lattice})`);
+            }
+            // Register this helix's (possibly shifted) slots so later merges in this call avoid them too.
+            marks.forEach(m => occupied.add(offsetKey(m)));
             helices[idx].forEach(nt => {
                 if (seenNts.has(nt.id))
                     return;

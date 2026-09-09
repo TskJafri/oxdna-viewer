@@ -2,7 +2,11 @@
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
 
-module api.helix{
+// Alias the global `helix` namespace before entering `api.helix`, where the
+// bare name would shadow it.
+const helixNs = helix;
+
+namespace api.helix{
     // Helper function to show the endpoints of all helices in the console. Useful for debugging.
     export function showHelixEndpoints(helices: Nucleotide[][]) {
         // const helices = await helix.findHelices(elements, 2);
@@ -26,7 +30,7 @@ module api.helix{
         start2: Nucleotide;
         end2: Nucleotide;
     }) {
-        const { planeVector } = helix.getPartialAxis(d);
+        const { planeVector } = helixNs.getPartialAxis(d);
         const origin = d.start1.getInstanceParameter3('bbOffsets')
             .add(d.end2.getInstanceParameter3('bbOffsets'))
             .multiplyScalar(0.5);
