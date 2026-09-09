@@ -990,15 +990,15 @@ namespace toscad {
         options?: {
             tolerance?: number;
             lattice?: 'honeycomb' | 'square' | 'automatic';
-            maxIterations?: number;
+            renumber?: boolean;
             wireframe?: boolean;
-            // Hard relative-placement requirements, applied before any angle-derived edge.
-            // Helices named here are also held fixed through posCorr5's overlap resolution.
+            // Hard relative-placement requirements, applied before any angle-derived edge. Also overrides posCorr5.
             pins?: RelativePin[];
         }) {
         const {
             tolerance = 3,
             lattice = 'automatic',
+            renumber = true,
             wireframe = false,
             pins = []
         } = options || {};
@@ -1026,11 +1026,22 @@ namespace toscad {
         }
 
         // Grid is the source of truth after the merges, so re-derive angles from it.
-        const networkMap = getAngles(grid, helices, latticeType);
+        let networkMap = getAngles(grid, helices, latticeType);
         const kr = kruskals(networkMap, grid, latticeType, voteOrientations(networkMap, grid, latticeType), pins);
         const pinnedIds = new Set<number>();
         for (const p of pins) { pinnedIds.add(p.a); pinnedIds.add(p.b); }
-        const helixPos = posCorr5(kr, helices, pinnedIds);
+        let helixPos = posCorr5(kr, helices, pinnedIds);
+
+        // Optional spatial renumbering of the output helix numbering (ids/callsigns untouched).
+        if (renumber) {
+            const { remap } = renumberHelicesGNN(grid, helixPos, latticeType, binderIds);
+            ({ helices, helixPos } = applyHelixRenumber(helices, grid, helixPos, remap));
+
+            // Helix ids changed, so re-derive angles and re-run kruskals + posCorr5 to settle into stable state.
+            networkMap = getAngles(grid, helices, latticeType);
+            const kr2 = kruskals(networkMap, grid, latticeType, voteOrientations(networkMap, grid, latticeType), pins);
+            helixPos = posCorr5(kr2, helices, pinnedIds);
+        }
 
         console.log(
             `[layoutPipeline] ${helices.length} helices, lattice=${latticeType}, wireframe=${wireframe}` +

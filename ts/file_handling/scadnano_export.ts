@@ -32,7 +32,6 @@ interface Window {
 
 namespace scadnanoExport {
     const TOLERANCE = 3;
-    const MAX_ITERATIONS = 10;
 
     let layout: ScadnanoLayout | null = null;
     let connections: Array<[number, number]> = [];
@@ -62,7 +61,6 @@ namespace scadnanoExport {
         layout = toscad.layoutPipeline(nucleotides, {
             tolerance: TOLERANCE,
             lattice,
-            maxIterations: MAX_ITERATIONS,
             wireframe,
             pins
         });

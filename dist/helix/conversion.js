@@ -916,7 +916,7 @@ var toscad;
     - REMOVE THE "preservedNtIds" LOGIC IN THE PIPELINE. ASAP.
     */
     function layoutPipeline(inputElements, options) {
-        const { tolerance = 3, lattice = 'automatic', wireframe = false, pins = [] } = options || {};
+        const { tolerance = 3, lattice = 'automatic', renumber = true, wireframe = false, pins = [] } = options || {};
         let { helices, partials, usedSides, binderHelices } = helix.findHelices(inputElements, tolerance);
         let { grid } = setGrid(helices);
         directionAlign2(grid);
@@ -934,14 +934,23 @@ var toscad;
             toscad.axisMerge(grid, helices, partials, usedSides, latticeType);
         }
         // Grid is the source of truth after the merges, so re-derive angles from it.
-        const networkMap = toscad.getAngles(grid, helices, latticeType);
+        let networkMap = toscad.getAngles(grid, helices, latticeType);
         const kr = toscad.kruskals(networkMap, grid, latticeType, toscad.voteOrientations(networkMap, grid, latticeType), pins);
         const pinnedIds = new Set();
         for (const p of pins) {
             pinnedIds.add(p.a);
             pinnedIds.add(p.b);
         }
-        const helixPos = toscad.posCorr5(kr, helices, pinnedIds);
+        let helixPos = toscad.posCorr5(kr, helices, pinnedIds);
+        // Optional spatial renumbering of the output helix numbering (ids/callsigns untouched).
+        if (renumber) {
+            const { remap } = toscad.renumberHelicesGNN(grid, helixPos, latticeType, binderIds);
+            ({ helices, helixPos } = toscad.applyHelixRenumber(helices, grid, helixPos, remap));
+            // Helix ids changed, so re-derive angles and re-run kruskals + posCorr5 to settle into stable state.
+            networkMap = toscad.getAngles(grid, helices, latticeType);
+            const kr2 = toscad.kruskals(networkMap, grid, latticeType, toscad.voteOrientations(networkMap, grid, latticeType), pins);
+            helixPos = toscad.posCorr5(kr2, helices, pinnedIds);
+        }
         console.log(`[layoutPipeline] ${helices.length} helices, lattice=${latticeType}, wireframe=${wireframe}` +
             (pins.length ? `, pins=${pins.length}` : ''));
         validateGrid(grid);

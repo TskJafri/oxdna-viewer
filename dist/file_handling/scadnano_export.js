@@ -3,7 +3,6 @@
 var scadnanoExport;
 (function (scadnanoExport) {
     const TOLERANCE = 3;
-    const MAX_ITERATIONS = 10;
     let layout = null;
     let connections = [];
     let gridEditor = null;
@@ -25,7 +24,6 @@ var scadnanoExport;
         layout = toscad.layoutPipeline(nucleotides, {
             tolerance: TOLERANCE,
             lattice,
-            maxIterations: MAX_ITERATIONS,
             wireframe,
             pins
         });

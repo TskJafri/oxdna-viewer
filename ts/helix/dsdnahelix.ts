@@ -17,6 +17,8 @@ Definitions:
 // For even easier use, just run:
 // let {helices, partials, usedSides} = await helix.findHelices(elements, 2);
 
+// MAJOR TODO: Wireframe option still merges "binders" or "overhangs"
+
 namespace helix {
 	// helper function cuz didnt want to type this every time
 	export function checkAngle(n1: Nucleotide | null = null, n2: Nucleotide | null = null) {
