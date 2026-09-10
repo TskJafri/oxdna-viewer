@@ -7,6 +7,9 @@ Very important to know the following before you read the code further:
 - scadnano files use strands, not individual nucleotides, and each strand requires a direction. Thus, we use "fwd" and "bwd" for directions.
 - 'forward'-labeled nt has offsets that increase along its own 5'->3'.
 - buildScadnano3 builds strands from 5'->3', and is fully and only influenced by topology and setGrid.
+
+Things for debugging:
+- If ssRNA or if you have a big helix that keeps getting placed like a binder, go to findNextPaired. It has a limit of 1000 bps. Beware.
 */
 var toscad;
 (function (toscad) {
@@ -196,7 +199,8 @@ var toscad;
                 if (s.curr)
                     s.visited.add(s.curr.id);
             // Main loop
-            for (let steps = 0; steps < 200; steps++) {
+            // NOTE: # steps CAN cause bad behavior for RNA or ssDNA structures!!! BEWARE!!
+            for (let steps = 0; steps < 1000; steps++) {
                 // Advance both sides
                 let anyAdvanced = false;
                 for (const s of sides) {
@@ -240,14 +244,33 @@ var toscad;
             // nucleotide -> helixId
             const helixSet = new Set(helix.map(n => n.id));
             const endpoints = helixEndpoints(helix);
-            // Detect binder helix: no nucleotide has a pair *within* the helix
-            const hasPairInHelix = helix.some(n => n.pair && n.pair instanceof Nucleotide && helixSet.has(n.pair.id));
-            if (!hasPairInHelix) {
-                binderHelices.push(helixId);
-            }
             // If the helix is a merged helix, find which ones were the originals. Disconnected helices CANNOT be walked by this walker.
             const originGroups = preserveGrid ? mergedGroups?.get(helixId) : undefined;
             const isMergedHelix = !!(originGroups && originGroups.length > 0);
+            // Detect binder helix: no nucleotide has a pair *within* the helix
+            // Log diagnostic pair counts so misclassified helices can be spotted.
+            const withinPairEdges = new Set();
+            let crossPairs = 0, unpaired = 0;
+            for (const n of helix) {
+                const p = n.pair;
+                if (!(p instanceof Nucleotide)) {
+                    unpaired++;
+                    continue;
+                }
+                if (helixSet.has(p.id)) {
+                    withinPairEdges.add(`${Math.min(n.id, p.id)}:${Math.max(n.id, p.id)}`);
+                }
+                else {
+                    crossPairs++;
+                }
+            }
+            const hasPairInHelix = withinPairEdges.size > 0;
+            if (!hasPairInHelix) {
+                binderHelices.push(helixId);
+            }
+            console.log(`[setGrid] helix=${helixId} len=${helix.length} merged=${isMergedHelix} ` +
+                `bpWithin=${withinPairEdges.size} crossPairs=${crossPairs} unpaired=${unpaired} ` +
+                `=> ${hasPairInHelix ? 'HELIX' : 'BINDER'}`);
             if (isMergedHelix) {
                 for (const group of originGroups) {
                     for (const ntId of group) {
@@ -444,6 +467,7 @@ var toscad;
             }
         });
         // Note: The alignment of the merged helices is left upto alignMergedGroups()
+        console.log(`[setGrid] binderHelices=[${binderHelices.join(', ')}]`);
         return { grid, binderHelices };
     }
     toscad.setGrid = setGrid;
