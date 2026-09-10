@@ -218,15 +218,17 @@ var scadnanoExport;
         gridEditorType = gridType;
         gridEditor.onNodesChanged = () => publishHelixPos();
         // Genuine user drags only (suppressed for programmatic moves). Record one undo entry per
-        // drag: snapshot the post-drag state, then rewind the moved node to its pre-drag cell so the
-        // stored snapshot is the state as it was BEFORE the drag.
+        // drag: snapshot the post-drag state, then rewind every moved node to its pre-drag cell so
+        // the stored snapshot is the state as it was BEFORE the drag.
         gridEditor.onNodeMoved = (info) => {
             const before = snapshot();
             if (!before)
                 return;
-            const entry = before.helixPos.find(([id]) => id === Number(info.id));
-            if (entry)
-                entry[1] = [info.from[0], info.from[1]];
+            (info.moves ?? [info]).forEach(move => {
+                const entry = before.helixPos.find(([id]) => id === Number(move.id));
+                if (entry)
+                    entry[1] = [move.from[0], move.from[1]];
+            });
             pushHistory(before);
         };
         gridEditor.onNodeSelected = (node) => {

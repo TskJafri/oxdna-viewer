@@ -64,6 +64,18 @@ namespace scadnano {
         to: number;
     }
 
+    export interface NodeMove {
+        id: number;
+        from: [number, number];
+        to: [number, number];
+    }
+
+    export interface NodeMoveInfo extends NodeMove {
+        // Present for group drags. The top-level fields remain for callers that only
+        // need the helix the user grabbed.
+        moves?: NodeMove[];
+    }
+
     interface NodeRecord {
         node: HelixNode;
         mesh: THREE.Mesh;
@@ -216,10 +228,10 @@ namespace scadnano {
         public onSelectionChanged: ((ids: number[]) => void) | null = null;
         // Callback fired when a user drag finishes and the node landed on a new cell.
         // Suppressed for programmatic moves so undo/redo don't pollute the history.
-        public onNodeMoved: ((info: { id: number; from: [number, number]; to: [number, number] }) => void) | null = null;
+        public onNodeMoved: ((info: NodeMoveInfo) => void) | null = null;
 
-        // Records the cell a drag started in so we can report the full transition on drag-end.
-        private dragStartCell: { col: number; row: number; id: number } | null = null;
+        // Records every selected cell at drag start so group drags produce one undoable change.
+        private dragStartCells: Array<{ col: number; row: number; id: number }> = [];
         // When true, _moveNode skips firing onNodeMoved (used by undo/redo paths).
         private suppressMoveCallback = false;
 
@@ -667,7 +679,17 @@ namespace scadnano {
             const cell = this._cellFromClientPoint(clientX, clientY);
             if (!cell) return;
 
-            const nextKey = this._moveNode(this.draggingNodeKey, cell.col, cell.row);
+            const draggedRec = this.records.get(this.draggingNodeKey);
+            if (!draggedRec) return;
+
+            const deltaCol = cell.col - draggedRec.node.col;
+            const deltaRow = cell.row - draggedRec.node.row;
+            const selectedKeys = this._selectedNodeKeys();
+            const moveKeys = selectedKeys.includes(this.draggingNodeKey)
+                ? selectedKeys
+                : [this.draggingNodeKey];
+            const movedKeys = this._moveNodes(moveKeys, deltaCol, deltaRow);
+            const nextKey = movedKeys.get(this.draggingNodeKey) ?? this.draggingNodeKey;
             if (nextKey !== this.draggingNodeKey) {
                 this.draggingNodeKey = nextKey;
             }
@@ -679,35 +701,69 @@ namespace scadnano {
             const rec = this.records.get(fromKey);
             if (!rec) return fromKey;
 
-            const toKey = this._key(toCol, toRow);
-            if (toKey === fromKey) return fromKey;
-            if (this.records.has(toKey)) return fromKey;
+            const movedKeys = this._moveNodes(
+                [fromKey],
+                toCol - rec.node.col,
+                toRow - rec.node.row
+            );
+            return movedKeys.get(fromKey) ?? fromKey;
+        }
 
-            const pos = gridToWorld(toCol, toRow, this.layout);
-            rec.node.col = toCol;
-            rec.node.row = toRow;
-            rec.mesh.position.set(pos.x, pos.y, 0);
-            rec.mesh.userData.col = toCol;
-            rec.mesh.userData.row = toRow;
-            rec.mesh.userData.key = toKey;
+        private _selectedNodeKeys(): string[] {
+            const keys = new Set<string>();
+            if (this.selectedKey && this.records.has(this.selectedKey)) keys.add(this.selectedKey);
+            this.selectedKeys.forEach(key => {
+                if (this.records.has(key)) keys.add(key);
+            });
+            return [...keys];
+        }
 
-            const ring = rec.mesh.userData.ring as THREE.Mesh | undefined;
-            if (ring) ring.position.set(pos.x, pos.y, 0.5);
-            rec.labelSprite.position.set(pos.x, pos.y, 1.2);
+        /** Translate nodes as one atomic operation, or leave all of them in place on collision. */
+        private _moveNodes(fromKeys: string[], deltaCol: number, deltaRow: number): Map<string, string> {
+            const movedKeys = new Map<string, string>();
+            if (deltaCol === 0 && deltaRow === 0) return movedKeys;
 
-            this.records.delete(fromKey);
-            this.records.set(toKey, rec);
+            const movingKeys = new Set(fromKeys);
+            const moves = fromKeys.map(fromKey => {
+                const rec = this.records.get(fromKey);
+                if (!rec) return null;
+                const toCol = rec.node.col + deltaCol;
+                const toRow = rec.node.row + deltaRow;
+                return { fromKey, toKey: this._key(toCol, toRow), toCol, toRow, rec };
+            });
 
-            this._expandGridToIncludeCell(toCol, toRow);
-
-            if (this.selectedKey === fromKey) this.selectedKey = toKey;
-            if (this.selectedKeys.has(fromKey)) {
-                this.selectedKeys.delete(fromKey);
-                this.selectedKeys.add(toKey);
+            if (moves.some(move => !move)) return movedKeys;
+            if (moves.some(move => this.records.has(move!.toKey) && !movingKeys.has(move!.toKey))) {
+                return movedKeys;
             }
+
+            moves.forEach(move => this.records.delete(move!.fromKey));
+            moves.forEach(move => {
+                const { fromKey, toKey, toCol, toRow, rec } = move!;
+                const pos = gridToWorld(toCol, toRow, this.layout);
+                rec.node.col = toCol;
+                rec.node.row = toRow;
+                rec.mesh.position.set(pos.x, pos.y, 0);
+                rec.mesh.userData.col = toCol;
+                rec.mesh.userData.row = toRow;
+                rec.mesh.userData.key = toKey;
+
+                const ring = rec.mesh.userData.ring as THREE.Mesh | undefined;
+                if (ring) ring.position.set(pos.x, pos.y, 0.5);
+                rec.labelSprite.position.set(pos.x, pos.y, 1.2);
+
+                this.records.set(toKey, rec);
+                movedKeys.set(fromKey, toKey);
+                this._expandGridToIncludeCell(toCol, toRow);
+            });
+
+            if (this.selectedKey) this.selectedKey = movedKeys.get(this.selectedKey) ?? this.selectedKey;
+            this.selectedKeys = new Set(
+                [...this.selectedKeys].map(key => movedKeys.get(key) ?? key)
+            );
             this._rebuildConnectionLines();
             this.onNodesChanged?.();
-            return toKey;
+            return movedKeys;
         }
 
         private _rebuildConnectionLines(): void {
@@ -921,18 +977,21 @@ namespace scadnano {
                 const key = this._key(cell.col, cell.row);
                 // Skip drag init when ctrl/cmd is held — that gesture is for multi-select toggle.
                 if (e.ctrlKey || e.metaKey) return;
-                if (key === this.selectedKey && this.records.has(key)) {
-                    // Don't start a drag if this helix is locked.
-                    const rec = this.records.get(key);
-                    if (rec && this.lockedHelices.has(rec.node.id)) return;
+                const selectedKeys = this._selectedNodeKeys();
+                if (selectedKeys.includes(key) && this.records.has(key)) {
+                    // A selected group moves together, so a locked member pins the whole group.
+                    if (selectedKeys.some(selectedKey => {
+                        const rec = this.records.get(selectedKey);
+                        return rec ? this.lockedHelices.has(rec.node.id) : false;
+                    })) return;
 
                     this.draggingNodeKey = key;
                     this.draggingPointer = { x: e.clientX, y: e.clientY };
                     this.hasDragged = false;
-                    const startRec = this.records.get(key);
-                    this.dragStartCell = startRec
-                        ? { col: cell.col, row: cell.row, id: Number(startRec.node.id) }
-                        : null;
+                    this.dragStartCells = selectedKeys.map(selectedKey => {
+                        const rec = this.records.get(selectedKey)!;
+                        return { col: rec.node.col, row: rec.node.row, id: Number(rec.node.id) };
+                    });
                     e.preventDefault();
                 }
             }
@@ -961,10 +1020,11 @@ namespace scadnano {
         private _onMouseUp(_e: MouseEvent): void {
             const wasDraggingNode = this.draggingNodeKey !== null;
             const draggedKey = this.draggingNodeKey;
-            const startCell = this.dragStartCell;
+            const draggedId = draggedKey ? Number(this.records.get(draggedKey)?.node.id) : NaN;
+            const startCells = this.dragStartCells;
             if (this.draggingNodeKey) this.draggingNodeKey = null;
             this.draggingPointer = null;
-            this.dragStartCell = null;
+            this.dragStartCells = [];
 
             if (this.isPanning) {
                 this.isPanning = false;
@@ -975,19 +1035,20 @@ namespace scadnano {
 
             if (wasDraggingNode) {
                 // Emit a move-completed event only if the cell actually changed (skip no-op clicks).
-                if (draggedKey && startCell && !this.suppressMoveCallback) {
-                    const rec = this.records.get(draggedKey);
-                    if (rec) {
-                        const toCol = rec.node.col;
-                        const toRow = rec.node.row;
-                        if (toCol !== startCell.col || toRow !== startCell.row) {
-                            this.onNodeMoved?.({
-                                id: startCell.id,
-                                from: [startCell.col, startCell.row],
-                                to:   [toCol, toRow]
-                            });
-                        }
-                    }
+                if (startCells.length && !this.suppressMoveCallback) {
+                    const currentById = new Map<number, NodeRecord>();
+                    this.records.forEach(rec => currentById.set(Number(rec.node.id), rec));
+                    const moves: NodeMove[] = startCells.flatMap(start => {
+                        const rec = currentById.get(start.id);
+                        if (!rec || (rec.node.col === start.col && rec.node.row === start.row)) return [];
+                        return [{
+                            id: start.id,
+                            from: [start.col, start.row] as [number, number],
+                            to: [rec.node.col, rec.node.row] as [number, number]
+                        }];
+                    });
+                    const draggedMove = moves.find(move => move.id === draggedId) ?? moves[0];
+                    if (draggedMove) this.onNodeMoved?.({ ...draggedMove, moves });
                 }
                 // Reset hasDragged on the next tick so click handler can check it first
                 setTimeout(() => { this.hasDragged = false; }, 0);
