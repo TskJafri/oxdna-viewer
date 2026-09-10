@@ -192,30 +192,26 @@ var helix;
         return { ssdna, stubs, longssScaffold };
     }
     helix_1.sortUnpaired = sortUnpaired;
-    // Enforce equal halves on each scaffold run (already grouped topologically by sortUnpaired).
-    function longssScaffoldfunc(longssScaffold, stubs = []) {
-        const ssScaffold = [];
-        longssScaffold.forEach(run => {
-            if (run.length < 3) {
-                run.forEach(nt => stubs.push(nt));
-                return;
-            }
-            // Enforce equal halves; trim one nucleotide if odd-length to satisfy the requirement.
-            const evenLen = run.length - (run.length % 2);
-            if (evenLen !== run.length) {
-                const dropped = run[evenLen];
-                if (dropped)
-                    stubs.push(dropped);
-            }
-            if (evenLen === 0)
-                return;
-            const half = evenLen / 2;
-            ssScaffold.push(run.slice(0, half));
-            ssScaffold.push(run.slice(half, evenLen));
-        });
-        return ssScaffold;
-    }
-    helix_1.longssScaffoldfunc = longssScaffoldfunc;
+    // DEPRECATED / DISABLED: longssScaffoldfunc used to split each scaffold run into two equal halves
+    // (the "0.5-0.5" split) so it could be distributed across the two helices it bridges. That split is
+    // gone: whole scaffold runs are now attached to a single helix by generateHelix's ssScaffold
+    // routing. sortUnpaired only ever emits runs of length >= 3, so the remaining <3 -> stubs branch was
+    // dead code and the function was a pure passthrough (longssScaffold -> ssScaffold). It is therefore
+    // no longer used; longssScaffold is passed directly to generateHelix. Kept here for reference.
+    //
+    // export function longssScaffoldfunc(longssScaffold: Nucleotide[][], stubs: Nucleotide[] = []) {
+    // 	const ssScaffold: Nucleotide[][] = [];
+    //
+    // 	longssScaffold.forEach(run => {
+    // 		if (run.length < 3) {
+    // 			run.forEach(nt => stubs.push(nt));
+    // 			return;
+    // 		}
+    // 		ssScaffold.push(run);
+    // 	});
+    //
+    // 	return ssScaffold;
+    // }
     // Find the 4 endpoints of each partial in partialEndsMap. The sides are not oriented any way.
     function mapPartialEnds(partials) {
         const partialEndsMap = new Map();
@@ -545,6 +541,8 @@ var helix;
         });
         // Track which side has been used, per partial pIdx.
         const usedSides = new Map();
+        // "cost" of attaching a strand is 1. It used to be 0.5 for reasons that no longer apply.
+        const SIDE_SLOT = 1;
         // Per-partial attachment count for 1-bp partials only (they don't have sides).
         const noSideAttachCount = new Map();
         const PER_PARTIAL_CAP = 2;
@@ -781,7 +779,11 @@ var helix;
                 }
                 return null;
             };
-            let pending = ssScaffold.filter(segment => segment.length > 0);
+            // Process ssScaffold segments in ascending order of their lowest nucleotide id.
+            const ssScaffoldMinId = (seg) => seg.reduce((m, nt) => Math.min(m, nt.id), Infinity);
+            let pending = ssScaffold
+                .filter(segment => segment.length > 0)
+                .sort((a, b) => ssScaffoldMinId(a) - ssScaffoldMinId(b));
             const maxRounds = Math.max(1, pending.length * 2);
             let round = 0;
             // while there's still ssScaffold segments remaining to attach...
@@ -807,10 +809,10 @@ var helix;
                     let attached = false;
                     for (const hIdx of targets) {
                         const conn = findSsScaffoldConnectionSide(segment, hIdx);
-                        if (conn && !slotAvailable(conn.pIdx, conn.side, 0.5))
+                        if (conn && !slotAvailable(conn.pIdx, conn.side, SIDE_SLOT))
                             continue;
                         if (conn)
-                            reserveSlot(conn.pIdx, conn.side, 0.5);
+                            reserveSlot(conn.pIdx, conn.side, SIDE_SLOT);
                         addToHelix(hIdx, segment);
                         attached = true;
                         break;
@@ -978,26 +980,70 @@ var helix;
         const isOverhang = (res) => res?.result === 'overhang';
         const hasPartial = (res) => res?.firstPartialId !== undefined;
         // Helper to claim a partial side for an ssDNA overhang. If the side is already
-        // reserved (by a partial-partial edge or a stub bridge), the overhang is reclassified
-        // as a binder so it follows binder routing rules instead.
+        // reserved (by a partial-partial edge, a stub bridge, or an ssScaffold segment), the
+        // overhang is reclassified as a binder so it follows binder routing rules instead.
         const tryReserveOverhangSide = (res) => {
             if (!res || res.result !== 'overhang')
                 return res;
             if (res.firstPartialId === undefined)
                 return res;
-            if (!slotAvailable(res.firstPartialId, res.firstPartialSide, 0.5)) {
+            if (!slotAvailable(res.firstPartialId, res.firstPartialSide, SIDE_SLOT)) {
                 return { ...res, result: 'binder' };
             }
-            reserveSlot(res.firstPartialId, res.firstPartialSide, 0.5);
+            reserveSlot(res.firstPartialId, res.firstPartialSide, SIDE_SLOT);
             return res;
+        };
+        // Attach a "double overhang" (an ssDNA whose two ends each reach a helix) entirely to a single helix instead of splitting it in half.
+        const attachDoubleOverhang = (segment, res5, res3) => {
+            for (const res of [res5, res3]) {
+                if (res.firstHelixId === undefined || res.firstPartialId === undefined)
+                    continue;
+                if (!slotAvailable(res.firstPartialId, res.firstPartialSide, SIDE_SLOT))
+                    continue;
+                reserveSlot(res.firstPartialId, res.firstPartialSide, SIDE_SLOT);
+                addSegmentToHelix(res.firstHelixId, segment);
+                return;
+            }
+            // Both candidate sides occupied: preserve the old behavior rather than drop the segment.
+            if (res5.firstHelixId !== undefined && res3.firstHelixId !== undefined) {
+                console.warn('[overhang] Both helix sides already taken; falling back to half-split.', {
+                    segmentLength: segment.length,
+                    helixA: res5.firstHelixId,
+                    helixB: res3.firstHelixId
+                });
+                const half = Math.floor(segment.length / 2);
+                addSegmentToHelix(res5.firstHelixId, segment.slice(0, half));
+                addSegmentToHelix(res3.firstHelixId, segment.slice(half));
+                return;
+            }
+            if (res5.firstHelixId !== undefined) {
+                addSegmentToHelix(res5.firstHelixId, segment);
+                return;
+            }
+            if (res3.firstHelixId !== undefined) {
+                addSegmentToHelix(res3.firstHelixId, segment);
+                return;
+            }
         };
         // The lot of if statements are required (unless you can figure out a better way).
         // You can read through these, but they mostly comprise of cases where the segment is connected to helices on both ends, and has different types of such connections.
         // example, if overhang on one end and binder on the other, then it will connect to the helix on overhang side.
-        ssdna.forEach(segment => {
+        // Process ssDNA segments in ascending order of their lowest nucleotide id. 
+        // This gives deterministic priority:
+        //  	when two overhangs contend for the same helix side, the segment containing the lowest id claims it first and the other is routed to its other helix.
+        const segMinId = (seg) => seg.reduce((m, nt) => Math.min(m, nt.id), Infinity);
+        const orderedSsdna = ssdna.slice().sort((a, b) => segMinId(a) - segMinId(b));
+        orderedSsdna.forEach(segment => {
             if (!segment.length)
                 return;
             const raw = classifySegment(segment);
+            // Both ends are overhangs that each reach a helix: this is the ssDNA that used to be
+            // split half-and-half between the two helices. Attach the whole segment to a single
+            // helix instead, honoring the "one overhang per helix side" rule.
+            if (isOverhang(raw.res5) && hasPartial(raw.res5) && isOverhang(raw.res3) && hasPartial(raw.res3)) {
+                attachDoubleOverhang(segment, raw.res5, raw.res3);
+                return;
+            }
             const res5 = tryReserveOverhangSide(raw.res5);
             const res3 = tryReserveOverhangSide(raw.res3);
             const res5HasPartial = hasPartial(res5);
@@ -1016,16 +1062,9 @@ var helix;
                     addSegmentToHelix(res3.firstHelixId, segment);
                 return;
             }
-            if (isOverhang(res5) && res5HasPartial && isOverhang(res3) && res3HasPartial) {
-                if (res5.firstHelixId !== undefined && res3.firstHelixId !== undefined) {
-                    const half = Math.floor(segment.length / 2);
-                    const left = segment.slice(0, half);
-                    const right = segment.slice(half);
-                    addSegmentToHelix(res5.firstHelixId, left);
-                    addSegmentToHelix(res3.firstHelixId, right);
-                    return;
-                }
-            }
+            // Note: the "both ends overhang + partial" case is handled earlier via
+            // attachDoubleOverhang (whole segment to one helix). tryReserveOverhangSide only ever
+            // downgrades overhang -> binder, so res5/res3 can no longer both be overhang+partial here.
             if (isOverhang(res5) && hasPartial(res5) && isBinder(res3)) {
                 if (res5.firstHelixId !== undefined)
                     addSegmentToHelix(res5.firstHelixId, segment);
@@ -1254,8 +1293,7 @@ var helix;
         // ok now we can do the rest of the stuff.
         let { partials, unpaired } = findHelixPartials2(inputMap, tolerance);
         let { ssdna, stubs, longssScaffold } = sortUnpaired(unpaired);
-        let ssScaffold = longssScaffoldfunc(longssScaffold, stubs);
-        let { helices, binderHelices, lastScraps, binders, binder2, disconnected, unhandled, usedSides } = generateHelix(partials, ssdna, ssScaffold, stubs);
+        let { helices, binderHelices, lastScraps, binders, binder2, disconnected, unhandled, usedSides } = generateHelix(partials, ssdna, longssScaffold, stubs);
         console.log("Helices size:", helices.flat().length);
         console.log("Total elements:", inputMap.size);
         return { helices, partials, usedSides, binderHelices };
