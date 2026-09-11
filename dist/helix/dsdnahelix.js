@@ -1347,16 +1347,61 @@ var helix;
         //   - Otherwise slide by whole helical turns by 21 bp on honeycomb (2 turns @ 10.5 bp/turn)
         //     or 32 bp on square (3 turns @ ~10.67 bp/turn).
         const TURN_SHIFT = lattice === 'square' ? 32 : 21;
-        const MAX_SHIFT = TURN_SHIFT * 64; // safety cap so a pathological case can't loop forever
         const offsetKey = (m) => `${m.direction}|${m.offset}`;
-        // True when none of `marks` land on an occupied slot after shifting every offset by `delta`.
-        const clearsAt = (marks, delta) => !marks.some(m => occupied.has(`${m.direction}|${m.offset + delta}`));
-        // (direction, offset) slots already taken on the kept axis. Grows as each merged helix folds in.
-        const occupied = new Set();
+        const occupiedFrom = (marks) => new Set(marks.map(offsetKey));
+        const clearsAgainst = (moving, fixed, delta) => !moving.some(m => fixed.has(`${m.direction}|${m.offset + delta}`));
+        const rangeCenter = (marks) => {
+            let min = Infinity;
+            let max = -Infinity;
+            for (const mark of marks) {
+                if (mark.offset < min)
+                    min = mark.offset;
+                if (mark.offset > max)
+                    max = mark.offset;
+            }
+            return min === Infinity ? 0 : (min + max) / 2;
+        };
+        const findTurnPlacement = (moving, fixed) => {
+            if (!moving.length || !fixed.length)
+                return { delta: 0, steps: 0 };
+            const fixedSlots = occupiedFrom(fixed);
+            const movingCenter = rangeCenter(moving);
+            const fixedCenter = rangeCenter(fixed);
+            let movingMin = Infinity, movingMax = -Infinity;
+            let fixedMin = Infinity, fixedMax = -Infinity;
+            for (const mark of moving) {
+                movingMin = Math.min(movingMin, mark.offset);
+                movingMax = Math.max(movingMax, mark.offset);
+            }
+            for (const mark of fixed) {
+                fixedMin = Math.min(fixedMin, mark.offset);
+                fixedMax = Math.max(fixedMax, mark.offset);
+            }
+            // These bounds reach a placement wholly above or below the fixed range,
+            // guaranteeing a collision-free whole-turn shift for finite inputs.
+            const positiveLimit = Math.max(1, Math.floor((fixedMax - movingMin) / TURN_SHIFT) + 1);
+            const negativeLimit = Math.max(1, Math.floor((movingMax - fixedMin) / TURN_SHIFT) + 1);
+            const maxSteps = Math.max(positiveLimit, negativeLimit);
+            const preferPositive = movingCenter >= fixedCenter;
+            for (let steps = 1; steps <= maxSteps; steps++) {
+                const positive = steps * TURN_SHIFT;
+                const negative = -positive;
+                const first = preferPositive ? positive : negative;
+                const second = preferPositive ? negative : positive;
+                if (clearsAgainst(moving, fixedSlots, first))
+                    return { delta: first, steps };
+                if (clearsAgainst(moving, fixedSlots, second))
+                    return { delta: second, steps };
+            }
+            throw new Error('[combineHelices] failed to find guaranteed whole-turn placement');
+        };
+        // Marks already folded into the kept axis. This grows as each selected helix
+        // is merged and moves as a unit if the accumulated side wins the comparison.
+        const keptMarks = [];
         helices[keptIdxOld].forEach(nt => {
             const mark = grid.get(nt.id);
             if (mark)
-                occupied.add(offsetKey(mark));
+                keptMarks.push(mark);
         });
         // Move nucleotides into the kept helix, deduping by id
         const seenNts = new Set(helices[keptIdxOld].map(nt => nt.id));
@@ -1365,28 +1410,45 @@ var helix;
             const marks = helices[idx]
                 .map(nt => grid.get(nt.id))
                 .filter((m) => m !== undefined);
-            // Does this helix land on any slot the kept axis is already using?
+            // Does this helix land on any slot the accumulated kept axis is already using?
+            const occupied = occupiedFrom(keptMarks);
             if (marks.some(m => occupied.has(offsetKey(m)))) {
-                let shift;
-                if (clearsAt(marks, 1)) {
-                    shift = 1; // a single-slot nudge is enough
+                if (clearsAgainst(marks, occupied, 1)) {
+                    marks.forEach(m => { m.offset += 1; });
+                    console.log(`[combineHelices] helix ${idx} overlapped helix ${keptIdxOld} — ` +
+                        `shifted helix ${idx} offsets by +1 (${lattice})`);
                 }
-                else if (clearsAt(marks, -1)) {
-                    shift = -1; // ...in either direction
+                else if (clearsAgainst(marks, occupied, -1)) {
+                    marks.forEach(m => { m.offset -= 1; });
+                    console.log(`[combineHelices] helix ${idx} overlapped helix ${keptIdxOld} — ` +
+                        `shifted helix ${idx} offsets by -1 (${lattice})`);
                 }
                 else {
-                    // Needs more than one slot: advance by whole turns to keep the phase intact.
-                    shift = TURN_SHIFT;
-                    while (shift < MAX_SHIFT && !clearsAt(marks, shift)) {
-                        shift += TURN_SHIFT;
+                    const moveIncoming = findTurnPlacement(marks, keptMarks);
+                    const moveKept = findTurnPlacement(keptMarks, marks);
+                    let shiftKept = false;
+                    if (moveKept.steps < moveIncoming.steps) {
+                        shiftKept = true;
                     }
+                    else if (moveKept.steps === moveIncoming.steps) {
+                        const keptCenter = rangeCenter(keptMarks);
+                        const incomingCenter = rangeCenter(marks);
+                        // On equal centers, keptIdxOld is the lowest selected id and stays fixed.
+                        shiftKept = keptCenter > incomingCenter;
+                    }
+                    const chosen = shiftKept ? moveKept : moveIncoming;
+                    const movingMarks = shiftKept ? keptMarks : marks;
+                    movingMarks.forEach(m => { m.offset += chosen.delta; });
+                    const movedLabel = shiftKept ? `kept group ${keptIdxOld}` : `helix ${idx}`;
+                    const fixedLabel = shiftKept ? `helix ${idx}` : `kept group ${keptIdxOld}`;
+                    console.log(`[combineHelices] helix ${idx} overlapped helix ${keptIdxOld} — ` +
+                        `fixed ${fixedLabel}; shifted ${movedLabel} by ` +
+                        `${chosen.delta >= 0 ? '+' : ''}${chosen.delta} ` +
+                        `(${chosen.steps} whole-turn step${chosen.steps === 1 ? '' : 's'}, ${lattice})`);
                 }
-                marks.forEach(m => { m.offset += shift; });
-                console.log(`[combineHelices] helix ${idx} overlapped helix ${keptIdxOld} — ` +
-                    `shifted offsets by ${shift >= 0 ? '+' : ''}${shift} (${lattice})`);
             }
-            // Register this helix's (possibly shifted) slots so later merges in this call avoid them too.
-            marks.forEach(m => occupied.add(offsetKey(m)));
+            // Register this helix's (possibly shifted) marks in the accumulated kept group.
+            keptMarks.push(...marks);
             helices[idx].forEach(nt => {
                 if (seenNts.has(nt.id))
                     return;

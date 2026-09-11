@@ -687,6 +687,38 @@ var toscad;
         return true;
     }
     toscad.kmDisjoint = kmDisjoint;
+    // Preflight the exact pairwise collision rule used by combineHelices.
+    // The lower helix id stays fixed; the higher helix id may move by one slot.
+    // Returns null when the pair would require a larger shift.
+    function kmSingleSlotMergeShift(grid, helices, a, b) {
+        const keep = Math.min(a, b);
+        const merged = Math.max(a, b);
+        const occupied = new Set();
+        const moving = [];
+        for (const nt of helices[keep] ?? []) {
+            const mark = grid.get(nt.id);
+            if (!mark || mark.helixId !== keep)
+                continue;
+            occupied.add(`${mark.direction}|${mark.offset}`);
+        }
+        for (const nt of helices[merged] ?? []) {
+            const mark = grid.get(nt.id);
+            if (!mark || mark.helixId !== merged)
+                continue;
+            moving.push(mark);
+        }
+        if (occupied.size === 0 || moving.length === 0)
+            return null;
+        const clearsAt = (delta) => !moving.some(mark => occupied.has(`${mark.direction}|${mark.offset + delta}`));
+        if (clearsAt(0))
+            return 0;
+        if (clearsAt(1))
+            return 1;
+        if (clearsAt(-1))
+            return -1;
+        return null;
+    }
+    toscad.kmSingleSlotMergeShift = kmSingleSlotMergeShift;
     // Number of overlaps in any 2 helices right before they are merged.
     function kmOverlapCount(grid, helices, a, b) {
         const offsetsA = new Set();
@@ -968,9 +1000,11 @@ var toscad;
             for (const { a, b, cell } of nominated) {
                 if (a === b || !helices[a] || !helices[b])
                     continue;
-                // Gate 1: Disjointness on the grid offsets.
-                if (!kmDisjoint(grid, helices, a, b)) {
-                    console.log(`[anglecomb5] iter=${iteration} reject (${a},${b}) gate1 offset-collision`);
+                // Gate 1: The pair must already be disjoint or become disjoint when
+                // combineHelices shifts the higher-id helix by exactly +1 or -1.
+                const offsetShift = kmSingleSlotMergeShift(grid, helices, a, b);
+                if (offsetShift === null) {
+                    console.log(`[anglecomb5] iter=${iteration} reject (${a},${b}) gate1 requires-shift-beyond-1`);
                     continue;
                 }
                 // Gate 2: Check for parallel axes.
@@ -1017,7 +1051,7 @@ var toscad;
                 candidates.push({
                     a, b, minNtA, minNtB, cell,
                     cos, axisDot, covA: shadow.covA, covB: shadow.covB,
-                    verdictA, verdictB,
+                    verdictA, verdictB, offsetShift,
                 });
             }
             if (candidates.length === 0) {
@@ -1031,7 +1065,7 @@ var toscad;
                 y.axisDot - x.axisDot ||
                 x.a - y.a || x.b - y.b);
             console.log(`[anglecomb5] iter=${iteration} ${candidates.length} candidate(s): ` +
-                candidates.map(c => `(${c.a},${c.b})cos=${c.cos.toFixed(2)}`).join(' '));
+                candidates.map(c => `(${c.a},${c.b})cos=${c.cos.toFixed(2)},shift=${c.offsetShift >= 0 ? '+' : ''}${c.offsetShift}`).join(' '));
             // Drain. One helix per drain.
             const consumed = new Set();
             for (const c of candidates) {
@@ -1046,6 +1080,15 @@ var toscad;
                     continue;
                 if (!helices[currA] || !helices[currB])
                     continue;
+                // Recheck after earlier merges have spliced helix ids. If the pair
+                // now needs more than one slot, do not let combineHelices fall back
+                // to its normal 21/32-base whole-turn displacement.
+                const offsetShift = kmSingleSlotMergeShift(grid, helices, currA, currB);
+                if (offsetShift === null) {
+                    console.log(`[anglecomb5] iter=${iteration} defer (${currA},${currB}) — ` +
+                        `gate1 recheck requires shift beyond ±1`);
+                    continue;
+                }
                 const keep = Math.min(currA, currB);
                 const merged = Math.max(currA, currB);
                 const keepNtIds = helices[keep].map(n => n.id);
@@ -1059,12 +1102,14 @@ var toscad;
                     cell: c.cell, cos: c.cos, axisDot: c.axisDot,
                     covA: c.covA, covB: c.covB,
                     verdictA: c.verdictA, verdictB: c.verdictB,
+                    offsetShift,
                     iteration,
                 });
                 console.log(`[anglecomb5] iter=${iteration} MERGED ${merged}→${keep} ` +
                     `cell=(${c.cell[0]},${c.cell[1]}) cos=${c.cos.toFixed(3)} ` +
                     `axisDot=${c.axisDot.toFixed(3)} cov=(${c.covA.toFixed(2)},${c.covB.toFixed(2)}) ` +
-                    `placement=(${c.verdictA},${c.verdictB})`);
+                    `placement=(${c.verdictA},${c.verdictB}) ` +
+                    `offsetShift=${offsetShift >= 0 ? '+' : ''}${offsetShift}`);
                 consumed.add(c.minNtA);
                 consumed.add(c.minNtB);
                 mergedThisIteration = true;
