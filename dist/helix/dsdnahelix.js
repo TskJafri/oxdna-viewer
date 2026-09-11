@@ -12,6 +12,8 @@ Definitions:
 2. ssDNA partial: A contiguous stretch of nucleotides along a single strand. These are by defintion unpaired.
 3. longssScaffold: A contiguous stretch of nucleotides along a single strand that is part of the scaffold. These are by definition unpaired.
 4. stub: A single nucleotide that is not part of any contiguous runs.
+5. 2-sided binder: a single strand of nucleotides that connects to 2 duplexes on either side.
+6. overhang: a single strand of nucleotides that connects to a duplex on one side only. Overhangs are not allowed to be "downgraded" to binders if the side they connect to is already occupied by a binder. This is because overhangs hang off the end of a duplex, while binders sit along the duplex. If a binder occupies the same side as an overhang, it must not evict the overhang. The overhang remains classified as an overhang and is appended to its host helix by the routing below.
 */
 // For even easier use, just run:
 // let {helices, partials, usedSides} = await helix.findHelices(elements, 2);
@@ -979,21 +981,30 @@ var helix;
         const isBinder = (res) => res?.result === 'binder';
         const isOverhang = (res) => res?.result === 'overhang';
         const hasPartial = (res) => res?.firstPartialId !== undefined;
-        // Helper to claim a partial side for an ssDNA overhang. If the side is already
-        // reserved (by a partial-partial edge, a stub bridge, or an ssScaffold segment), the
-        // overhang is reclassified as a binder so it follows binder routing rules instead.
+        // A 2-sided binder anchors to a host partial on each of its ends, so (like an overhang or a
+        // stub bridge) it consumes that partial side. Single stubs deliberately do not do this.
+        const useBinderSide = (res) => {
+            if (!res || !isBinder(res) || res.firstPartialId === undefined)
+                return;
+            if (slotAvailable(res.firstPartialId, res.firstPartialSide, SIDE_SLOT)) {
+                reserveSlot(res.firstPartialId, res.firstPartialSide, SIDE_SLOT);
+            }
+        };
+        // overhangs can also still attach to the side where a 2-sided binder is already attached.
         const tryReserveOverhangSide = (res) => {
             if (!res || res.result !== 'overhang')
                 return res;
             if (res.firstPartialId === undefined)
                 return res;
-            if (!slotAvailable(res.firstPartialId, res.firstPartialSide, SIDE_SLOT)) {
-                return { ...res, result: 'binder' };
+            if (slotAvailable(res.firstPartialId, res.firstPartialSide, SIDE_SLOT)) {
+                reserveSlot(res.firstPartialId, res.firstPartialSide, SIDE_SLOT);
             }
-            reserveSlot(res.firstPartialId, res.firstPartialSide, SIDE_SLOT);
             return res;
         };
-        // Attach a "double overhang" (an ssDNA whose two ends each reach a helix) entirely to a single helix instead of splitting it in half.
+        // Attach a "double overhang" (an ssDNA whose two ends each reach a helix) entirely to a single
+        // helix — never split it in half. Prefer a helix whose host side is still free and reserve it
+        // so a later contender routes to its other helix. If both sides are already taken, still attach
+        // the whole segment to one helix: a full side does not prevent an overhang from connecting.
         const attachDoubleOverhang = (segment, res5, res3) => {
             for (const res of [res5, res3]) {
                 if (res.firstHelixId === undefined || res.firstPartialId === undefined)
@@ -1004,18 +1015,7 @@ var helix;
                 addSegmentToHelix(res.firstHelixId, segment);
                 return;
             }
-            // Both candidate sides occupied: preserve the old behavior rather than drop the segment.
-            if (res5.firstHelixId !== undefined && res3.firstHelixId !== undefined) {
-                console.warn('[overhang] Both helix sides already taken; falling back to half-split.', {
-                    segmentLength: segment.length,
-                    helixA: res5.firstHelixId,
-                    helixB: res3.firstHelixId
-                });
-                const half = Math.floor(segment.length / 2);
-                addSegmentToHelix(res5.firstHelixId, segment.slice(0, half));
-                addSegmentToHelix(res3.firstHelixId, segment.slice(half));
-                return;
-            }
+            // Both host sides already taken: attach the whole segment to one helix (no split).
             if (res5.firstHelixId !== undefined) {
                 addSegmentToHelix(res5.firstHelixId, segment);
                 return;
@@ -1062,9 +1062,9 @@ var helix;
                     addSegmentToHelix(res3.firstHelixId, segment);
                 return;
             }
-            // Note: the "both ends overhang + partial" case is handled earlier via
-            // attachDoubleOverhang (whole segment to one helix). tryReserveOverhangSide only ever
-            // downgrades overhang -> binder, so res5/res3 can no longer both be overhang+partial here.
+            // Note: the "both ends overhang + partial" case is handled earlier via attachDoubleOverhang
+            // (whole segment to one helix), so it cannot reach here. tryReserveOverhangSide no longer
+            // downgrades overhangs to binders; it only best-effort reserves a free side.
             if (isOverhang(res5) && hasPartial(res5) && isBinder(res3)) {
                 if (res5.firstHelixId !== undefined)
                     addSegmentToHelix(res5.firstHelixId, segment);
@@ -1086,14 +1086,21 @@ var helix;
                 return;
             }
             if (isBinder(res5) && isOverhang(res3) && !hasPartial(res3)) {
+                // 1-sided binder: consume the host partial side too (a binder still consumes a side,
+                // even though it sits along the helix rather than at an end).
+                useBinderSide(res5);
                 binders.push({ segment, res5, res3 });
                 return;
             }
             if (isBinder(res3) && isOverhang(res5) && !hasPartial(res5)) {
+                useBinderSide(res3);
                 binders.push({ segment, res5, res3 });
                 return;
             }
             if (isBinder(res5) && isBinder(res3)) {
+                // 2-sided binder: consume the host partial side on each end.
+                useBinderSide(res5);
+                useBinderSide(res3);
                 binder2.push({ segment, res5, res3 });
                 return;
             }
