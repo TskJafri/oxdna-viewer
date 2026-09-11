@@ -235,8 +235,6 @@ var toscad;
             }
             return null;
         };
-        // Track which helices are binder-only (no internal base-pairing)
-        const binderHelices = [];
         // Main loop for setting the grid.
         helices.forEach((helix, helixId) => {
             if (!helix.length)
@@ -247,30 +245,6 @@ var toscad;
             // If the helix is a merged helix, find which ones were the originals. Disconnected helices CANNOT be walked by this walker.
             const originGroups = preserveGrid ? mergedGroups?.get(helixId) : undefined;
             const isMergedHelix = !!(originGroups && originGroups.length > 0);
-            // Detect binder helix: no nucleotide has a pair *within* the helix
-            // Log diagnostic pair counts so misclassified helices can be spotted.
-            const withinPairEdges = new Set();
-            let crossPairs = 0, unpaired = 0;
-            for (const n of helix) {
-                const p = n.pair;
-                if (!(p instanceof Nucleotide)) {
-                    unpaired++;
-                    continue;
-                }
-                if (helixSet.has(p.id)) {
-                    withinPairEdges.add(`${Math.min(n.id, p.id)}:${Math.max(n.id, p.id)}`);
-                }
-                else {
-                    crossPairs++;
-                }
-            }
-            const hasPairInHelix = withinPairEdges.size > 0;
-            if (!hasPairInHelix) {
-                binderHelices.push(helixId);
-            }
-            console.log(`[setGrid] helix=${helixId} len=${helix.length} merged=${isMergedHelix} ` +
-                `bpWithin=${withinPairEdges.size} crossPairs=${crossPairs} unpaired=${unpaired} ` +
-                `=> ${hasPairInHelix ? 'HELIX' : 'BINDER'}`);
             if (isMergedHelix) {
                 for (const group of originGroups) {
                     for (const ntId of group) {
@@ -467,8 +441,7 @@ var toscad;
             }
         });
         // Note: The alignment of the merged helices is left upto alignMergedGroups()
-        console.log(`[setGrid] binderHelices=[${binderHelices.join(', ')}]`);
-        return { grid, binderHelices };
+        return { grid };
     }
     toscad.setGrid = setGrid;
     ;
@@ -932,23 +905,17 @@ var toscad;
         }
     }
     toscad.validateGrid = validateGrid;
-    /*
-    TODOs:
-    - Remove the binderHelices per-function mapping because findHelices now does it by default; just use those and track those.
-    - Think about binderHelicesId for alignGridPrim and detectLatticeKind; should it accept the numbers[] or binderHelices[][]
-    - Follow how the binderHelices change and get used.
-    - REMOVE THE "preservedNtIds" LOGIC IN THE PIPELINE. ASAP.
-    */
+    /* TODO: Remove the "preservedNtIds" logic in the pipeline. */
     function layoutPipeline(inputElements, options) {
         const { tolerance = 3, lattice = 'automatic', renumber = true, wireframe = false, pins = [] } = options || {};
-        let { helices, partials, usedSides, binderHelices } = helix.findHelices(inputElements, tolerance);
+        let { helices, partials, usedSides, binderHelixIds } = helix.findHelices(inputElements, tolerance);
         let { grid } = setGrid(helices);
         directionAlign2(grid);
-        // Binder ids are only valid here, before any merge splices the helices array.
-        let binderIds = binderHelices.map(b => helices.indexOf(b)).filter(i => i !== -1);
-        toscad.alignGridPrim(grid, binderIds);
+        // Binder ids come directly from the first and only findHelices/setGrid pass.
+        // They are valid here, before any merge splices the helices array.
+        toscad.alignGridPrim(grid, binderHelixIds);
         const latticeType = lattice === 'automatic'
-            ? toscad.detectLatticeKind(grid, binderIds)
+            ? toscad.detectLatticeKind(grid, binderHelixIds)
             : lattice;
         // Wireframe designs skip merging entirely; their partials are the structure, not artifacts.
         if (!wireframe) {
@@ -968,7 +935,7 @@ var toscad;
         let helixPos = toscad.posCorr5(kr, helices, pinnedIds);
         // Optional spatial renumbering of the output helix numbering (ids/callsigns untouched).
         if (renumber) {
-            const { remap } = toscad.renumberHelicesGNN(grid, helixPos, latticeType, binderIds);
+            const { remap } = toscad.renumberHelicesGNN(grid, helixPos, latticeType, binderHelixIds);
             ({ helices, helixPos } = toscad.applyHelixRenumber(helices, grid, helixPos, remap));
             // Helix ids changed, so re-derive angles and re-run kruskals + posCorr5 to settle into stable state.
             networkMap = toscad.getAngles(grid, helices, latticeType);

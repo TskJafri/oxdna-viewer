@@ -397,7 +397,18 @@ namespace helix {
 		// guys for context lastScraps[] basically are the dumb nucleotides that couldnt be placed into helices due to fraying and angle conflicts.
 		// Stored as segments so grouped leftovers (e.g. deferred ssScaffold segments) stay together.
 		const lastScraps: Nucleotide[][] = [];
-		if (!partials.length) return { helices, lastScraps, usedSides: new Map<number, Map<number, number>>() }; // surely no helices if no partials.
+		if (!partials.length) {
+			return {
+				helices,
+				binderHelixIds: [] as number[],
+				lastScraps,
+				binders: [],
+				binder2: [],
+				disconnected: [],
+				unhandled: [],
+				usedSides: new Map<number, Map<number, number>>()
+			}; // surely no helices if no partials.
+		}
 		const dot = 0.5;
 
 		// quick lookup for id to partial index and stubs index.
@@ -1262,7 +1273,7 @@ namespace helix {
 		// ids.length > 2: currently unreachable.
 		});
 
-		const binderHelices: Nucleotide[][] = [];
+		const binderHelixIds: number[] = [];
 		const materializeBinderHelix = (segments: Nucleotide[][]) => {
 			if (!segments.length) return;
 			const seen = new Set<number>();
@@ -1275,8 +1286,9 @@ namespace helix {
 				});
 			});
 			if (newHelix.length) {
+				const helixId = helices.length;
 				helices.push(newHelix);
-				binderHelices.push(newHelix);
+				binderHelixIds.push(helixId);
 			}
 		};
 
@@ -1381,7 +1393,7 @@ namespace helix {
 		}
 
 		// const finalHelices = helices.filter(h => h.length > 0);
-		return { helices, binderHelices, lastScraps, binders, binder2, disconnected, unhandled, usedSides };
+		return { helices, binderHelixIds, lastScraps, binders, binder2, disconnected, unhandled, usedSides };
 	}
 
 	// One ring to rule them all...
@@ -1391,10 +1403,10 @@ namespace helix {
 		// ok now we can do the rest of the stuff.
 		let { partials, unpaired } = findHelixPartials2(inputMap, tolerance);
 		let { ssdna, stubs, longssScaffold } = sortUnpaired(unpaired);
-		let { helices, binderHelices, lastScraps, binders, binder2, disconnected, unhandled, usedSides } = generateHelix(partials, ssdna, longssScaffold, stubs);
+		let { helices, binderHelixIds, lastScraps, binders, binder2, disconnected, unhandled, usedSides } = generateHelix(partials, ssdna, longssScaffold, stubs);
 		console.log("Helices size:", helices.flat().length);
 		console.log("Total elements:", inputMap.size);
-		return { helices, partials, usedSides , binderHelices };
+		return { helices, partials, usedSides, binderHelixIds };
 	}
 
 	// Merge two or more helices into the one with the lowest index.
