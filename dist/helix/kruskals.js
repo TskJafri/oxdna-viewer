@@ -89,46 +89,65 @@ var toscad;
     // Run a small sweep to go from local angles in getAngles() to global orientations **of the helices**.
     // First use BFS to seed a spanning tree, and then use votes to repair cycles. The result is then used by Kruskal's.
     // TODO: There's a TODO in here. Go hunt for it.
-    function voteOrientations(networkMap, grid, lattice = 'honeycomb', init, maxSweeps = 50, paritySeed) {
+    function voteOrientations(networkMap, grid, lattice = 'honeycomb', init, maxSweeps = 50, paritySeed, binderHelices = []) {
         const lat = toscad.resolveLatticeKind(lattice);
         const dirs = latticeDirs(lat);
         const K = dirs.length;
         const snap = (angle) => snapDir(angle, lat);
         const opposite = (dir, parity) => oppositeDir(dir, parity, lat);
-        // parity based evaluation for honeycomb (a->b is not 180º rotated from b->a; it is rotated either 120º or 240º).
-        //
-        // The 2-coloring is only determined up to a GLOBAL FLIP per component, so seeding every
-        // component at 0 picks the absolute parity arbitrarily -- a structure that should come out
-        // odd-even-odd can just as easily come out even-odd-even. When the caller has pinned helices
-        // at known cells, `paritySeed` fixes that choice, and it has to happen HERE: the compat
-        // tables below call opposite(dir, pa), which differs by parity, so flipping labels after the
-        // vote would invalidate the entire solve.
-        //
+        const binderSet = new Set(binderHelices);
+        const order = [...networkMap.keys()].sort((a, b) => a - b);
+        const duplexOrder = order.filter(h => !binderSet.has(h));
+        const binderOrder = order.filter(h => binderSet.has(h));
         // Seeded helices are visited first so their component is colored outward from them.
         const parity = new Map();
         const oddEdges = [];
-        const seedOrder = [
-            ...[...(paritySeed?.keys() ?? [])].filter(h => networkMap.has(h)).sort((a, b) => a - b),
-            ...[...networkMap.keys()].sort((a, b) => a - b)
-        ];
-        for (const seed of seedOrder) {
-            if (parity.has(seed))
-                continue;
-            parity.set(seed, paritySeed?.get(seed) ?? 0);
-            const queue = [seed];
-            for (let qi = 0; qi < queue.length; qi++) {
-                const h = queue[qi];
-                const p = parity.get(h);
-                for (const n of networkMap.get(h)?.keys() ?? []) {
-                    if (!parity.has(n)) {
-                        parity.set(n, p === 0 ? 1 : 0);
-                        queue.push(n);
+        const oddEdgeKeys = new Set();
+        const noteOdd = (a, b) => {
+            const edge = [Math.min(a, b), Math.max(a, b)];
+            const key = `${edge[0]}|${edge[1]}`;
+            if (!oddEdgeKeys.has(key)) {
+                oddEdgeKeys.add(key);
+                oddEdges.push(edge);
+            }
+        };
+        const colorPhase = (phase, isInPhase) => {
+            const seeded = [
+                ...[...(paritySeed?.keys() ?? [])].filter(h => isInPhase(h)).sort((a, b) => a - b),
+                ...phase
+            ];
+            for (const seed of seeded) {
+                if (parity.has(seed))
+                    continue;
+                // Binders inherit parity from an already-coloured duplex parent when possible.
+                const parent = [...(networkMap.get(seed)?.keys() ?? [])]
+                    .sort((a, b) => a - b)
+                    .find(n => parity.has(n));
+                parity.set(seed, parent === undefined ? (paritySeed?.get(seed) ?? 0) : (parity.get(parent) === 0 ? 1 : 0));
+                const queue = [seed];
+                for (let qi = 0; qi < queue.length; qi++) {
+                    const h = queue[qi];
+                    const p = parity.get(h);
+                    for (const n of networkMap.get(h)?.keys() ?? []) {
+                        if (isInPhase(n)) {
+                            if (!parity.has(n)) {
+                                parity.set(n, p === 0 ? 1 : 0);
+                                queue.push(n);
+                            }
+                            else if (parity.get(n) === p)
+                                noteOdd(h, n);
+                        }
+                        else if (parity.has(n) && parity.get(n) === p) {
+                            noteOdd(h, n);
+                        }
                     }
-                    else if (parity.get(n) === p)
-                        oddEdges.push([Math.min(h, n), Math.max(h, n)]);
                 }
             }
-        }
+        };
+        // Duplex parity is deliberately independent of binder-only paths.
+        colorPhase(duplexOrder, h => !binderSet.has(h));
+        // Binders are coloured only after duplex parity is fixed.
+        colorPhase(binderOrder, h => binderSet.has(h));
         // Two seeded helices in the SAME component can demand incompatible parities, since their
         // relative parity is already forced by the path length between them. The first one wins
         // (it seeded the colouring); report the rest rather than silently ignoring them.
@@ -181,29 +200,45 @@ var toscad;
             touch(e.a, e, true);
             touch(e.b, e, false);
         }
-        const order = [...networkMap.keys()].sort((a, b) => a - b);
-        // Initialize with realistic global orientations by using BFS (as opposed to starting with 0º). 
-        // TODO: Square lattice has 4 neighbors, causing more ambiguity than honeycomb.
+        // Initialize and vote in two phases. The duplex slots are settled first
+        // and are never changed while binders are attached afterwards.
         const slot = new Map();
         let seededAmbiguous = 0;
-        if (init) {
-            for (const h of order) {
-                const seed = init.get(h);
-                slot.set(h, typeof seed === 'number' ? dirs.indexOf(snap(seed)) : 0);
+        const compatiblePick = (h, placedOnly = false) => {
+            const current = slot.get(h) ?? 0;
+            let best = current, bestScore = -1, hits = 0;
+            for (let r = 0; r < K; r++) {
+                let score = 0;
+                for (const { e, isA } of incident.get(h) ?? []) {
+                    const other = isA ? e.b : e.a;
+                    if (placedOnly && !slot.has(other))
+                        continue;
+                    const idx = isA ? r * K + (slot.get(e.b) ?? 0) : (slot.get(e.a) ?? 0) * K + r;
+                    if (e.compat[idx]) {
+                        score += e.weight;
+                        hits++;
+                    }
+                }
+                if (score > bestScore || (score === bestScore && r === current)) {
+                    best = r;
+                    bestScore = score;
+                }
             }
-        }
-        else {
-            for (const seedHelix of order) {
+            return { slot: best, hits };
+        };
+        const seedPhase = (phase, allow) => {
+            for (const seedHelix of phase) {
                 if (slot.has(seedHelix))
                     continue;
-                slot.set(seedHelix, 0); // component gauge: only differences matter
+                const supplied = init?.get(seedHelix);
+                slot.set(seedHelix, typeof supplied === 'number' ? dirs.indexOf(snap(supplied)) : compatiblePick(seedHelix, true).slot);
                 const q = [seedHelix];
                 for (let qi = 0; qi < q.length; qi++) {
                     const h = q[qi];
                     const rh = slot.get(h);
                     for (const { e, isA } of incident.get(h) ?? []) {
                         const other = isA ? e.b : e.a;
-                        if (slot.has(other))
+                        if (!allow(other) || slot.has(other))
                             continue;
                         let pick = -1, hits = 0;
                         for (let r = 0; r < K; r++) {
@@ -214,7 +249,7 @@ var toscad;
                             }
                         }
                         if (pick < 0)
-                            continue; // unsatisfiable at rh; let another edge seed it
+                            continue;
                         if (hits > 1)
                             seededAmbiguous++;
                         slot.set(other, pick);
@@ -222,47 +257,51 @@ var toscad;
                     }
                 }
             }
-            for (const h of order)
-                if (!slot.has(h))
-                    slot.set(h, 0); // isolated helices
-        }
+        };
+        seedPhase(duplexOrder, h => !binderSet.has(h));
+        seedPhase(binderOrder, h => binderSet.has(h));
         if (seededAmbiguous > 0) {
             console.log(`[voteOrientations] ${seededAmbiguous} seed step(s) had >1 compatible slot; took the lowest.`);
         }
-        // iterative majority vote
+        // Iterative majority vote, first for duplexes and then binders. The
+        // second phase sees duplex slots as fixed inputs.
         let sweeps = 0;
         let converged = false;
-        while (sweeps < maxSweeps) {
-            sweeps++;
-            let changed = false;
-            for (const h of order) {
-                const inc = incident.get(h);
-                if (!inc || !inc.length)
-                    continue;
-                const current = slot.get(h) ?? 0;
-                let bestSlot = current, bestScore = -1;
-                for (let r = 0; r < K; r++) {
-                    let score = 0;
-                    for (const { e, isA } of inc) {
-                        const idx = isA ? r * K + (slot.get(e.b) ?? 0) : (slot.get(e.a) ?? 0) * K + r;
-                        if (e.compat[idx])
-                            score += e.weight;
+        const votePhase = (phase) => {
+            for (let phaseSweep = 0; phaseSweep < maxSweeps; phaseSweep++) {
+                sweeps++;
+                let changed = false;
+                for (const h of phase) {
+                    const inc = incident.get(h);
+                    if (!inc || !inc.length)
+                        continue;
+                    const current = slot.get(h) ?? 0;
+                    let bestSlot = current, bestScore = -1;
+                    for (let r = 0; r < K; r++) {
+                        let score = 0;
+                        for (const { e, isA } of inc) {
+                            const idx = isA ? r * K + (slot.get(e.b) ?? 0) : (slot.get(e.a) ?? 0) * K + r;
+                            if (e.compat[idx])
+                                score += e.weight;
+                        }
+                        if (score > bestScore || (score === bestScore && r === current)) {
+                            bestScore = score;
+                            bestSlot = r;
+                        }
                     }
-                    if (score > bestScore || (score === bestScore && r === current)) {
-                        bestScore = score;
-                        bestSlot = r;
+                    if (bestSlot !== current) {
+                        slot.set(h, bestSlot);
+                        changed = true;
                     }
                 }
-                if (bestSlot !== current) {
-                    slot.set(h, bestSlot);
-                    changed = true;
-                }
+                if (!changed)
+                    return true;
             }
-            if (!changed) {
-                converged = true;
-                break;
-            }
-        }
+            return false;
+        };
+        const duplexConverged = votePhase(duplexOrder);
+        const binderConverged = votePhase(binderOrder);
+        converged = duplexConverged && binderConverged;
         // ── score & package results ──
         let satisfiedWeight = 0;
         const violated = [];
@@ -282,11 +321,12 @@ var toscad;
         };
     }
     toscad.voteOrientations = voteOrientations;
-    function kruskals(networkMap, grid, lattice = 'honeycomb', vote = voteOrientations(networkMap, grid, lattice), pins = [], anchors = new Map()) {
+    function kruskals(networkMap, grid, lattice = 'honeycomb', vote = voteOrientations(networkMap, grid, lattice), pins = [], anchors = new Map(), binderHelices = []) {
         const lat = toscad.resolveLatticeKind(lattice);
         const dirs = latticeDirs(lat);
         const K = dirs.length;
         const { slot, parity, edges } = vote;
+        const binderSet = new Set(binderHelices);
         const satisfied = (e) => e.compat[(slot.get(e.a) ?? 0) * K + (slot.get(e.b) ?? 0)] === 1;
         // Step from a to b using a's global slot and a's 2-coloring parity.
         const stepAB = (a, b) => {
@@ -309,15 +349,23 @@ var toscad;
         const find = (h) => root.get(h);
         const treeEdges = [];
         const cycleEdges = [];
+        const binderConstraintEdges = [];
         const usedViolatedEdges = [];
         const parityConflicts = [];
         // merging 2 groups (or clumps)... 
-        const tryMerge = (e, forceStep, forcePin = false) => {
+        const tryMerge = (e, forceStep, forcePin = false, binderPhase = false) => {
             const { a, b } = e;
             const ra = find(a), rb = find(b);
             if (ra === rb) {
                 cycleEdges.push([a, b]);
                 return;
+            }
+            const containsDuplex = (rootId) => (members.get(rootId) ?? []).some(h => !binderSet.has(h));
+            const aHasDuplex = containsDuplex(ra);
+            const bHasDuplex = containsDuplex(rb);
+            if (binderPhase && aHasDuplex && bHasDuplex) {
+                binderConstraintEdges.push([a, b]);
+                return false;
             }
             // forceStep is how a pin injects a user-supplied offset instead of an angle-derived one.
             const step = forceStep ?? stepAB(a, b);
@@ -341,7 +389,9 @@ var toscad;
                     return;
             }
             const listA = members.get(ra), listB = members.get(rb);
-            const moveB = listB.length <= listA.length;
+            const moveB = binderPhase && aHasDuplex !== bHasDuplex
+                ? aHasDuplex
+                : listB.length <= listA.length;
             const moveList = moveB ? listB : listA;
             const keepRoot = moveB ? ra : rb;
             const dropRoot = moveB ? rb : ra;
@@ -447,13 +497,22 @@ var toscad;
             parityBrokenEdges.push([e.a, e.b]);
             return false;
         };
-        // Actual merging...
+        const isDuplexEdge = (e) => !binderSet.has(e.a) && !binderSet.has(e.b);
+        // Duplexes form the structural tree first. Binder edges are processed
+        // only after that tree is fixed, so they cannot choose or move a
+        // duplex placement.
         for (const e of ordered)
-            if (touchesPin(e) && usable(e))
+            if (isDuplexEdge(e) && touchesPin(e) && usable(e))
                 tryMerge(e);
         for (const e of ordered)
-            if (!touchesPin(e) && usable(e))
+            if (isDuplexEdge(e) && !touchesPin(e) && usable(e))
                 tryMerge(e);
+        for (const e of ordered)
+            if (!isDuplexEdge(e) && touchesPin(e) && usable(e))
+                tryMerge(e, undefined, false, true);
+        for (const e of ordered)
+            if (!isDuplexEdge(e) && !touchesPin(e) && usable(e))
+                tryMerge(e, undefined, false, true);
         const packedHelices = [];
         for (let progress = true; progress;) {
             progress = false;
@@ -464,6 +523,11 @@ var toscad;
                 // Pick the neighbour sitting in the largest placed component.
                 let anchor = -1, anchorSize = 0;
                 for (const n of networkMap.get(h)?.keys() ?? []) {
+                    // A duplex that was not placed by the duplex pass must
+                    // not be packed through a binder edge: that would let a
+                    // binder join or translate structural components.
+                    if (!binderSet.has(h) && binderSet.has(n))
+                        continue;
                     const size = members.get(find(n))?.length ?? 0;
                     if (find(n) !== rh && size > anchorSize) {
                         anchor = n;
@@ -619,6 +683,7 @@ var toscad;
             parityBrokenEdges,
             packedHelices,
             pinOverruledEdges,
+            binderConstraintEdges,
             slot,
             orientation: vote.orientation
         };
@@ -863,6 +928,10 @@ var toscad;
             const mark = grid.get(p[0].id);
             return mark && typeof mark.helixId === 'number' ? mark.helixId : -1;
         };
+        const isBinderHelix = (hid) => {
+            const nts = helices[hid] ?? [];
+            return nts.length > 0 && !!opts.binderNtIds && nts.every(nt => opts.binderNtIds.has(nt.id));
+        };
         const paired = new Set();
         // merge loop
         for (const mp of hashPairs) {
@@ -878,6 +947,10 @@ var toscad;
             }
             if (!helices[hA] || !helices[hB])
                 continue;
+            if (isBinderHelix(hA) !== isBinderHelix(hB)) {
+                console.log(`[axisMerge] REJECT (${hA},${hB}) — binder/duplex merge`);
+                continue;
+            }
             const axA = kmHelixAxis(grid, helices, hA);
             const axB = kmHelixAxis(grid, helices, hB);
             const axisDot = (axA && axB) ? Math.abs(axA.dot(axB)) : 0;
@@ -954,13 +1027,20 @@ var toscad;
                     m = nt.id;
             return isFinite(m) ? m : -1;
         };
+        const isBinderHelix = (hid) => {
+            const nts = helices[hid] ?? [];
+            return nts.length > 0 && !!opts.binderNtIds && nts.every(nt => opts.binderNtIds.has(nt.id));
+        };
         while (mergedThisIteration && iteration < MAX_ITERATIONS) {
             iteration++;
             mergedThisIteration = false;
             // Rebuild the graph every iteration.
             const cc = toscad.getConnectionCounts(grid);
-            const vote = voteOrientations(networkMap, grid, lattice);
-            const kr = kruskals(networkMap, grid, lattice, vote);
+            const currentBinderHelices = [...networkMap.keys()]
+                .filter(isBinderHelix)
+                .sort((a, b) => a - b);
+            const vote = voteOrientations(networkMap, grid, lattice, undefined, 50, undefined, currentBinderHelices);
+            const kr = kruskals(networkMap, grid, lattice, vote, [], new Map(), currentBinderHelices);
             // Per-edge trust straight off the converged vote.
             const pairKey = (a, b) => `${Math.min(a, b)}|${Math.max(a, b)}`;
             const satisfiedEdges = new Set();
@@ -1000,6 +1080,10 @@ var toscad;
             for (const { a, b, cell } of nominated) {
                 if (a === b || !helices[a] || !helices[b])
                     continue;
+                if (isBinderHelix(a) !== isBinderHelix(b)) {
+                    console.log(`[anglecomb5] iter=${iteration} reject (${a},${b}) — binder/duplex merge`);
+                    continue;
+                }
                 // Gate 1: The pair must already be disjoint or become disjoint when
                 // combineHelices shifts the higher-id helix by exactly +1 or -1.
                 const offsetShift = kmSingleSlotMergeShift(grid, helices, a, b);
@@ -1080,6 +1164,10 @@ var toscad;
                     continue;
                 if (!helices[currA] || !helices[currB])
                     continue;
+                if (isBinderHelix(currA) !== isBinderHelix(currB)) {
+                    console.log(`[anglecomb5] iter=${iteration} reject (${currA},${currB}) — binder/duplex merge`);
+                    continue;
+                }
                 // Recheck after earlier merges have spliced helix ids. If the pair
                 // now needs more than one slot, do not let combineHelices fall back
                 // to its normal 21/32-base whole-turn displacement.

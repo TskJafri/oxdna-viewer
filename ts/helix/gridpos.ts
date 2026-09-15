@@ -786,16 +786,21 @@ interface LatticePhaseConfig {
      *
      * Builds a complete graph where nodes = helices and edge weight =
      * number of crossover observations between them. Prim's MST selects
-     * the most reliable (most-observed) edges. Walks the MST from helix 0
-     * to compute cumulative shifts using the median of observed shifts
+     * the most reliable (most-observed) edges. Walks the MST from a structural
+     * root to compute cumulative shifts using the median of observed shifts
      * per edge (robust to outlier crossovers).
      *
-     * If binderHelices is provided, those helices are excluded from the
-     * global MST alignment. Instead, each strand segment on a binder
-     * helix is aligned individually to the crossover offset of its parent.
+     * Alignment deliberately happens in two phases:
+     *
+     * 1. Build and apply the MST using only the structural (non-binder)
+     *    helices. A binder must not pull its host helices out of alignment.
+     * 2. Keep each binder strand-run at the offset of the adjacent structural
+     *    run at its crossover. This is per run, rather than per helix, because
+     *    a binder helix may contain disconnected segments with different hosts.
      */
-    export function alignGridPrim(grid: GridMap, binderHelices?: number[]) {
+    export function alignGridPrim(grid: GridMap, binderHelices: number[] = []) {
         const { shifts, helixIds } = collectShiftObservations(grid);
+        const binderSet = new Set(binderHelices);
 
         const countGridConflicts = (currentGrid: GridMap): number => {
             const checkMap = new Map<number, {
@@ -826,19 +831,19 @@ interface LatticePhaseConfig {
         // ── Build weighted edge list for Prim's ─────────────────────────
         // weight = number of crossover observations (higher = more reliable)
         const helixList = Array.from(helixIds).sort((a, b) => a - b);
-        if (helixList.length <= 1) {
-            console.log('[alignGridPrim] Only 0-1 helices, nothing to align.');
-            return;
-        }
+        const structuralHelices = helixList.filter(h => !binderSet.has(h));
 
-        // Prim's MST starting from helix 0
+        // Prim's MST starts at the lowest-numbered structural helix. In
+        // particular, it must not be rooted at helix 0 when helix 0 is a
+        // binder: binders are placed only in the second phase below.
         const inMST = new Set<number>();
         // mstEdges: parent → child with median shift
         const mstParent = new Map<number, { parent: number; shift: number }>();
         // Priority: pick the edge with the highest weight (most observations)
-        inMST.add(0);
+        const mstRoot = structuralHelices[0];
+        if (mstRoot !== undefined) inMST.add(mstRoot);
 
-        while (inMST.size < helixList.length) {
+        while (inMST.size < structuralHelices.length) {
             let bestNeighbor = -1;
             let bestFrom = -1;
             let bestWeight = 0;
@@ -848,7 +853,7 @@ interface LatticePhaseConfig {
                 if (!neighbors) continue;
 
                 for (const [neighbor, observations] of neighbors.entries()) {
-                    if (inMST.has(neighbor)) continue;
+                    if (binderSet.has(neighbor) || inMST.has(neighbor)) continue;
                     if (observations.length > bestWeight) {
                         bestWeight = observations.length;
                         bestNeighbor = neighbor;
@@ -859,7 +864,7 @@ interface LatticePhaseConfig {
 
             if (bestNeighbor === -1) {
                 // Disconnected graph — pick an unvisited helix, anchor it
-                for (const hId of helixList) {
+                for (const hId of structuralHelices) {
                     if (!inMST.has(hId)) {
                         inMST.add(hId);
                         // No parent (disconnected), shift = 0 relative to itself
@@ -877,12 +882,12 @@ interface LatticePhaseConfig {
             inMST.add(bestNeighbor);
         }
 
-        // ── Walk MST from helix 0 to compute cumulative shifts ──────────
+        // ── Walk the structural MST to compute cumulative shifts ─────────
         const cumulativeShift = new Map<number, number>();
-        cumulativeShift.set(0, 0); // anchor
+        if (mstRoot !== undefined) cumulativeShift.set(mstRoot, 0); // anchor
 
         // BFS order: process nodes so parent's cumulative shift is known
-        const bfsQueue: number[] = [0];
+        const bfsQueue: number[] = mstRoot === undefined ? [] : [mstRoot];
         let qi = 0;
 
         // Build children adjacency from mstParent
@@ -907,8 +912,8 @@ interface LatticePhaseConfig {
             }
         }
 
-        // Handle disconnected helices (not in MST tree from 0)
-        for (const hId of helixList) {
+        // Handle disconnected structural helices (not in the MST tree).
+        for (const hId of structuralHelices) {
             if (!cumulativeShift.has(hId)) {
                 cumulativeShift.set(hId, 0);
             }
@@ -923,8 +928,8 @@ interface LatticePhaseConfig {
         // helixId with colliding offsets. A helix with no valid placement
         // within the search radius keeps its previous position.
         {
-            const orderedHelices = helixList
-                .filter(h => h !== 0 && (cumulativeShift.get(h) ?? 0) !== 0)
+            const orderedHelices = structuralHelices
+                .filter(h => h !== mstRoot && (cumulativeShift.get(h) ?? 0) !== 0)
                 .sort((a, b) => {
                     const da = Math.abs(cumulativeShift.get(a) ?? 0);
                     const db = Math.abs(cumulativeShift.get(b) ?? 0);
@@ -945,7 +950,6 @@ interface LatticePhaseConfig {
         }
 
         // ── Binder correction: align each strand segment individually ───
-        const binderSet = new Set(binderHelices ?? []);
         if (binderSet.size > 0) {
             console.log(`[alignGridPrim] Aligning binder helices: [${Array.from(binderSet).sort((a, b) => a - b).join(', ')}]`);
 
@@ -1062,7 +1066,7 @@ interface LatticePhaseConfig {
         }
 
         // ── Binder post-pass (after alignGridPrim) ─────────────────────
-        const binderPostSet = new Set<number>(binderHelices ?? []);
+        const binderPostSet = binderSet;
         if (binderPostSet.size > 0) {
             const binderList = Array.from(binderPostSet).sort((a, b) => a - b);
             console.log(`[alignGridPrim] Binder helices noted: [${binderList.join(', ')}]`);

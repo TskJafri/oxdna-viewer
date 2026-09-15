@@ -909,10 +909,26 @@ var toscad;
     function layoutPipeline(inputElements, options) {
         const { tolerance = 3, lattice = 'automatic', renumber = true, wireframe = false, pins = [] } = options || {};
         let { helices, partials, usedSides, binderHelixIds } = helix.findHelices(inputElements, tolerance);
+        // Helix array indices are mutable, so we use nucleotide IDs.
+        const binderNtIds = new Set();
+        for (const hid of binderHelixIds) {
+            for (const nt of helices[hid] ?? [])
+                binderNtIds.add(nt.id);
+        }
         let { grid } = setGrid(helices);
+        const currentBinderHelixIds = () => {
+            const binderByHelix = new Map();
+            const duplexByHelix = new Map();
+            for (const [ntId, mark] of grid) {
+                const target = binderNtIds.has(ntId) ? binderByHelix : duplexByHelix;
+                target.set(mark.helixId, true);
+            }
+            return [...binderByHelix.keys()]
+                .filter(hid => !duplexByHelix.has(hid))
+                .sort((a, b) => a - b);
+        };
         directionAlign2(grid);
         // Binder ids come directly from the first and only findHelices/setGrid pass.
-        // They are valid here, before any merge splices the helices array.
         toscad.alignGridPrim(grid, binderHelixIds);
         const latticeType = lattice === 'automatic'
             ? toscad.detectLatticeKind(grid, binderHelixIds)
@@ -921,12 +937,13 @@ var toscad;
         if (!wireframe) {
             // let am = axisMerge(grid, helices, partials, usedSides, latticeType);
             // anglecomb5(grid, helices, latticeType, am.networkMap);
-            toscad.anglecomb5(grid, helices, latticeType);
-            toscad.axisMerge(grid, helices, partials, usedSides, latticeType);
+            toscad.anglecomb5(grid, helices, latticeType, undefined, { binderNtIds });
+            toscad.axisMerge(grid, helices, partials, usedSides, latticeType, { binderNtIds });
         }
         // Grid is the source of truth after the merges, so re-derive angles from it.
         let networkMap = toscad.getAngles(grid, helices, latticeType);
-        const kr = toscad.kruskals(networkMap, grid, latticeType, toscad.voteOrientations(networkMap, grid, latticeType), pins);
+        let currentBinders = currentBinderHelixIds();
+        const kr = toscad.kruskals(networkMap, grid, latticeType, toscad.voteOrientations(networkMap, grid, latticeType, undefined, 50, undefined, currentBinders), pins, new Map(), currentBinders);
         const pinnedIds = new Set();
         for (const p of pins) {
             pinnedIds.add(p.a);
@@ -935,11 +952,12 @@ var toscad;
         let helixPos = toscad.posCorr5(kr, helices, pinnedIds);
         // Optional spatial renumbering of the output helix numbering (ids/callsigns untouched).
         if (renumber) {
-            const { remap } = toscad.renumberHelicesGNN(grid, helixPos, latticeType, binderHelixIds);
+            const { remap } = toscad.renumberHelicesGNN(grid, helixPos, latticeType, currentBinders);
             ({ helices, helixPos } = toscad.applyHelixRenumber(helices, grid, helixPos, remap));
             // Helix ids changed, so re-derive angles and re-run kruskals + posCorr5 to settle into stable state.
             networkMap = toscad.getAngles(grid, helices, latticeType);
-            const kr2 = toscad.kruskals(networkMap, grid, latticeType, toscad.voteOrientations(networkMap, grid, latticeType), pins);
+            currentBinders = currentBinderHelixIds();
+            const kr2 = toscad.kruskals(networkMap, grid, latticeType, toscad.voteOrientations(networkMap, grid, latticeType, undefined, 50, undefined, currentBinders), pins, new Map(), currentBinders);
             helixPos = toscad.posCorr5(kr2, helices, pinnedIds);
         }
         console.log(`[layoutPipeline] ${helices.length} helices, lattice=${latticeType}, wireframe=${wireframe}` +

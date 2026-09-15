@@ -90,43 +90,59 @@ namespace toscad {
         lattice: string = 'honeycomb',
         init?: Map<number, number>,
         maxSweeps: number = 50,
-        paritySeed?: Map<number, 0 | 1>
+        paritySeed?: Map<number, 0 | 1>,
+        binderHelices: number[] = []
     ) {
         const lat = resolveLatticeKind(lattice);
         const dirs = latticeDirs(lat);
         const K = dirs.length;
         const snap = (angle: number) => snapDir(angle, lat);
         const opposite = (dir: number, parity: 0 | 1) => oppositeDir(dir, parity, lat);
+        const binderSet = new Set(binderHelices);
+        const order = [...networkMap.keys()].sort((a, b) => a - b);
+        const duplexOrder = order.filter(h => !binderSet.has(h));
+        const binderOrder = order.filter(h => binderSet.has(h));
 
-        // parity based evaluation for honeycomb (a->b is not 180º rotated from b->a; it is rotated either 120º or 240º).
-        //
-        // The 2-coloring is only determined up to a GLOBAL FLIP per component, so seeding every
-        // component at 0 picks the absolute parity arbitrarily -- a structure that should come out
-        // odd-even-odd can just as easily come out even-odd-even. When the caller has pinned helices
-        // at known cells, `paritySeed` fixes that choice, and it has to happen HERE: the compat
-        // tables below call opposite(dir, pa), which differs by parity, so flipping labels after the
-        // vote would invalidate the entire solve.
-        //
         // Seeded helices are visited first so their component is colored outward from them.
         const parity = new Map<number, 0 | 1>();
         const oddEdges: Array<[number, number]> = [];
-        const seedOrder = [
-            ...[...(paritySeed?.keys() ?? [])].filter(h => networkMap.has(h)).sort((a, b) => a - b),
-            ...[...networkMap.keys()].sort((a, b) => a - b)
-        ];
-        for (const seed of seedOrder) {
-            if (parity.has(seed)) continue;
-            parity.set(seed, paritySeed?.get(seed) ?? 0);
-            const queue = [seed];
-            for (let qi = 0; qi < queue.length; qi++) {
-                const h = queue[qi];
-                const p = parity.get(h)!;
-                for (const n of networkMap.get(h)?.keys() ?? []) {
-                    if (!parity.has(n)) { parity.set(n, p === 0 ? 1 : 0); queue.push(n); }
-                    else if (parity.get(n) === p) oddEdges.push([Math.min(h, n), Math.max(h, n)]);
+        const oddEdgeKeys = new Set<string>();
+        const noteOdd = (a: number, b: number) => {
+            const edge: [number, number] = [Math.min(a, b), Math.max(a, b)];
+            const key = `${edge[0]}|${edge[1]}`;
+            if (!oddEdgeKeys.has(key)) { oddEdgeKeys.add(key); oddEdges.push(edge); }
+        };
+        const colorPhase = (phase: number[], isInPhase: (h: number) => boolean) => {
+            const seeded = [
+                ...[...(paritySeed?.keys() ?? [])].filter(h => isInPhase(h)).sort((a, b) => a - b),
+                ...phase
+            ];
+            for (const seed of seeded) {
+                if (parity.has(seed)) continue;
+                // Binders inherit parity from an already-coloured duplex parent when possible.
+                const parent = [...(networkMap.get(seed)?.keys() ?? [])]
+                    .sort((a, b) => a - b)
+                    .find(n => parity.has(n));
+                parity.set(seed, parent === undefined ? (paritySeed?.get(seed) ?? 0) : (parity.get(parent)! === 0 ? 1 : 0));
+                const queue = [seed];
+                for (let qi = 0; qi < queue.length; qi++) {
+                    const h = queue[qi];
+                    const p = parity.get(h)!;
+                    for (const n of networkMap.get(h)?.keys() ?? []) {
+                        if (isInPhase(n)) {
+                            if (!parity.has(n)) { parity.set(n, p === 0 ? 1 : 0); queue.push(n); }
+                            else if (parity.get(n) === p) noteOdd(h, n);
+                        } else if (parity.has(n) && parity.get(n) === p) {
+                            noteOdd(h, n);
+                        }
+                    }
                 }
             }
-        }
+        };
+        // Duplex parity is deliberately independent of binder-only paths.
+        colorPhase(duplexOrder, h => !binderSet.has(h));
+        // Binders are coloured only after duplex parity is fixed.
+        colorPhase(binderOrder, h => binderSet.has(h));
 
         // Two seeded helices in the SAME component can demand incompatible parities, since their
         // relative parity is already forced by the path length between them. The first one wins
@@ -177,29 +193,37 @@ namespace toscad {
         };
         for (const e of edges) { touch(e.a, e, true); touch(e.b, e, false); }
 
-        const order = [...networkMap.keys()].sort((a, b) => a - b);
-
-        // Initialize with realistic global orientations by using BFS (as opposed to starting with 0º). 
-        // TODO: Square lattice has 4 neighbors, causing more ambiguity than honeycomb.
+        // Initialize and vote in two phases. The duplex slots are settled first
+        // and are never changed while binders are attached afterwards.
         const slot = new Map<number, number>();
         let seededAmbiguous = 0;
-
-        if (init) {
-            for (const h of order) {
-                const seed = init.get(h);
-                slot.set(h, typeof seed === 'number' ? dirs.indexOf(snap(seed)) : 0);
+        const compatiblePick = (h: number, placedOnly = false): { slot: number; hits: number } => {
+            const current = slot.get(h) ?? 0;
+            let best = current, bestScore = -1, hits = 0;
+            for (let r = 0; r < K; r++) {
+                let score = 0;
+                for (const { e, isA } of incident.get(h) ?? []) {
+                    const other = isA ? e.b : e.a;
+                    if (placedOnly && !slot.has(other)) continue;
+                    const idx = isA ? r * K + (slot.get(e.b) ?? 0) : (slot.get(e.a) ?? 0) * K + r;
+                    if (e.compat[idx]) { score += e.weight; hits++; }
+                }
+                if (score > bestScore || (score === bestScore && r === current)) { best = r; bestScore = score; }
             }
-        } else {
-            for (const seedHelix of order) {
+            return { slot: best, hits };
+        };
+        const seedPhase = (phase: number[], allow: (h: number) => boolean) => {
+            for (const seedHelix of phase) {
                 if (slot.has(seedHelix)) continue;
-                slot.set(seedHelix, 0);              // component gauge: only differences matter
+                const supplied = init?.get(seedHelix);
+                slot.set(seedHelix, typeof supplied === 'number' ? dirs.indexOf(snap(supplied)) : compatiblePick(seedHelix, true).slot);
                 const q = [seedHelix];
                 for (let qi = 0; qi < q.length; qi++) {
                     const h = q[qi];
                     const rh = slot.get(h)!;
                     for (const { e, isA } of incident.get(h) ?? []) {
                         const other = isA ? e.b : e.a;
-                        if (slot.has(other)) continue;
+                        if (!allow(other) || slot.has(other)) continue;
                         let pick = -1, hits = 0;
                         for (let r = 0; r < K; r++) {
                             if (isA ? e.compat[rh * K + r] : e.compat[r * K + rh]) {
@@ -207,27 +231,29 @@ namespace toscad {
                                 hits++;
                             }
                         }
-                        if (pick < 0) continue;      // unsatisfiable at rh; let another edge seed it
+                        if (pick < 0) continue;
                         if (hits > 1) seededAmbiguous++;
                         slot.set(other, pick);
                         q.push(other);
                     }
                 }
             }
-            for (const h of order) if (!slot.has(h)) slot.set(h, 0);   // isolated helices
-        }
+        };
+        seedPhase(duplexOrder, h => !binderSet.has(h));
+        seedPhase(binderOrder, h => binderSet.has(h));
         if (seededAmbiguous > 0) {
             console.log(`[voteOrientations] ${seededAmbiguous} seed step(s) had >1 compatible slot; took the lowest.`);
         }
 
-        // iterative majority vote
+        // Iterative majority vote, first for duplexes and then binders. The
+        // second phase sees duplex slots as fixed inputs.
         let sweeps = 0;
         let converged = false;
-
-        while (sweeps < maxSweeps) {
-            sweeps++;
-            let changed = false;
-            for (const h of order) {
+        const votePhase = (phase: number[]) => {
+            for (let phaseSweep = 0; phaseSweep < maxSweeps; phaseSweep++) {
+                sweeps++;
+                let changed = false;
+                for (const h of phase) {
                 const inc = incident.get(h);
                 if (!inc || !inc.length) continue;
                 const current = slot.get(h) ?? 0;
@@ -242,8 +268,13 @@ namespace toscad {
                 }
                 if (bestSlot !== current) { slot.set(h, bestSlot); changed = true; }
             }
-            if (!changed) { converged = true; break; }
-        }
+                if (!changed) return true;
+            }
+            return false;
+        };
+        const duplexConverged = votePhase(duplexOrder);
+        const binderConverged = votePhase(binderOrder);
+        converged = duplexConverged && binderConverged;
 
         // ── score & package results ──
         let satisfiedWeight = 0;
@@ -276,12 +307,14 @@ namespace toscad {
         lattice: string = 'honeycomb',
         vote = voteOrientations(networkMap, grid, lattice),
         pins: RelativePin[] = [],
-        anchors: Map<number, [number, number]> = new Map()
+        anchors: Map<number, [number, number]> = new Map(),
+        binderHelices: number[] = []
     ) {
         const lat = resolveLatticeKind(lattice);
         const dirs = latticeDirs(lat);
         const K = dirs.length;
         const { slot, parity, edges } = vote;
+        const binderSet = new Set(binderHelices);
 
         const satisfied = (e: OrientEdge) =>
             e.compat[(slot.get(e.a) ?? 0) * K + (slot.get(e.b) ?? 0)] === 1;
@@ -309,14 +342,29 @@ namespace toscad {
 
         const treeEdges: Array<[number, number]> = [];
         const cycleEdges: Array<[number, number]> = [];
+        const binderConstraintEdges: Array<[number, number]> = [];
         const usedViolatedEdges: Array<[number, number]> = [];
         const parityConflicts: Array<[number, number]> = [];
 
         // merging 2 groups (or clumps)... 
-        const tryMerge = (e: OrientEdge, forceStep?: { dCol: number; dRow: number }, forcePin = false) => {
+        const tryMerge = (
+            e: OrientEdge,
+            forceStep?: { dCol: number; dRow: number },
+            forcePin = false,
+            binderPhase = false
+        ) => {
             const { a, b } = e;
             const ra = find(a), rb = find(b);
             if (ra === rb) { cycleEdges.push([a, b]); return; }
+
+            const containsDuplex = (rootId: number) =>
+                (members.get(rootId) ?? []).some(h => !binderSet.has(h));
+            const aHasDuplex = containsDuplex(ra);
+            const bHasDuplex = containsDuplex(rb);
+            if (binderPhase && aHasDuplex && bHasDuplex) {
+                binderConstraintEdges.push([a, b]);
+                return false;
+            }
 
             // forceStep is how a pin injects a user-supplied offset instead of an angle-derived one.
             const step = forceStep ?? stepAB(a, b);
@@ -341,7 +389,9 @@ namespace toscad {
             }
 
             const listA = members.get(ra)!, listB = members.get(rb)!;
-            const moveB = listB.length <= listA.length;
+            const moveB = binderPhase && aHasDuplex !== bHasDuplex
+                ? aHasDuplex
+                : listB.length <= listA.length;
             const moveList = moveB ? listB : listA;
             const keepRoot = moveB ? ra : rb;
             const dropRoot = moveB ? rb : ra;
@@ -448,9 +498,15 @@ namespace toscad {
             return false;
         };
 
-        // Actual merging...
-        for (const e of ordered) if (touchesPin(e) && usable(e)) tryMerge(e);
-        for (const e of ordered) if (!touchesPin(e) && usable(e)) tryMerge(e);
+        const isDuplexEdge = (e: OrientEdge) => !binderSet.has(e.a) && !binderSet.has(e.b);
+
+        // Duplexes form the structural tree first. Binder edges are processed
+        // only after that tree is fixed, so they cannot choose or move a
+        // duplex placement.
+        for (const e of ordered) if (isDuplexEdge(e) && touchesPin(e) && usable(e)) tryMerge(e);
+        for (const e of ordered) if (isDuplexEdge(e) && !touchesPin(e) && usable(e)) tryMerge(e);
+        for (const e of ordered) if (!isDuplexEdge(e) && touchesPin(e) && usable(e)) tryMerge(e, undefined, false, true);
+        for (const e of ordered) if (!isDuplexEdge(e) && !touchesPin(e) && usable(e)) tryMerge(e, undefined, false, true);
 
         const packedHelices: Array<{ helix: number; near: number; at: [number, number] }> = [];
         for (let progress = true; progress; ) {
@@ -462,6 +518,10 @@ namespace toscad {
                 // Pick the neighbour sitting in the largest placed component.
                 let anchor = -1, anchorSize = 0;
                 for (const n of networkMap.get(h)?.keys() ?? []) {
+                    // A duplex that was not placed by the duplex pass must
+                    // not be packed through a binder edge: that would let a
+                    // binder join or translate structural components.
+                    if (!binderSet.has(h) && binderSet.has(n)) continue;
                     const size = members.get(find(n))?.length ?? 0;
                     if (find(n) !== rh && size > anchorSize) { anchor = n; anchorSize = size; }
                 }
@@ -623,6 +683,7 @@ namespace toscad {
             parityBrokenEdges,
             packedHelices,
             pinOverruledEdges,
+            binderConstraintEdges,
             slot,
             orientation: vote.orientation
         };
@@ -863,6 +924,7 @@ namespace toscad {
             axisDotThreshold?: number;   // default 0.9, only used when enforcing
             shadowThreshold?: number;    // default 0.3
             hashOpts?: { dotThreshold?: number; cylRadiusAng?: number; cylLengthAng?: number };
+            binderNtIds?: ReadonlySet<number>;
         } = {}
     ): {
         networkMap: Map<number, Map<number, number>>;
@@ -905,6 +967,10 @@ namespace toscad {
             const mark = grid.get(p[0].id);
             return mark && typeof mark.helixId === 'number' ? mark.helixId : -1;
         };
+        const isBinderHelix = (hid: number) => {
+            const nts = helices[hid] ?? [];
+            return nts.length > 0 && !!opts.binderNtIds && nts.every(nt => opts.binderNtIds!.has(nt.id));
+        };
 
         const paired = new Set<number>();
 
@@ -919,6 +985,10 @@ namespace toscad {
                 continue;
             }
             if (!helices[hA] || !helices[hB]) continue;
+            if (isBinderHelix(hA) !== isBinderHelix(hB)) {
+                console.log(`[axisMerge] REJECT (${hA},${hB}) — binder/duplex merge`);
+                continue;
+            }
 
             const axA = kmHelixAxis(grid, helices, hA);
             const axB = kmHelixAxis(grid, helices, hB);
@@ -1018,6 +1088,7 @@ namespace toscad {
             minCosine?: number;           // default 0 (off)
             requireConfirmation?: boolean; // default false: 'unknown' passes
             maxIterations?: number;       // default 200
+            binderNtIds?: ReadonlySet<number>;
         } = {}
     ): {
         networkMap: Map<number, Map<number, number>>;
@@ -1044,7 +1115,11 @@ namespace toscad {
             let m = Number.POSITIVE_INFINITY;
             for (const nt of helices[hid] ?? []) if (nt && nt.id < m) m = nt.id;
             return isFinite(m) ? m : -1;
-        }
+        };
+        const isBinderHelix = (hid: number) => {
+            const nts = helices[hid] ?? [];
+            return nts.length > 0 && !!opts.binderNtIds && nts.every(nt => opts.binderNtIds!.has(nt.id));
+        };
 
 
         while (mergedThisIteration && iteration < MAX_ITERATIONS) {
@@ -1053,8 +1128,11 @@ namespace toscad {
 
             // Rebuild the graph every iteration.
             const cc = getConnectionCounts(grid);
-            const vote = voteOrientations(networkMap, grid, lattice);
-            const kr = kruskals(networkMap, grid, lattice, vote);
+            const currentBinderHelices = [...networkMap.keys()]
+                .filter(isBinderHelix)
+                .sort((a, b) => a - b);
+            const vote = voteOrientations(networkMap, grid, lattice, undefined, 50, undefined, currentBinderHelices);
+            const kr = kruskals(networkMap, grid, lattice, vote, [], new Map(), currentBinderHelices);
 
             // Per-edge trust straight off the converged vote.
             const pairKey = (a: number, b: number) => `${Math.min(a, b)}|${Math.max(a, b)}`;
@@ -1100,6 +1178,10 @@ namespace toscad {
             // Filter to check which ones are allowed to merge.
             for (const { a, b, cell } of nominated) {
                 if (a === b || !helices[a] || !helices[b]) continue;
+                if (isBinderHelix(a) !== isBinderHelix(b)) {
+                    console.log(`[anglecomb5] iter=${iteration} reject (${a},${b}) — binder/duplex merge`);
+                    continue;
+                }
 
                 // Gate 1: The pair must already be disjoint or become disjoint when
                 // combineHelices shifts the higher-id helix by exactly +1 or -1.
@@ -1195,6 +1277,10 @@ namespace toscad {
                 const currB = grid.get(c.minNtB)?.helixId ?? -1;
                 if (currA < 0 || currB < 0 || currA === currB) continue;
                 if (!helices[currA] || !helices[currB]) continue;
+                if (isBinderHelix(currA) !== isBinderHelix(currB)) {
+                    console.log(`[anglecomb5] iter=${iteration} reject (${currA},${currB}) — binder/duplex merge`);
+                    continue;
+                }
 
                 // Recheck after earlier merges have spliced helix ids. If the pair
                 // now needs more than one slot, do not let combineHelices fall back
