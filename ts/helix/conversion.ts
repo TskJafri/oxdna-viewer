@@ -534,6 +534,45 @@ namespace toscad {
         };
         fixMispairedColumns();
 
+        // Detect false/incorrect/non-existent basepairs!! 
+        const warnStrandBreakOrphans = () => {
+            const idToNt = new Map<number, Nucleotide>();
+            for (const s of helices) if (s) for (const nt of s) idToNt.set(nt.id, nt);
+
+            // Per-helix offset -> ntId per direction, for opposite-strand lookups.
+            const views = new Map<number, { forward: Map<number, number>; backward: Map<number, number> }>();
+            for (const [id, m] of grid) {
+                let v = views.get(m.helixId);
+                if (!v) views.set(m.helixId, v = { forward: new Map(), backward: new Map() });
+                v[m.direction].set(m.offset, id);
+            }
+
+            const orphans = new Set<number>();
+            // Each 5'->3' adjacency is visited exactly once (via n3).
+            for (const [id, m] of grid) {
+                const nt = idToNt.get(id);
+                const n3 = nt && (nt.n3 as Nucleotide | null);
+                if (!n3) continue;
+                const mb = grid.get(n3.id);
+                if (!mb || mb.helixId !== m.helixId) continue;      // crossover to another helix -> not a break
+                if (Math.abs(m.offset - mb.offset) === 1) continue; // properly adjacent -> no gap
+                const v = views.get(m.helixId)!;
+                const cur = m.direction;                            // strand's own grid direction at the break
+                const opp: 'forward' | 'backward' = cur === 'forward' ? 'backward' : 'forward';
+                const lo = Math.min(m.offset, mb.offset), hi = Math.max(m.offset, mb.offset);
+                for (let o = lo + 1; o < hi; o++) {
+                    if (v[cur].has(o)) continue;                    // some strand occupies our direction here -> not orphaned
+                    const oid = v[opp].get(o);
+                    if (oid !== undefined) orphans.add(oid);        // opposite nt lost its partner across the gap
+                }
+            }
+
+            if (orphans.size) {
+                console.warn(`[setGrid] The following nucleotides might not have appropriate basepairs (cross-strand partner missing across a strand break): [${[...orphans].sort((a, b) => a - b).join(', ')}]`);
+            }
+        };
+        warnStrandBreakOrphans();
+
         // Note: The alignment of the merged helices is left upto alignMergedGroups()
         return { grid };
     };

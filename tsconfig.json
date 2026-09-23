@@ -46,7 +46,6 @@
     "ts/helix/conversion.ts",
     "./ts/helix/kruskals.ts",
     "./ts/helix/gridpos.ts",
-    "./ts/helix/helix_cluster.ts",
     "./ts/helix/trials.ts",
     "./ts/model/aminoAcid.ts",
     "./ts/model/basicElement.ts",
