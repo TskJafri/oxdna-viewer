@@ -272,10 +272,33 @@ namespace toscad {
 
             let offset = 0; // Local offset for the main backbone
 
+            const lowestIdNt = helix.reduce((a, b) => (a.id <= b.id ? a : b));
+            const seedFwdDir: Direction = isInHelix(helixSet, lowestIdNt.n3 as Nucleotide) ? 'n3' : 'n5';
+            const seedBwdDir: Direction = seedFwdDir === 'n3' ? 'n5' : 'n3';
+            const seedAnchor: Nucleotide | null = getPair(helixSet, lowestIdNt)
+                ? lowestIdNt
+                : (findNextPaired({ fwd: lowestIdNt, bwd: null }, { fwd: seedFwdDir, bwd: seedBwdDir }, helixSet)?.anchor ?? null);
+            let isCircularHelix = false;
+            if (seedAnchor) {
+                // Anchor pre-walk: hop paired anchors from the seed; circular iff we return to it.
+                let cur: Nucleotide | null = seedAnchor;
+                let curPair = getPair(helixSet, seedAnchor);
+                const seenAnchors = new Set<number>([seedAnchor.id]);
+                for (let i = 0; i < helix.length + 2 && cur; i++) {
+                    const step = findNextPaired({ fwd: cur, bwd: curPair }, { fwd: seedFwdDir, bwd: seedBwdDir }, helixSet);
+                    if (!step) break;
+                    if (step.anchor.id === seedAnchor.id) { isCircularHelix = true; break; }
+                    if (seenAnchors.has(step.anchor.id)) break;
+                    seenAnchors.add(step.anchor.id);
+                    cur = step.anchor;
+                    curPair = getPair(helixSet, step.anchor);
+                }
+            }
+
             // main body of setting the grid. Only runs across non-merged helices.
             if (!isMergedHelix && endpoints) {
-                // start "forward" from any endpoint. They will be oriented later. Our main priority is to generate a grid without overlap and sufficient details.
-                const helixFwd = endpoints.end1;
+                // start "forward" from an endpoint (linear) or the deterministic lowest-id seed (circular).
+                const helixFwd = isCircularHelix ? lowestIdNt : endpoints.end1;
                 const helixFwdDir = (isInHelix(helixSet, helixFwd.n3 as Nucleotide) ? 'n3' : 'n5');
                 const helixBwdDir = (helixFwdDir === 'n3' ? 'n5' : 'n3');
                 const revFwdDir = helixFwdDir === 'n3' ? 'n5' : 'n3';
@@ -287,34 +310,42 @@ namespace toscad {
                 // Find Head
                 let firstAnchor: Nucleotide | null = null;
                 let firstAnchorPair: Nucleotide | null = null;
-                // if it has a pair, set it as a head otherwise find a new anchorpoint.
-                // findNextPaired finds an anchorpoint which does have a valid pair within the helix (to anchor the other direction at some offset)
-                if (getPair(helixSet, helixFwd)) {
-                    firstAnchor = helixFwd;
-                } else {
-                    const result = findNextPaired({ fwd: helixFwd, bwd: null }, { fwd: helixFwdDir, bwd: helixBwdDir }, helixSet);
-                    if (result) firstAnchor = result.anchor;
-                }
 
-                if (firstAnchor) {
-                    // by definition anchor's pair exists.
-                    firstAnchorPair = getPair(helixSet, firstAnchor);
-                    const headFwd = tracePath(firstAnchor, revFwdDir, helixSet);
-                    const headBwd = tracePath(firstAnchorPair!, revBwdDir, helixSet);
-                    const fwdHeadLen = headFwd.length - 1;
-                    const bwdHeadLen = headBwd.length - 1;
-                    const startOffset = Math.max(fwdHeadLen, bwdHeadLen);
-
-                    // remember we won't mark the anchor and it's pair, those will be marked to the grid later.
-                    [...headFwd].reverse().forEach((n, i) => {
-                        if (i < headFwd.length - 1) mark(n, helixId, (startOffset - fwdHeadLen) + i, walkLabel);
-                    });
-                    [...headBwd].reverse().forEach((n, i) => {
-                        if (i < headBwd.length - 1) mark(n, helixId, (startOffset - bwdHeadLen) + i, pairLabel);
-                    });
-                    offset = startOffset;
+                if (isCircularHelix) {
+                    // Circular: start at the deterministic seed anchor with offset 0 and lowest ID
+                    firstAnchor = seedAnchor;
+                    firstAnchorPair = firstAnchor ? getPair(helixSet, firstAnchor) : null;
+                    offset = 0;
                 } else {
-                    firstAnchor = helixFwd;
+                    // if it has a valid pair, set it as a head otherwise find a new anchorpoint.
+                    // findNextPaired finds an anchorpoint which does have a valid pair within the helix (to anchor the other direction at some offset)
+                    if (getPair(helixSet, helixFwd)) {
+                        firstAnchor = helixFwd;
+                    } else {
+                        const result = findNextPaired({ fwd: helixFwd, bwd: null }, { fwd: helixFwdDir, bwd: helixBwdDir }, helixSet);
+                        if (result) firstAnchor = result.anchor;
+                    }
+
+                    if (firstAnchor) {
+                        // by definition anchor's pair exists.
+                        firstAnchorPair = getPair(helixSet, firstAnchor);
+                        const headFwd = tracePath(firstAnchor, revFwdDir, helixSet);
+                        const headBwd = tracePath(firstAnchorPair!, revBwdDir, helixSet);
+                        const fwdHeadLen = headFwd.length - 1;
+                        const bwdHeadLen = headBwd.length - 1;
+                        const startOffset = Math.max(fwdHeadLen, bwdHeadLen);
+
+                        // remember we won't mark the anchor and it's pair, those will be marked to the grid later.
+                        [...headFwd].reverse().forEach((n, i) => {
+                            if (i < headFwd.length - 1) mark(n, helixId, (startOffset - fwdHeadLen) + i, walkLabel);
+                        });
+                        [...headBwd].reverse().forEach((n, i) => {
+                            if (i < headBwd.length - 1) mark(n, helixId, (startOffset - bwdHeadLen) + i, pairLabel);
+                        });
+                        offset = startOffset;
+                    } else {
+                        firstAnchor = helixFwd;
+                    }
                 }
                 // By here we have the correct offset for the first anchorpoint.
 
@@ -337,7 +368,16 @@ namespace toscad {
                     if (nextAnchor.id === currFwd.id) break;
                     // Circular helix guard: stop if we've already processed this anchor.
                     if (visitedAnchors.has(nextAnchor.id)) {
-                        console.log("CIRCULAR STRAND DETECTED")
+                        if (isCircularHelix && firstAnchor && nextAnchor.id === firstAnchor.id) {
+                            tracePath(currFwd, helixFwdDir, helixSet, -1, firstAnchor).slice(1)
+                                .forEach((n, i) => mark(n, helixId, offset + i + 1, walkLabel));
+                            if (currBwd && firstAnchorPair) {
+                                tracePath(currBwd, helixBwdDir, helixSet, -1, firstAnchorPair).slice(1)
+                                    .forEach((n, i) => mark(n, helixId, offset + i + 1, pairLabel));
+                            }
+                        } else {
+                            console.log("CIRCULAR STRAND DETECTED");
+                        }
                         break;
                     }
                     visitedAnchors.add(nextAnchor.id);
@@ -383,14 +423,15 @@ namespace toscad {
                     currBwd = nextPair;
                 }
 
-                // The Tail
-                if (currFwd) {
-                    const fwdTail = tracePath(currFwd, helixFwdDir, helixSet).slice(1);
-                    fwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, walkLabel));
-                }
-                if (currBwd) {
-                    const bwdTail = tracePath(currBwd, helixBwdDir, helixSet).slice(1);
-                    bwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, pairLabel));
+                if (!isCircularHelix) {
+                    if (currFwd) {
+                        const fwdTail = tracePath(currFwd, helixFwdDir, helixSet).slice(1);
+                        fwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, walkLabel));
+                    }
+                    if (currBwd) {
+                        const bwdTail = tracePath(currBwd, helixBwdDir, helixSet).slice(1);
+                        bwdTail.forEach((n, i) => mark(n, helixId, offset + i + 1, pairLabel));
+                    }
                 }
             }
 
