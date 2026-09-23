@@ -939,8 +939,8 @@ namespace toscad {
                 // Walk this strand 5' -> 3' via n3
                 let sequence = '';
                 const domains: Domain[] = [];
-                // in this case, isCircular is indicating circularity within strand, not the helix. 
-                let isCircular = false;
+                // Circularity is a topological invariant of the strand (n3/n5 linkage), untouched by findHelices/setGrid, so read it straight from the model.
+                const isCircular = strand.isCircular();
                 let openDomain: OpenDomain | null = null;
                 const visited = new Set<number>();
 
@@ -972,11 +972,7 @@ namespace toscad {
 
                 // Walker loop.
                 while (curr instanceof Nucleotide) {
-                    if (visited.has(curr.id)) {
-                        // Walked back to a node we already emitted => circular.
-                        isCircular = true;
-                        break;
-                    }
+                    if (visited.has(curr.id)) break;
                     visited.add(curr.id);
 
                     const mark = grid.get(curr.id);
@@ -1004,12 +1000,8 @@ namespace toscad {
                     }
 
                     // Advance via n3. Closed-loop strands have n3 of the 3' end
-                    // pointing back to end5, so detect that before stepping.
                     const nextRef: any = (curr as any).n3;
-                    if (nextRef instanceof Nucleotide && nextRef.id === start.id) {
-                        isCircular = true;
-                        break;
-                    }
+                    if (nextRef instanceof Nucleotide && nextRef.id === start.id) break;
                     curr = (nextRef instanceof Nucleotide) ? nextRef : null;
                 }
 
