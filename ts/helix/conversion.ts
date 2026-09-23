@@ -458,6 +458,82 @@ namespace toscad {
             }
         });
 
+        // Fix false base-pair columns; if 2 nucleotides are placed in conjugacy (same column), then their bases must be conjugates: A-T or C-G.
+        // If not, move the non-scaffold smallest strand to allow for a clear stretch.
+        type View = { forward: Map<number, number>; backward: Map<number, number>; min: number; max: number };
+        const fixMispairedColumns = () => {
+            const idToNt = new Map<number, Nucleotide>();
+            for (const s of helices) if (s) for (const nt of s) idToNt.set(nt.id, nt);
+            const scaffold = helix.getScaffoldStrand();
+
+            const conj = (aId: number, bId: number) => {
+                const a = idToNt.get(aId), b = idToNt.get(bId);
+                if (!a || !b) return false;
+                return a.getTypeNumber() !== b.getTypeNumber() && (a.getTypeNumber() + b.getTypeNumber()) % 3 === 0;
+            };
+
+            // Per-helix column view (offset -> ntId per direction) plus offset range.
+            const views = new Map<number, View>();
+            for (const [id, m] of grid) {
+                let v = views.get(m.helixId);
+                if (!v) views.set(m.helixId, v = { forward: new Map(), backward: new Map(), min: Infinity, max: -Infinity });
+                v[m.direction].set(m.offset, id);
+                v.min = Math.min(v.min, m.offset); v.max = Math.max(v.max, m.offset);
+            }
+
+            // A grid offset on `dir` is "movable" when it holds a non-scaffold nt that is NOT part of a real (conjugate) grid base pair with the opposite strand.
+            const movable = (v: View, dir: 'forward' | 'backward', opp: 'forward' | 'backward', o: number) => {
+                const id = v[dir].get(o);
+                if (id === undefined) return false;
+                const n = idToNt.get(id);
+                if (!n || n.strand === scaffold) return false;
+                const oid = v[opp].get(o);
+                return oid === undefined || !conj(id, oid); // paired-to-a-conjugate -> not movable
+            };
+
+            const run = (v: View, dir: 'forward' | 'backward', opp: 'forward' | 'backward', o: number) => { const r: number[] = []; let i = o; while (movable(v, dir, opp, i)) r.unshift(i--); i = o + 1; while (movable(v, dir, opp, i)) r.push(i++); return r; };
+            // Smallest shift s*k (k>=1) that slides run `r` to a fully clear stretch.
+            const slide = (v: View, dir: 'forward' | 'backward', opp: 'forward' | 'backward', r: number[], s: number) => {
+                const runSet = new Set(r);
+                const bound = (v.max - v.min) + r.length + 2;
+                for (let k = 1; k <= bound; k++) {
+                    const dests = r.map(o => o + s * k);
+                    if (dests.some(d => v[dir].has(d) && !runSet.has(d))) return null;   // blocked by a same-strand nt
+                    if (dests.every(d => !v[opp].has(d))) return k;                       // fully clear -> land here
+                }
+                return null;
+            };
+
+            for (const [hid, v] of views) for (const o of [...v.forward.keys()]) {
+                if (!v.backward.has(o)) continue;
+                const fId = v.forward.get(o), bId = v.backward.get(o);
+                if (conj(fId, bId)) continue; // real conjugate base pair (per the grid) -> leave alone
+                // Offender = movable (non-scaffold, non-conjugate) side; if both qualify,
+                // move the shorter run ("push less").
+                const fwd: 'forward' = 'forward', bwd: 'backward' = 'backward';
+                const fm = movable(v, fwd, bwd, o), bm = movable(v, bwd, fwd, o);
+                const dir: 'forward' | 'backward' | null = fm && bm ? (run(v, fwd, bwd, o).length <= run(v, bwd, fwd, o).length ? 'forward' : 'backward') : fm ? 'forward' : bm ? 'backward' : null;
+                if (!dir) { console.warn(`[setGrid] helix ${hid} offset ${o}: non-conjugate column with no movable non-scaffold overhang; left as-is.`); continue; }
+                const opp: 'forward' | 'backward' = dir === 'forward' ? 'backward' : 'forward';
+                const r = run(v, dir, opp, o); if (!r.length) continue;
+                // Slide toward whichever clear stretch is closest; nearer helix end breaks ties.
+                const kUp = slide(v, dir, opp, r, 1), kDown = slide(v, dir, opp, r, -1);
+                const center = (r[0] + r[r.length - 1]) / 2;
+                const preferDown = (center - v.min) <= (v.max - center);
+                const opts = [{ s: -1, k: kDown }, { s: 1, k: kUp }].filter(c => c.k !== null) as { s: number; k: number }[];
+                if (!opts.length) {
+                    const ntIds = r.map(off => v[dir].get(off));
+                    console.warn(`[setGrid] helix ${hid}: ${dir} overhang run at grid offset(s) [${r.join(', ')}] (nt id(s) [${ntIds.join(', ')}]) has no clear landing in either direction; left as-is.`);
+                    continue;
+                }
+                opts.sort((a, c) => a.k - c.k || (preferDown ? a.s - c.s : c.s - a.s));
+                const { s, k } = opts[0];
+                // Apply: move the run by s*k, ordered so we never clobber an unmoved member.
+                for (const off of (s > 0 ? [...r].reverse() : r)) { const id = v[dir].get(off); grid.get(id).offset = off + s * k; v[dir].delete(off); v[dir].set(off + s * k, id); }
+            }
+        };
+        fixMispairedColumns();
+
         // Note: The alignment of the merged helices is left upto alignMergedGroups()
         return { grid };
     };
