@@ -1130,13 +1130,16 @@ namespace toscad {
             wireframe?: boolean;
             // Hard relative-placement requirements, applied before any angle-derived edge. Also overrides posCorr5.
             pins?: RelativePin[];
+            // Internal: set on the recursive per-cluster passes to stop them from re-clustering.
+            _skipCluster?: boolean;
         }) {
         const {
             tolerance = 3,
             lattice = 'automatic',
             renumber = true,
             wireframe = false,
-            pins = []
+            pins = [],
+            _skipCluster = false
         } = options || {};
 
         let { helices, partials, usedSides, binderHelixIds } = helix.findHelices(inputElements, tolerance);
@@ -1211,6 +1214,96 @@ namespace toscad {
 
         validateGrid(grid);
 
-        return { helices, grid, helixPos, latticeType, networkMap, partials, usedSides };
+        const result = { helices, grid, helixPos, latticeType, networkMap, partials, usedSides };
+
+        // Per-cluster layout. Pass 1 (everything above) only exists to COMBINE helices so the
+        // clustering sees the final merged topology. We then cluster by axis orientation and lay
+        // each cluster out independently, scattering them left-to-right on the shared grid.
+        //
+        // Skipped for the recursive per-cluster passes (_skipCluster) and when pins are in play,
+        // since pins are hard placements that a scatter would violate.
+        if (_skipCluster || pins.length > 0) return result;
+
+        const clusters = helix.dbscan(helices);
+        if (clusters.length <= 1) return result;
+
+        // Visual spacer, in grid columns, between the right edge of one cluster and the left edge
+        // of the next. Per-cluster parity is fine, so no even/odd adjustment is made.
+        const CLUSTER_GAP = 4;
+
+        const combinedHelices: Nucleotide[][] = [];
+        const combinedGrid: GridMap = new Map();
+        const combinedNetwork: Map<number, Map<number, number>> = new Map();
+        const combinedPos = new Map<number, [number, number]>();
+        let globalMaxCol = -Infinity;
+
+        for (const cluster of clusters) {
+            if (!cluster.length) continue;
+
+            // Sub-input = every nucleotide belonging to this cluster's helices.
+            const subMap = new Map<number, Nucleotide>();
+            for (const hid of cluster) {
+                for (const nt of helices[hid] ?? []) subMap.set(nt.id, nt);
+            }
+            if (subMap.size === 0) continue;
+
+            // Re-run the full pipeline on just this cluster. Merges can only happen within the
+            // cluster because no other cluster's nucleotides are present. Reuse the resolved
+            // lattice so every cluster lands on the same kind of grid.
+            const sub = layoutPipeline(subMap, {
+                tolerance,
+                lattice: latticeType,
+                renumber: false,
+                wireframe,
+                _skipCluster: true
+            });
+
+            // Shift this cluster so its leftmost column sits CLUSTER_GAP past the global rightmost
+            // column placed so far. The first cluster keeps its native coordinates.
+            let minCol = Infinity;
+            for (const [, p] of sub.helixPos) if (p[0] < minCol) minCol = p[0];
+            let dCol = (isFinite(globalMaxCol) && isFinite(minCol))
+                ? (globalMaxCol + CLUSTER_GAP - minCol)
+                : 0;
+
+            // Honeycomb encodes a 2-coloring by (col + row) & 1, and kruskals seeds every cluster
+            // to the same convention. A column-only shift preserves that coloring iff the shift is
+            // even, so nudge the gap by one column when needed. (Square has no such constraint.)
+            if (latticeType === 'honeycomb' && (dCol & 1)) dCol += 1;
+
+            // Sub uses dense local helix ids 0..k-1; offset them into a unique global range.
+            const idBase = combinedHelices.length;
+            for (const h of sub.helices) combinedHelices.push(h);
+
+            for (const [ntId, mark] of sub.grid) {
+                combinedGrid.set(ntId, { ...mark, helixId: idBase + mark.helixId });
+            }
+            for (const [a, inner] of sub.networkMap) {
+                const remapped = new Map<number, number>();
+                for (const [b, ang] of inner) remapped.set(idBase + b, ang);
+                combinedNetwork.set(idBase + a, remapped);
+            }
+            for (const [lid, p] of sub.helixPos) {
+                const np: [number, number] = [p[0] + dCol, p[1]];
+                combinedPos.set(idBase + lid, np);
+                if (np[0] > globalMaxCol) globalMaxCol = np[0];
+            }
+        }
+
+        console.log(
+            `[layoutPipeline] scattered ${clusters.length} cluster(s) into ` +
+            `${combinedHelices.length} helices`
+        );
+        validateGrid(combinedGrid);
+
+        return {
+            helices: combinedHelices,
+            grid: combinedGrid,
+            helixPos: combinedPos,
+            latticeType,
+            networkMap: combinedNetwork,
+            partials,
+            usedSides
+        };
     }
 }
