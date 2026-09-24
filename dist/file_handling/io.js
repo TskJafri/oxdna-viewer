@@ -1,4 +1,3 @@
-"use strict";
 /// <reference path="../typescript_definitions/index.d.ts" />
 // Rename this to oxDNA_reader.ts???
 class FileChunker {

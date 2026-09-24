@@ -55,6 +55,7 @@ namespace scadnanoExport {
     function runPipeline(
         lattice: ScadnanoRequestedGridType,
         wireframe: boolean,
+        cluster: boolean,
         pins: toscad.RelativePin[] = []
     ): ScadnanoLayout {
         const nucleotides = nucleotideMap();
@@ -62,6 +63,7 @@ namespace scadnanoExport {
             tolerance: TOLERANCE,
             lattice,
             wireframe,
+            cluster,
             pins
         });
 
@@ -118,7 +120,8 @@ namespace scadnanoExport {
             name: input('scadnanoFilename')?.value.trim() || 'output',
             lattice: requestedGridType(input('scadnanoGrid')?.value),
             includeHelixPos: Boolean(input('scadnanoIncludeHPos')?.checked),
-            wireframe: Boolean(input('scadnanoWireframe')?.checked)
+            wireframe: Boolean(input('scadnanoWireframe')?.checked),
+            cluster: Boolean(input('scadnanoCluster')?.checked)
         };
     }
 
@@ -148,7 +151,7 @@ namespace scadnanoExport {
     // Ribbon dialog "Export". Without helix positions it writes the file directly;
     // with them it opens the grid pane on the pipeline's layout instead.
     export function handleDialogExport(): void {
-        const { name, lattice, includeHelixPos, wireframe } = dialogOptions();
+        const { name, lattice, includeHelixPos, wireframe, cluster } = dialogOptions();
         closeDialog();
 
         requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -156,7 +159,7 @@ namespace scadnanoExport {
             longCalculation(
                 () => {
                     try {
-                        result = runPipeline(lattice, wireframe);
+                        result = runPipeline(lattice, wireframe, cluster);
                         if (!includeHelixPos) writeScadnanoFile(name, result);
                     } catch (err) {
                         result = null;
@@ -181,9 +184,9 @@ namespace scadnanoExport {
             return;
         }
 
-        const { name, lattice, wireframe } = dialogOptions();
+        const { name, lattice, wireframe, cluster } = dialogOptions();
         try {
-            writeScadnanoFile(name, layout ?? runPipeline(lattice, wireframe), helixPos);
+            writeScadnanoFile(name, layout ?? runPipeline(lattice, wireframe, cluster), helixPos);
         } catch (err) {
             notify(`Scadnano export failed: ${err}`, 'alert');
         }

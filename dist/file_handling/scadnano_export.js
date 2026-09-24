@@ -1,4 +1,3 @@
-"use strict";
 /// <reference path="../typescript_definitions/index.d.ts" />
 var scadnanoExport;
 (function (scadnanoExport) {
@@ -19,12 +18,13 @@ var scadnanoExport;
         return out;
     }
     // The one call sign. Everything else in this file consumes its output.
-    function runPipeline(lattice, wireframe, pins = []) {
+    function runPipeline(lattice, wireframe, cluster, pins = []) {
         const nucleotides = nucleotideMap();
         layout = toscad.layoutPipeline(nucleotides, {
             tolerance: TOLERANCE,
             lattice,
             wireframe,
+            cluster,
             pins
         });
         const mapped = layout.helices.flat().length;
@@ -75,7 +75,8 @@ var scadnanoExport;
             name: input('scadnanoFilename')?.value.trim() || 'output',
             lattice: requestedGridType(input('scadnanoGrid')?.value),
             includeHelixPos: Boolean(input('scadnanoIncludeHPos')?.checked),
-            wireframe: Boolean(input('scadnanoWireframe')?.checked)
+            wireframe: Boolean(input('scadnanoWireframe')?.checked),
+            cluster: Boolean(input('scadnanoCluster')?.checked)
         };
     }
     function longCalculation(calc, done) {
@@ -103,13 +104,13 @@ var scadnanoExport;
     // Ribbon dialog "Export". Without helix positions it writes the file directly;
     // with them it opens the grid pane on the pipeline's layout instead.
     function handleDialogExport() {
-        const { name, lattice, includeHelixPos, wireframe } = dialogOptions();
+        const { name, lattice, includeHelixPos, wireframe, cluster } = dialogOptions();
         closeDialog();
         requestAnimationFrame(() => requestAnimationFrame(() => {
             let result = null;
             longCalculation(() => {
                 try {
-                    result = runPipeline(lattice, wireframe);
+                    result = runPipeline(lattice, wireframe, cluster);
                     if (!includeHelixPos)
                         writeScadnanoFile(name, result);
                 }
@@ -134,9 +135,9 @@ var scadnanoExport;
             notify('No edited helix positions available to export.', 'warning');
             return;
         }
-        const { name, lattice, wireframe } = dialogOptions();
+        const { name, lattice, wireframe, cluster } = dialogOptions();
         try {
-            writeScadnanoFile(name, layout ?? runPipeline(lattice, wireframe), helixPos);
+            writeScadnanoFile(name, layout ?? runPipeline(lattice, wireframe, cluster), helixPos);
         }
         catch (err) {
             notify(`Scadnano export failed: ${err}`, 'alert');

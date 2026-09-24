@@ -1,4 +1,3 @@
-"use strict";
 // class ANM {
 //     id: number
 //     system: System;

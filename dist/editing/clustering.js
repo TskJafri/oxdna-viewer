@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Clear clusters and reset the cluster counter
  */

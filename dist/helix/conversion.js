@@ -1,4 +1,3 @@
-"use strict";
 /// <reference path="../typescript_definitions/index.d.ts" />
 /// <reference path="../typescript_definitions/oxView.d.ts" />
 /// <reference path="../main.ts" />
@@ -1083,7 +1082,7 @@ var toscad;
     toscad.validateGrid = validateGrid;
     /* TODO: Remove the "preservedNtIds" logic in the pipeline. */
     function layoutPipeline(inputElements, options) {
-        const { tolerance = 3, lattice = 'automatic', renumber = true, wireframe = false, pins = [], _skipCluster = false } = options || {};
+        const { tolerance = 3, lattice = 'automatic', renumber = true, wireframe = false, pins = [], cluster = true, _skipCluster = false } = options || {};
         let { helices, partials, usedSides, binderHelixIds } = helix.findHelices(inputElements, tolerance);
         // Helix array indices are mutable, so we use nucleotide IDs.
         const binderNtIds = new Set();
@@ -1144,9 +1143,10 @@ var toscad;
         // clustering sees the final merged topology. We then cluster by axis orientation and lay
         // each cluster out independently, scattering them left-to-right on the shared grid.
         //
-        // Skipped for the recursive per-cluster passes (_skipCluster) and when pins are in play,
-        // since pins are hard placements that a scatter would violate.
-        if (_skipCluster || pins.length > 0)
+        // Skipped when clustering is disabled, for the recursive per-cluster passes
+        // (_skipCluster), and when pins are in play, since pins are hard placements that a
+        // scatter would violate.
+        if (!cluster || _skipCluster || pins.length > 0)
             return result;
         const clusters = helix.dbscan(helices);
         if (clusters.length <= 1)

@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Defines a collection of linearly connected BasicElements.
  * Is extended by NuclicAcidStrand and Peptide.

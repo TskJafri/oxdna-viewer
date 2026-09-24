@@ -1,4 +1,3 @@
-"use strict";
 function createId() {
     if (typeof crypto !== "undefined" &&
         typeof crypto.randomUUID === "function") {

@@ -1130,6 +1130,9 @@ namespace toscad {
             wireframe?: boolean;
             // Hard relative-placement requirements, applied before any angle-derived edge. Also overrides posCorr5.
             pins?: RelativePin[];
+            // Whether to run the per-cluster scatter layer at all. When false, the clustering
+            // layer never executes and the single-pass layout is returned as-is.
+            cluster?: boolean;
             // Internal: set on the recursive per-cluster passes to stop them from re-clustering.
             _skipCluster?: boolean;
         }) {
@@ -1139,6 +1142,7 @@ namespace toscad {
             renumber = true,
             wireframe = false,
             pins = [],
+            cluster = true,
             _skipCluster = false
         } = options || {};
 
@@ -1220,9 +1224,10 @@ namespace toscad {
         // clustering sees the final merged topology. We then cluster by axis orientation and lay
         // each cluster out independently, scattering them left-to-right on the shared grid.
         //
-        // Skipped for the recursive per-cluster passes (_skipCluster) and when pins are in play,
-        // since pins are hard placements that a scatter would violate.
-        if (_skipCluster || pins.length > 0) return result;
+        // Skipped when clustering is disabled, for the recursive per-cluster passes
+        // (_skipCluster), and when pins are in play, since pins are hard placements that a
+        // scatter would violate.
+        if (!cluster || _skipCluster || pins.length > 0) return result;
 
         const clusters = helix.dbscan(helices);
         if (clusters.length <= 1) return result;

@@ -1,4 +1,3 @@
-"use strict";
 /// <reference path="../typescript_definitions/index.d.ts" />
 /// <reference path="../main.ts" />
 class SelectionListHandler {
